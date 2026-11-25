@@ -317,23 +317,33 @@ impl ReplicaConnector for StaticReplicaConnector {
     fn connect(&self, address: &str) -> Arc<dyn ReplicaApi> {
         match self.replicas_by_address.get(address) {
             Some(replica) => Arc::clone(replica),
-            None => Arc::new(UnreachableReplica {
-                address: address.to_owned(),
-            }),
+            None => Arc::new(UnreachableReplica::new(format!(
+                "no replica is reachable at {address}"
+            ))),
         }
     }
 }
 
-/// Stands in for a replica nobody listens for: every request fails as
+/// Stands in for a replica that cannot be reached, for example one that is
+/// no longer in the registry: every request fails as
 /// [`ReplicaError::Unavailable`].
-struct UnreachableReplica {
-    address: String,
+#[derive(Clone, Debug)]
+pub struct UnreachableReplica {
+    reason: String,
 }
 
 impl UnreachableReplica {
+    /// Creates a handle whose every request fails with `reason`.
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
     fn unavailable<Response>(&self) -> Result<Response, ReplicaError> {
         Err(ReplicaError::Unavailable {
-            reason: format!("no replica is reachable at {}", self.address),
+            reason: self.reason.clone(),
         })
     }
 }
@@ -394,15 +404,13 @@ mod tests {
         let mut connector = StaticReplicaConnector::new();
         connector.register(
             "replica-a:7000",
-            Arc::new(UnreachableReplica {
-                address: "the registered handle".to_owned(),
-            }),
+            Arc::new(UnreachableReplica::new("the registered handle answered")),
         );
         let status = connector.connect("replica-a:7000").status().await;
         assert_eq!(
             status,
             Err(ReplicaError::Unavailable {
-                reason: "no replica is reachable at the registered handle".to_owned()
+                reason: "the registered handle answered".to_owned()
             })
         );
     }
