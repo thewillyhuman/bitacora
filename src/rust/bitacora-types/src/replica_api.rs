@@ -215,6 +215,27 @@ pub struct SealResponse {
     pub local_end: Option<SequenceNumber>,
 }
 
+/// Asks a replica to make its copy of a sealed segment complete by pulling
+/// what it lacks from another replica (design, section 10, "Repair").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepairRequest {
+    /// The sealed segment to copy. A replica without a copy creates one.
+    pub segment: SegmentDescriptor,
+    /// The segment's final sequence number, as recorded in the metadata
+    /// store.
+    pub sealed_end: SequenceNumber,
+    /// The registered address of a replica that holds a good copy.
+    pub source_address: String,
+}
+
+/// The replica's answer to a [`RepairRequest`], sent once its copy is
+/// complete, flushed and sealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepairResponse {
+    /// The last sequence number in the repaired copy: the sealed end.
+    pub local_end: SequenceNumber,
+}
+
 /// What a replica knows about one of its segment copies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegmentStatus {
@@ -265,6 +286,10 @@ pub trait ReplicaApi: Send + Sync {
 
     /// Records the sealed end and discards anything above it.
     async fn seal(&self, request: SealRequest) -> Result<SealResponse, ReplicaError>;
+
+    /// Completes the replica's copy of a sealed segment from another
+    /// replica, verifying every batch on the way.
+    async fn repair_segment(&self, request: RepairRequest) -> Result<RepairResponse, ReplicaError>;
 
     /// Deletes the replica's copy of a segment. Deleting an absent copy
     /// succeeds.
@@ -363,6 +388,13 @@ impl ReplicaApi for UnreachableReplica {
     }
 
     async fn seal(&self, _request: SealRequest) -> Result<SealResponse, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn repair_segment(
+        &self,
+        _request: RepairRequest,
+    ) -> Result<RepairResponse, ReplicaError> {
         self.unavailable()
     }
 

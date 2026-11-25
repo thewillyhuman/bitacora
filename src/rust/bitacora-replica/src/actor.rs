@@ -9,14 +9,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceResponse, ReadRequest, ReadResponse, ReplicaError,
-    SealResponse, SegmentStatus,
+    AppendRequest, AppendResponse, FenceResponse, ReadRequest, ReadResponse, RepairRequest,
+    RepairResponse, ReplicaApi, ReplicaError, SealResponse, SegmentStatus,
 };
 use bitacora_types::{Epoch, SegmentAddress, SequenceNumber};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
-use crate::copy::{Admission, SegmentCopy};
+use crate::copy::{Admission, RepairPace, SegmentCopy};
 
 /// How many commands may queue for one segment before senders wait.
 const COMMAND_QUEUE_LENGTH: usize = 64;
@@ -44,6 +44,13 @@ enum Command {
     Seal {
         sealed_end: SequenceNumber,
         reply: Reply<SealResponse>,
+    },
+    Repair {
+        request: RepairRequest,
+        source: Arc<dyn ReplicaApi>,
+        admission: Admission,
+        pace: RepairPace,
+        reply: Reply<RepairResponse>,
     },
     Verify {
         reply: Reply<()>,
@@ -133,6 +140,23 @@ impl SegmentHandle {
         self.ask(|reply| Command::Seal { sealed_end, reply }).await
     }
 
+    pub(crate) async fn repair(
+        &self,
+        request: RepairRequest,
+        source: Arc<dyn ReplicaApi>,
+        admission: Admission,
+        pace: RepairPace,
+    ) -> Result<RepairResponse, ReplicaError> {
+        self.ask(|reply| Command::Repair {
+            request,
+            source,
+            admission,
+            pace,
+            reply,
+        })
+        .await
+    }
+
     pub(crate) async fn verify(&self) -> Result<(), ReplicaError> {
         self.ask(|reply| Command::Verify { reply }).await
     }
@@ -208,6 +232,18 @@ async fn run(
             Command::Read { request, reply } => drop(reply.send(copy.read(&request).await)),
             Command::Fence { epoch, reply } => drop(reply.send(copy.fence(epoch).await)),
             Command::Seal { sealed_end, reply } => drop(reply.send(copy.seal(sealed_end).await)),
+            Command::Repair {
+                request,
+                source,
+                admission,
+                pace,
+                reply,
+            } => drop(
+                reply.send(
+                    copy.repair(&request, source.as_ref(), admission, pace)
+                        .await,
+                ),
+            ),
             Command::Verify { reply } => {
                 copy.verify().await;
                 drop(reply.send(Ok(())));

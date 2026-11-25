@@ -6,12 +6,14 @@
 //! (see `actor`), so every method runs to completion before the next starts.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bitacora_segment::format::{Batch, SegmentHeader, decode_frames};
 use bitacora_segment::{Disk, SegmentError, SegmentFile, SegmentState};
+use bitacora_types::replica_api::SegmentDescriptor;
 use bitacora_types::replica_api::{
     AppendRequest, AppendResponse, FenceResponse, ReadLimit, ReadRequest, ReadResponse,
-    ReplicaError, SealResponse, SegmentStatus,
+    RepairRequest, RepairResponse, ReplicaApi, ReplicaError, SealResponse, SegmentStatus,
 };
 use bitacora_types::{Epoch, SegmentAddress, SequenceNumber};
 use bytes::Bytes;
@@ -33,6 +35,29 @@ pub(crate) struct Admission {
     pub may_create_segments: bool,
     /// How full the disk is, to report when creation is refused.
     pub used_percent: u8,
+}
+
+/// How fast a repair may pull a segment from its source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RepairPace {
+    /// The target size of one read from the source.
+    pub chunk_bytes: usize,
+    /// How many bytes per second the repair may copy. Zero means no limit.
+    pub bytes_per_second: u64,
+    /// How long one read from the source may take.
+    pub request_timeout: Duration,
+}
+
+impl RepairPace {
+    /// How long to pause after copying `copied_bytes` to stay within the
+    /// rate limit.
+    fn pause_after(self, copied_bytes: usize) -> Duration {
+        if self.bytes_per_second == 0 {
+            return Duration::ZERO;
+        }
+        let copied_bytes = u64::try_from(copied_bytes).unwrap_or(u64::MAX);
+        Duration::from_micros(copied_bytes.saturating_mul(1_000_000) / self.bytes_per_second)
+    }
 }
 
 /// One replica's copy of one segment.
@@ -180,7 +205,8 @@ impl SegmentCopy {
                     local_end,
                 });
             }
-            self.store(request, new_batches, admission).await?;
+            self.store_batches(request.segment, new_batches, admission)
+                .await?;
         }
 
         self.known_durable = self.known_durable.max(request.durable_sequence);
@@ -307,6 +333,118 @@ impl SegmentCopy {
         })
     }
 
+    /// Makes the copy a complete, sealed copy of the segment by pulling what
+    /// it lacks from `source`, in chunks of about `chunk_bytes` (design,
+    /// section 10, "Repair"). Every batch is verified before it is stored.
+    ///
+    /// A copy that is damaged, sealed elsewhere, longer than the sealed end
+    /// or written for another segment header cannot be completed; it is
+    /// thrown away and copied afresh.
+    pub(crate) async fn repair(
+        &mut self,
+        request: &RepairRequest,
+        source: &dyn ReplicaApi,
+        admission: Admission,
+        pace: RepairPace,
+    ) -> Result<RepairResponse, ReplicaError> {
+        if !self.can_be_completed_to(request) {
+            self.discard().await?;
+        }
+        let empty_end = request.segment.first_sequence.preceding();
+        while self.local_end_or(empty_end) < request.sealed_end {
+            let local_end = self.local_end_or(empty_end);
+            let read_chunk = source.read(ReadRequest {
+                segment: self.address,
+                from_sequence: local_end.next(),
+                max_bytes: pace.chunk_bytes,
+                wait_for_records: None,
+                limit: ReadLimit::DurableSequence,
+            });
+            let read = tokio::time::timeout(pace.request_timeout, read_chunk)
+                .await
+                .unwrap_or_else(|_elapsed| {
+                    Err(ReplicaError::Unavailable {
+                        reason: "the source did not answer in time".to_owned(),
+                    })
+                })?;
+            let batches = decode_frames(self.address, &read.batch_frames).map_err(|invalid| {
+                ReplicaError::Unavailable {
+                    reason: format!("the source sent invalid frames: {invalid}"),
+                }
+            })?;
+            let new_batches = Self::batches_after(&batches, local_end)?;
+            let continues_the_copy = new_batches
+                .first()
+                .is_some_and(|batch| batch.first_sequence() == local_end.next());
+            let stays_within_the_seal = new_batches
+                .last()
+                .is_some_and(|batch| batch.last_sequence() <= request.sealed_end);
+            if !continues_the_copy || !stays_within_the_seal {
+                return Err(ReplicaError::Unavailable {
+                    reason: format!(
+                        "the source has no usable records after {local_end} for a segment sealed at {}",
+                        request.sealed_end
+                    ),
+                });
+            }
+            self.store_batches(request.segment, new_batches, admission)
+                .await?;
+            // Hold back so that repair cannot starve appends of the disk
+            // and the network (design, section 10).
+            tokio::time::sleep(pace.pause_after(read.batch_frames.len())).await;
+        }
+        self.store_state(SegmentState {
+            fenced_epoch: self.state.fenced_epoch.max(request.segment.epoch),
+            sealed_end: Some(request.sealed_end),
+        })
+        .await?;
+        if let Some(file) = &mut self.file
+            && let Err(segment_error) = file.release_unused_space().await
+        {
+            return Err(self.damaged_by(&segment_error));
+        }
+        Ok(RepairResponse {
+            local_end: self.local_end_or(empty_end),
+        })
+    }
+
+    /// Whether the copy, as it is, can be extended into a complete copy of
+    /// the sealed segment `request` describes.
+    fn can_be_completed_to(&self, request: &RepairRequest) -> bool {
+        let is_seal_compatible = self
+            .state
+            .sealed_end
+            .is_none_or(|sealed_end| sealed_end == request.sealed_end);
+        let is_file_compatible = self.file.as_ref().is_none_or(|file| {
+            file.header().epoch == request.segment.epoch
+                && file.header().first_sequence == request.segment.first_sequence
+                && file.local_end() <= request.sealed_end
+        });
+        self.damage.is_none() && is_seal_compatible && is_file_compatible
+    }
+
+    /// Throws away everything stored for the segment, leaving the copy as
+    /// if the replica had never seen it.
+    async fn discard(&mut self) -> Result<(), ReplicaError> {
+        self.file = None;
+        for path in [
+            segment_file_path(self.address),
+            segment_state_path(self.address),
+        ] {
+            self.disk
+                .remove_file(&path)
+                .await
+                .map_err(|io_error| ReplicaError::Storage {
+                    reason: format!("cannot remove {path}: {io_error}"),
+                })?;
+        }
+        self.state = SegmentState::default();
+        self.has_stored_state = false;
+        self.known_durable = SequenceNumber::ZERO;
+        self.damage = None;
+        Ok(())
+    }
+
     /// Rereads the whole copy and marks it damaged if anything fails its
     /// checksum, as the background scrubber does.
     pub(crate) async fn verify(&mut self) {
@@ -332,19 +470,7 @@ impl SegmentCopy {
 
     /// Removes everything the replica stores for this segment.
     pub(crate) async fn delete(mut self) -> Result<(), ReplicaError> {
-        self.file = None;
-        for path in [
-            segment_file_path(self.address),
-            segment_state_path(self.address),
-        ] {
-            self.disk
-                .remove_file(&path)
-                .await
-                .map_err(|io_error| ReplicaError::Storage {
-                    reason: format!("cannot remove {path}: {io_error}"),
-                })?;
-        }
-        Ok(())
+        self.discard().await
     }
 
     /// The reason the disk refused a write or a flush, if it ever did.
@@ -385,9 +511,9 @@ impl SegmentCopy {
     }
 
     /// Writes and flushes `new_batches`, creating the data file if needed.
-    async fn store(
+    async fn store_batches(
         &mut self,
-        request: &AppendRequest,
+        segment: SegmentDescriptor,
         new_batches: &[Batch],
         admission: Admission,
     ) -> Result<(), ReplicaError> {
@@ -399,8 +525,8 @@ impl SegmentCopy {
             }
             let header = SegmentHeader {
                 address: self.address,
-                epoch: request.segment.epoch,
-                first_sequence: request.segment.first_sequence,
+                epoch: segment.epoch,
+                first_sequence: segment.first_sequence,
             };
             let created = SegmentFile::create(
                 self.disk.as_ref(),
@@ -758,6 +884,29 @@ mod tests {
                 && !status.is_damaged
                 && status.local_end == Some(SequenceNumber::new(FIRST_SEQUENCE - 1)),
             "failed: {failed:?}, status: {status:?}"
+        );
+    }
+
+    #[test]
+    fn unlimited_repair_never_pauses() {
+        let unlimited = RepairPace {
+            chunk_bytes: 1024,
+            bytes_per_second: 0,
+            request_timeout: Duration::from_secs(1),
+        };
+        assert_eq!(unlimited.pause_after(1 << 30), Duration::ZERO);
+    }
+
+    #[test]
+    fn limited_repair_pauses_in_proportion_to_what_it_copied() {
+        let one_megabyte_per_second = RepairPace {
+            chunk_bytes: 1024,
+            bytes_per_second: 1_000_000,
+            request_timeout: Duration::from_secs(1),
+        };
+        assert_eq!(
+            one_megabyte_per_second.pause_after(250_000),
+            Duration::from_millis(250)
         );
     }
 

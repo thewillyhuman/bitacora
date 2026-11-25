@@ -1,7 +1,8 @@
 //! Storage nodes and the cluster they form.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use bitacora_meta::{
     MemoryKeyValueStore, MetaError, MetadataStore, RECORD_SCHEMA_VERSION, ReplicaRecord,
@@ -10,12 +11,47 @@ use bitacora_replica::{Replica, ReplicaSettings};
 use bitacora_segment::format::{Batch, decode_frames};
 use bitacora_segment::{Disk, MemoryDisk};
 use bitacora_types::replica_api::{
-    ReadLimit, ReadRequest, ReplicaApi, ReplicaConnector, StaticReplicaConnector,
+    ReadLimit, ReadRequest, ReplicaApi, ReplicaConnector, UnreachableReplica,
 };
 use bitacora_types::{Clock, ReplicaId, SegmentAddress, SequenceNumber};
 
 use crate::clock::VirtualClock;
 use crate::link::{Link, LinkFault};
+
+/// Reaches the cluster's nodes through their links.
+///
+/// The replicas use it too, to repair copies from each other, so it has to
+/// exist before the first node does and learn of nodes as they start.
+#[derive(Clone, Default)]
+struct ClusterConnector {
+    links_by_address: Arc<Mutex<BTreeMap<String, Arc<Link>>>>,
+}
+
+impl ClusterConnector {
+    fn register(&self, address: String, link: Arc<Link>) {
+        self.links_by_address
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(address, link);
+    }
+}
+
+impl ReplicaConnector for ClusterConnector {
+    fn connect(&self, address: &str) -> Arc<dyn ReplicaApi> {
+        let link = self
+            .links_by_address
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(address)
+            .cloned();
+        match link {
+            Some(link) => link,
+            None => Arc::new(UnreachableReplica::new(format!(
+                "no node is reachable at {address}"
+            ))),
+        }
+    }
+}
 
 /// One storage node: a replica process, the disk it lives on, and the
 /// network path to it.
@@ -26,6 +62,7 @@ pub struct Node {
     disk: MemoryDisk,
     link: Arc<Link>,
     settings: ReplicaSettings,
+    connector: ClusterConnector,
     has_failed_write: Arc<AtomicBool>,
 }
 
@@ -34,21 +71,27 @@ impl Node {
         node_number: usize,
         failure_domains: Vec<String>,
         settings: ReplicaSettings,
+        connector: ClusterConnector,
     ) -> Self {
         let replica_id =
             ReplicaId::new(format!("replica-{node_number}")).expect("valid identifier");
         let disk = MemoryDisk::new();
         let has_failed_write = Arc::new(AtomicBool::new(false));
-        let replica = open_replica(&disk, &replica_id, settings, &has_failed_write).await;
-        Self {
+        let replica =
+            open_replica(&disk, &replica_id, settings, &connector, &has_failed_write).await;
+        let node = Self {
             address: format!("{replica_id}:7000"),
             replica_id,
             failure_domains,
             disk,
             link: Arc::new(Link::new(replica)),
             settings,
+            connector,
             has_failed_write,
-        }
+        };
+        node.connector
+            .register(node.address.clone(), Arc::clone(&node.link));
+        node
     }
 
     /// The identity of the node's data directory.
@@ -132,6 +175,7 @@ impl Node {
             &self.disk,
             &self.replica_id,
             self.settings,
+            &self.connector,
             &self.has_failed_write,
         )
         .await;
@@ -197,6 +241,7 @@ async fn open_replica(
     disk: &MemoryDisk,
     replica_id: &ReplicaId,
     settings: ReplicaSettings,
+    connector: &ClusterConnector,
     has_failed_write: &Arc<AtomicBool>,
 ) -> Arc<Replica> {
     let has_failed_write = Arc::clone(has_failed_write);
@@ -204,6 +249,7 @@ async fn open_replica(
         Arc::new(disk.clone()),
         replica_id.clone(),
         settings,
+        Arc::new(connector.clone()),
         Arc::new(move |_segment, _reason| has_failed_write.store(true, Ordering::Relaxed)),
     )
     .await
@@ -217,7 +263,7 @@ pub struct Cluster {
     metadata: MetadataStore,
     clock: Arc<VirtualClock>,
     nodes: Vec<Node>,
-    connector: Arc<StaticReplicaConnector>,
+    connector: ClusterConnector,
 }
 
 impl Cluster {
@@ -240,22 +286,25 @@ impl Cluster {
     ) -> Self {
         let key_value_store = MemoryKeyValueStore::new();
         let metadata = MetadataStore::new(Arc::new(key_value_store.clone()));
-        let mut connector = StaticReplicaConnector::new();
+        let connector = ClusterConnector::default();
         let mut nodes = Vec::with_capacity(node_count);
         for node_number in 0..node_count {
-            let node = Node::start(node_number, failure_domains_of(node_number), settings).await;
-            connector.register(
-                node.address.clone(),
-                Arc::clone(&node.link) as Arc<dyn ReplicaApi>,
+            nodes.push(
+                Node::start(
+                    node_number,
+                    failure_domains_of(node_number),
+                    settings,
+                    connector.clone(),
+                )
+                .await,
             );
-            nodes.push(node);
         }
         let cluster = Self {
             key_value_store,
             metadata,
             clock: Arc::new(VirtualClock::new()),
             nodes,
-            connector: Arc::new(connector),
+            connector,
         };
         cluster
             .renew_registrations()
@@ -285,7 +334,7 @@ impl Cluster {
     /// The way to reach the cluster's replicas through their links.
     #[must_use]
     pub fn connector(&self) -> Arc<dyn ReplicaConnector> {
-        Arc::clone(&self.connector) as Arc<dyn ReplicaConnector>
+        Arc::new(self.connector.clone())
     }
 
     /// The cluster's storage nodes, in the order they were started.

@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use bitacora_segment::{Disk, DiskSpace};
 use bitacora_types::replica_api::{
     AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadLimit, ReadRequest,
-    ReadResponse, ReplicaApi, ReplicaError, ReplicaStatus, SealRequest, SealResponse,
-    SegmentStatus,
+    ReadResponse, RepairRequest, RepairResponse, ReplicaApi, ReplicaConnector, ReplicaError,
+    ReplicaStatus, SealRequest, SealResponse, SegmentStatus,
 };
 use bitacora_types::{ReplicaId, SegmentAddress, SegmentId, StreamId};
 use bytes::Bytes;
@@ -18,7 +18,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::actor::{SegmentHandle, WriteFailureHandler};
-use crate::copy::{Admission, SegmentCopy};
+use crate::copy::{Admission, RepairPace, SegmentCopy};
 
 /// The file that ties a data directory to its replica identity.
 const REPLICA_ID_PATH: &str = "replica.id";
@@ -37,6 +37,13 @@ pub struct ReplicaSettings {
     pub space_refresh_interval: Duration,
     /// The longest a read may wait for records, whatever the reader asked.
     pub longest_read_wait: Duration,
+    /// The target size of one read when repairing a copy from a peer.
+    pub repair_chunk_bytes: usize,
+    /// How many bytes per second one repair may copy, so that it cannot
+    /// starve appends. Zero means no limit.
+    pub repair_bytes_per_second: u64,
+    /// How long one read from a peer may take during repair.
+    pub repair_request_timeout: Duration,
 }
 
 impl Default for ReplicaSettings {
@@ -47,6 +54,9 @@ impl Default for ReplicaSettings {
             refuse_appends_at_used_percent: 95,
             space_refresh_interval: Duration::from_secs(1),
             longest_read_wait: Duration::from_secs(30),
+            repair_chunk_bytes: 1024 * 1024,
+            repair_bytes_per_second: 128 * 1024 * 1024,
+            repair_request_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -64,6 +74,8 @@ pub struct Replica {
     replica_id: ReplicaId,
     disk: Arc<dyn Disk>,
     settings: ReplicaSettings,
+    /// How this replica reaches its peers when it repairs a copy.
+    connector: Arc<dyn ReplicaConnector>,
     registry: Mutex<Registry>,
     is_draining: AtomicBool,
     is_stopped: AtomicBool,
@@ -81,8 +93,9 @@ impl Replica {
     /// disk was wiped therefore returns under a new identity and can never
     /// claim copies it no longer holds.
     ///
-    /// `on_write_failure` is called once per copy whose write or flush the
-    /// disk refuses; the production handler stops the process.
+    /// `connector` is how the replica reaches its peers when it is asked to
+    /// repair a copy. `on_write_failure` is called once per copy whose write
+    /// or flush the disk refuses; the production handler stops the process.
     ///
     /// # Errors
     ///
@@ -92,6 +105,7 @@ impl Replica {
         disk: Arc<dyn Disk>,
         proposed_replica_id: ReplicaId,
         settings: ReplicaSettings,
+        connector: Arc<dyn ReplicaConnector>,
         on_write_failure: WriteFailureHandler,
     ) -> Result<Self, ReplicaError> {
         let replica_id = adopt_identity(disk.as_ref(), proposed_replica_id).await?;
@@ -134,6 +148,7 @@ impl Replica {
             replica_id,
             disk,
             settings,
+            connector,
             registry: Mutex::new(registry),
             is_draining: AtomicBool::new(false),
             is_stopped: AtomicBool::new(false),
@@ -242,6 +257,22 @@ impl Replica {
         Ok(handle)
     }
 
+    /// Decides whether the replica takes more data right now: not while it
+    /// is draining, not when its disk is nearly full.
+    async fn admit_write(&self) -> Result<Admission, ReplicaError> {
+        if self.is_draining.load(Ordering::Relaxed) {
+            return Err(ReplicaError::Draining);
+        }
+        let used_percent = self.disk_space().await?.used_percent();
+        if used_percent >= self.settings.refuse_appends_at_used_percent {
+            return Err(ReplicaError::NoCapacity { used_percent });
+        }
+        Ok(Admission {
+            may_create_segments: used_percent < self.settings.refuse_new_segments_at_used_percent,
+            used_percent,
+        })
+    }
+
     /// Measures the disk's free space, reusing a recent measurement.
     async fn disk_space(&self) -> Result<DiskSpace, ReplicaError> {
         let now = Instant::now();
@@ -314,17 +345,7 @@ fn storage_error(operation: &'static str) -> impl FnOnce(std::io::Error) -> Repl
 #[async_trait]
 impl ReplicaApi for Replica {
     async fn append(&self, request: AppendRequest) -> Result<AppendResponse, ReplicaError> {
-        if self.is_draining.load(Ordering::Relaxed) {
-            return Err(ReplicaError::Draining);
-        }
-        let used_percent = self.disk_space().await?.used_percent();
-        if used_percent >= self.settings.refuse_appends_at_used_percent {
-            return Err(ReplicaError::NoCapacity { used_percent });
-        }
-        let admission = Admission {
-            may_create_segments: used_percent < self.settings.refuse_new_segments_at_used_percent,
-            used_percent,
-        };
+        let admission = self.admit_write().await?;
         self.handle_or_spawn(request.segment.address)?
             .append(request, admission)
             .await
@@ -358,6 +379,23 @@ impl ReplicaApi for Replica {
         self.handle_or_spawn(request.segment)?
             .seal(request.sealed_end)
             .await
+    }
+
+    async fn repair_segment(&self, request: RepairRequest) -> Result<RepairResponse, ReplicaError> {
+        let admission = self.admit_write().await?;
+        let source = self.connector.connect(&request.source_address);
+        let pace = RepairPace {
+            chunk_bytes: self.settings.repair_chunk_bytes,
+            bytes_per_second: self.settings.repair_bytes_per_second,
+            request_timeout: self.settings.repair_request_timeout,
+        };
+        let segment = request.segment.address;
+        let repaired = self
+            .handle_or_spawn(segment)?
+            .repair(request, source, admission, pace)
+            .await?;
+        tracing::info!(%segment, local_end = %repaired.local_end, "segment copy repaired");
+        Ok(repaired)
     }
 
     async fn delete_segment(&self, segment: SegmentAddress) -> Result<(), ReplicaError> {
@@ -409,7 +447,7 @@ mod tests {
 
     use bitacora_segment::MemoryDisk;
     use bitacora_segment::format::{Batch, decode_frames};
-    use bitacora_types::replica_api::SegmentDescriptor;
+    use bitacora_types::replica_api::{SegmentDescriptor, StaticReplicaConnector};
     use bitacora_types::{Epoch, SequenceNumber};
 
     use super::*;
@@ -430,11 +468,16 @@ mod tests {
         Arc::new(|_segment, _reason| {})
     }
 
+    fn no_peers() -> Arc<dyn ReplicaConnector> {
+        Arc::new(StaticReplicaConnector::new())
+    }
+
     async fn open_replica(disk: &MemoryDisk, name: &str) -> Replica {
         Replica::open(
             Arc::new(disk.clone()),
             ReplicaId::new(name).expect("valid identifier"),
             small_segments(),
+            no_peers(),
             ignore_write_failures(),
         )
         .await
@@ -517,6 +560,7 @@ mod tests {
             Arc::new(disk),
             ReplicaId::new("replica-a").expect("valid identifier"),
             small_segments(),
+            no_peers(),
             ignore_write_failures(),
         )
         .await;
@@ -845,6 +889,7 @@ mod tests {
             Arc::new(disk.clone()),
             ReplicaId::new("replica-a").expect("valid identifier"),
             small_segments(),
+            no_peers(),
             count_failures,
         )
         .await
@@ -864,6 +909,228 @@ mod tests {
                 && matches!(after_failure, Err(ReplicaError::Storage { .. }))
                 && reported_failures.load(Ordering::Relaxed) == 1,
             "failed: {failed:?}, after: {after_failure:?}"
+        );
+    }
+
+    // ---- repair ----
+
+    const SOURCE_ADDRESS: &str = "source:7000";
+
+    /// A replica holding records 100..=109 of [`SEGMENT`], sealed at
+    /// `sealed_end`, and a connector that reaches it at [`SOURCE_ADDRESS`].
+    async fn sealed_source(sealed_end: u64) -> (Arc<Replica>, Arc<dyn ReplicaConnector>) {
+        let source = Arc::new(open_replica(&MemoryDisk::new(), "source").await);
+        source
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        source
+            .append(append_to(SEGMENT, 105, 5, 0))
+            .await
+            .expect("append");
+        source
+            .seal(SealRequest {
+                segment: SEGMENT,
+                sealed_end: SequenceNumber::new(sealed_end),
+            })
+            .await
+            .expect("seal");
+        let mut connector = StaticReplicaConnector::new();
+        connector.register(SOURCE_ADDRESS, Arc::clone(&source) as Arc<dyn ReplicaApi>);
+        (source, Arc::new(connector))
+    }
+
+    async fn open_target(disk: &MemoryDisk, connector: Arc<dyn ReplicaConnector>) -> Replica {
+        Replica::open(
+            Arc::new(disk.clone()),
+            ReplicaId::new("target").expect("valid identifier"),
+            ReplicaSettings {
+                repair_chunk_bytes: 64,
+                repair_bytes_per_second: 0,
+                ..small_segments()
+            },
+            connector,
+            ignore_write_failures(),
+        )
+        .await
+        .expect("replica opens")
+    }
+
+    fn repair_to(sealed_end: u64) -> RepairRequest {
+        RepairRequest {
+            segment: SegmentDescriptor {
+                address: SEGMENT,
+                epoch: EPOCH,
+                first_sequence: SequenceNumber::new(FIRST_SEQUENCE),
+            },
+            sealed_end: SequenceNumber::new(sealed_end),
+            source_address: SOURCE_ADDRESS.to_owned(),
+        }
+    }
+
+    /// The end, the sealed end and the damage flag of the target's copy.
+    async fn copy_of(replica: &Replica) -> (Option<u64>, Option<u64>, bool) {
+        let statuses = replica.list_segments().await.expect("lists");
+        let status = statuses.first().expect("the replica holds the segment");
+        (
+            status.local_end.map(SequenceNumber::get),
+            status.sealed_end.map(SequenceNumber::get),
+            status.is_damaged,
+        )
+    }
+
+    #[tokio::test]
+    async fn repair_copies_a_sealed_segment_to_a_replica_without_one() {
+        let (_source, connector) = sealed_source(109).await;
+        let target = open_target(&MemoryDisk::new(), connector).await;
+        let repaired = target.repair_segment(repair_to(109)).await;
+        let readable = target.read(read_from(100, None)).await.expect("read");
+        assert_eq!(
+            (repaired, sequences_in(&readable)),
+            (
+                Ok(RepairResponse {
+                    local_end: SequenceNumber::new(109)
+                }),
+                (100..=109).collect::<Vec<_>>()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn repaired_copy_is_sealed_and_survives_a_restart() {
+        let (_source, connector) = sealed_source(109).await;
+        let disk = MemoryDisk::new();
+        let target = open_target(&disk, Arc::clone(&connector)).await;
+        target.repair_segment(repair_to(109)).await.expect("repair");
+        drop(target);
+        disk.crash();
+        let restarted = open_target(&disk, connector).await;
+        assert_eq!(copy_of(&restarted).await, (Some(109), Some(109), false));
+    }
+
+    #[tokio::test]
+    async fn repair_completes_a_short_copy_in_place() {
+        let (_source, connector) = sealed_source(109).await;
+        let target = open_target(&MemoryDisk::new(), connector).await;
+        target
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        target.repair_segment(repair_to(109)).await.expect("repair");
+        assert_eq!(copy_of(&target).await, (Some(109), Some(109), false));
+    }
+
+    #[tokio::test]
+    async fn repair_replaces_a_copy_with_an_uncommitted_tail() {
+        let (_source, connector) = sealed_source(104).await;
+        let target = open_target(&MemoryDisk::new(), connector).await;
+        target
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        target
+            .append(append_to(SEGMENT, 105, 5, 0))
+            .await
+            .expect("append");
+        target.repair_segment(repair_to(104)).await.expect("repair");
+        assert_eq!(copy_of(&target).await, (Some(104), Some(104), false));
+    }
+
+    #[tokio::test]
+    async fn repair_replaces_a_damaged_copy() {
+        let (_source, connector) = sealed_source(109).await;
+        let disk = MemoryDisk::new();
+        let target = open_target(&disk, connector).await;
+        target
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        target
+            .seal(SealRequest {
+                segment: SEGMENT,
+                sealed_end: SequenceNumber::new(109),
+            })
+            .await
+            .expect("seal");
+        disk.corrupt_byte("7/3.seg", 100, 0x20);
+        target.scrub_sealed_segments().await.expect("scrubs");
+        let was_damaged = copy_of(&target).await.2;
+        target.repair_segment(repair_to(109)).await.expect("repair");
+        assert_eq!(
+            (was_damaged, copy_of(&target).await),
+            (true, (Some(109), Some(109), false))
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_of_a_segment_sealed_empty_only_records_the_seal() {
+        let (_source, connector) = sealed_source(99).await;
+        let target = open_target(&MemoryDisk::new(), connector).await;
+        let repaired = target.repair_segment(repair_to(99)).await;
+        assert_eq!(
+            (repaired, copy_of(&target).await),
+            (
+                Ok(RepairResponse {
+                    local_end: SequenceNumber::new(99)
+                }),
+                (None, Some(99), false)
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_fails_when_the_source_cannot_be_reached() {
+        let target = open_target(&MemoryDisk::new(), no_peers()).await;
+        let repaired = target.repair_segment(repair_to(109)).await;
+        assert!(
+            matches!(repaired, Err(ReplicaError::Unavailable { .. })),
+            "{repaired:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_fails_when_the_source_holds_less_than_the_sealed_end() {
+        let (_source, connector) = sealed_source(109).await;
+        let target = open_target(&MemoryDisk::new(), connector).await;
+        let repaired = target.repair_segment(repair_to(120)).await;
+        assert!(
+            matches!(repaired, Err(ReplicaError::Unavailable { .. })),
+            "{repaired:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_replica_takes_no_repairs() {
+        let (_source, connector) = sealed_source(109).await;
+        let target = open_target(&MemoryDisk::new(), connector).await;
+        target.drain().await.expect("drains");
+        assert_eq!(
+            target.repair_segment(repair_to(109)).await,
+            Err(ReplicaError::Draining)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repair_is_slowed_to_its_rate_limit() {
+        let (_source, connector) = sealed_source(109).await;
+        let target = Replica::open(
+            Arc::new(MemoryDisk::new()),
+            ReplicaId::new("target").expect("valid identifier"),
+            ReplicaSettings {
+                repair_bytes_per_second: 100,
+                ..small_segments()
+            },
+            connector,
+            ignore_write_failures(),
+        )
+        .await
+        .expect("replica opens");
+        let started_at = Instant::now();
+        target.repair_segment(repair_to(109)).await.expect("repair");
+        assert!(
+            started_at.elapsed() >= Duration::from_secs(1),
+            "copied in {:?}",
+            started_at.elapsed()
         );
     }
 

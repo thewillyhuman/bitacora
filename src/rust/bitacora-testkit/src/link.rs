@@ -8,7 +8,8 @@ use bitacora_replica::Replica;
 use bitacora_types::SegmentAddress;
 use bitacora_types::replica_api::{
     AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadRequest, ReadResponse,
-    ReplicaApi, ReplicaError, ReplicaStatus, SealRequest, SealResponse, SegmentStatus,
+    RepairRequest, RepairResponse, ReplicaApi, ReplicaError, ReplicaStatus, SealRequest,
+    SealResponse, SegmentStatus,
 };
 
 /// What is wrong with a link right now.
@@ -134,6 +135,11 @@ impl ReplicaApi for Link {
 
     async fn seal(&self, request: SealRequest) -> Result<SealResponse, ReplicaError> {
         self.carry(|replica| async move { replica.seal(request).await })
+            .await
+    }
+
+    async fn repair_segment(&self, request: RepairRequest) -> Result<RepairResponse, ReplicaError> {
+        self.carry(|replica| async move { replica.repair_segment(request).await })
             .await
     }
 
