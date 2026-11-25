@@ -102,7 +102,7 @@ set_version() {
 set_version src/rust/Cargo.toml \
     '^version = "[^"]+"$' \
     "version = \"${version}\""
-sed -E "s|^(bitacora-[a-z0-9-]+ = \{ path = \"[^\"]+\", version = )\"[^\"]+\"|\1\"${version}\"|" \
+sed -E "s|^(bitacora(-[a-z0-9-]+)? = \{ path = \"[^\"]+\", version = )\"[^\"]+\"|\1\"${version}\"|" \
     src/rust/Cargo.toml >src/rust/Cargo.toml.new
 mv src/rust/Cargo.toml.new src/rust/Cargo.toml
 # The Bazel module version is the first `version =` in the file.

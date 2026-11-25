@@ -44,6 +44,7 @@ version = "0.0.0"
 edition = "2024"
 
 [workspace.dependencies]
+bitacora = { path = "bitacora", version = "0.0.0" }
 bitacora-types = { path = "bitacora-types", version = "0.0.0" }
 bitacora-meta-etcd = { path = "bitacora-meta-etcd", version = "0.0.0" }
 bitacora-artifact-s3 = { path = "bitacora-artifact-s3", version = "0.0.0" }
@@ -129,6 +130,8 @@ current_test="release sets the version everywhere it is written"
 repository="$(new_repository)"
 release "${repository}" 1.2.3 >/dev/null || fail "the release failed"
 assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" 'version = "1.2.3"'
+assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" \
+    'bitacora = { path = "bitacora", version = "1.2.3" }'
 assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" \
     'bitacora-types = { path = "bitacora-types", version = "1.2.3" }'
 assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" \
