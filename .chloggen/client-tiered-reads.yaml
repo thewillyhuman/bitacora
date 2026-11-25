@@ -1,0 +1,4 @@
+change_type: enhancement
+component: client
+note: "Readers read sealed segments from the object store when no replica serves them, with range requests and the same checksum verification as for replicas."
+issues: [3]

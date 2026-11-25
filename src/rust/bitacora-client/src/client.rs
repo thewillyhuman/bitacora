@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use bitacora_artifact::ArtifactStore;
 use bitacora_meta::MetadataStore;
 use bitacora_types::Clock;
 use bitacora_types::replica_api::ReplicaConnector;
@@ -48,8 +49,29 @@ impl BitacoraClient {
                 metadata,
                 connector,
                 clock,
+                artifact_store: None,
             }),
             settings,
+        }
+    }
+
+    /// Gives the client the object store that sealed segments are tiered
+    /// to (design, section 10, "Tiering"), so that its readers can read
+    /// segments whose copies the replicas have dropped. Without one, such
+    /// a read fails as [`ReadError::Unavailable`](crate::ReadError).
+    ///
+    /// Call it right after [`BitacoraClient::new`]: writers and readers
+    /// opened before keep reading from replicas only.
+    #[must_use]
+    pub fn with_artifact_store(self, artifact_store: Arc<dyn ArtifactStore>) -> Self {
+        Self {
+            context: Arc::new(ClientContext {
+                metadata: self.context.metadata.clone(),
+                connector: Arc::clone(&self.context.connector),
+                clock: Arc::clone(&self.context.clock),
+                artifact_store: Some(artifact_store),
+            }),
+            settings: self.settings,
         }
     }
 

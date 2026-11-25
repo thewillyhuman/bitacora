@@ -3,4 +3,5 @@
 mod admin;
 mod harness;
 mod reader;
+mod tiered;
 mod writer;

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use bitacora_artifact::ArtifactStore;
 use bitacora_meta::{CopyRecord, MetaError, MetadataStore};
 use bitacora_types::replica_api::{ReplicaApi, ReplicaConnector, UnreachableReplica};
 use bitacora_types::{Clock, ReplicaId};
@@ -13,11 +14,15 @@ pub(crate) struct ConnectedReplica {
     pub client: Arc<dyn ReplicaApi>,
 }
 
-/// The injected interfaces of the client: metadata, network and clock.
+/// The injected interfaces of the client: metadata, network, clock and,
+/// optionally, the object store.
 pub(crate) struct ClientContext {
     pub metadata: MetadataStore,
     pub connector: Arc<dyn ReplicaConnector>,
     pub clock: Arc<dyn Clock>,
+    /// Where tiered segments are read from. A client without one can only
+    /// read segments that replicas still hold.
+    pub artifact_store: Option<Arc<dyn ArtifactStore>>,
 }
 
 impl ClientContext {

@@ -13,11 +13,11 @@ use crate::{ReadError, RecordStream, StreamReader, StreamWriter, TakeoverPolicy,
 
 const HEARTBEAT_SETTLE: Duration = Duration::from_millis(200);
 
-fn range(first: u64, last: u64) -> SequenceRange {
+pub(super) fn range(first: u64, last: u64) -> SequenceRange {
     SequenceRange::new(SequenceNumber::new(first), SequenceNumber::new(last)).expect("valid range")
 }
 
-async fn open_writer(cluster: &Cluster, writer_identity: &str) -> StreamWriter {
+pub(super) async fn open_writer(cluster: &Cluster, writer_identity: &str) -> StreamWriter {
     cluster
         .client(writer_identity)
         .open_writer(STREAM, TakeoverPolicy::Force)
@@ -30,7 +30,7 @@ fn reader(cluster: &Cluster) -> StreamReader {
 }
 
 /// Appends records whose payload names their own sequence number.
-async fn append_numbered(writer: &StreamWriter, count: u64) {
+pub(super) async fn append_numbered(writer: &StreamWriter, count: u64) {
     let first = writer.durable_sequence().get() + 1;
     for sequence in first..first + count {
         writer
@@ -40,12 +40,12 @@ async fn append_numbered(writer: &StreamWriter, count: u64) {
     }
 }
 
-fn sequences(records: &[LogRecord]) -> Vec<u64> {
+pub(super) fn sequences(records: &[LogRecord]) -> Vec<u64> {
     records.iter().map(|record| record.sequence.get()).collect()
 }
 
 /// Takes the next `count` records of a following stream.
-async fn take(stream: &mut RecordStream, count: usize) -> Vec<u64> {
+pub(super) async fn take(stream: &mut RecordStream, count: usize) -> Vec<u64> {
     let mut taken = Vec::new();
     while taken.len() < count {
         let record = stream

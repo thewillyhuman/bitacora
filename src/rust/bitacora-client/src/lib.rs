@@ -19,6 +19,7 @@ mod context;
 mod error;
 mod reader;
 mod settings;
+mod tiered;
 mod writer;
 
 #[cfg(test)]

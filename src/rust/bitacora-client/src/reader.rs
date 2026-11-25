@@ -5,12 +5,17 @@
 //! only one possible record at each sequence number. A reader therefore
 //! picks one replica per segment and switches only when that replica fails,
 //! falls short or has nothing new.
+//!
+//! A sealed segment that was uploaded to the object store is read from
+//! there when no replica serves it: after the replicas dropped their copies,
+//! or while none of them can be reached. The reader's caller cannot tell the
+//! difference, apart from latency.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitacora_meta::{CopyState, MetaError, SegmentRecord, StreamRecord};
+use bitacora_meta::{CopyState, MetaError, SegmentRecord, StreamRecord, TieredRecord};
 use bitacora_segment::format::{Batch, decode_frames};
 use bitacora_types::replica_api::{ReadLimit, ReadRequest};
 use bitacora_types::{LogRecord, SegmentId, SequenceNumber, SequenceRange};
@@ -19,6 +24,7 @@ use tokio::time::{Instant, sleep, timeout};
 use crate::context::{ClientContext, ConnectedReplica};
 use crate::error::ReadError;
 use crate::settings::ReaderSettings;
+use crate::tiered::TieredSegment;
 
 /// Reads the committed records of one stream. Any number of readers can
 /// read the same stream; they never coordinate.
@@ -182,6 +188,20 @@ enum ReplicaAnswer {
     Failed(String),
 }
 
+/// What the replicas of a segment answered, together, for the cursor's
+/// position.
+enum ReplicasAnswer {
+    /// One of them had records.
+    Records(Vec<LogRecord>),
+    /// A follower's replica of the open segment has nothing new yet.
+    NothingNewAtTheTail,
+    /// The segment is sealed and the cursor is past its end.
+    SegmentFinished,
+    /// None of them had records. `last_failure` is why the last one that
+    /// failed did; `None` if they all answered and simply held nothing.
+    NoRecords { last_failure: Option<String> },
+}
+
 /// A position in a stream, with what is needed to read on from it.
 struct Cursor {
     context: Arc<ClientContext>,
@@ -195,6 +215,9 @@ struct Cursor {
     connected_segment: Option<(SegmentId, Vec<ConnectedReplica>)>,
     /// Which replica of the segment is asked first.
     preferred_replica: usize,
+    /// The object of the tiered segment being read from the object store,
+    /// kept open so that its footer and index are fetched once.
+    open_tiered_segment: Option<(SegmentId, TieredSegment)>,
 }
 
 impl Cursor {
@@ -213,6 +236,7 @@ impl Cursor {
             stream,
             connected_segment: None,
             preferred_replica: 0,
+            open_tiered_segment: None,
         })
     }
 
@@ -240,76 +264,50 @@ impl Cursor {
                 continue;
             };
             let replicas = self.replicas_of(&segment).await?;
-
-            let mut last_failure = None;
-            let mut is_segment_finished = false;
-            for attempt in 0..replicas.len() {
-                let replica_index = (self.preferred_replica + attempt) % replicas.len();
-                if segment.copies[replica_index].state == CopyState::Bad {
+            let mut last_failure = match self.ask_replicas(&segment, &replicas, tail_wait).await {
+                ReplicasAnswer::Records(records) => return Ok(Fetched::Records(records)),
+                ReplicasAnswer::NothingNewAtTheTail => {
+                    // The refresh notices a seal.
+                    self.refresh().await?;
+                    return Ok(Fetched::NothingNew);
+                }
+                ReplicasAnswer::SegmentFinished => {
+                    self.refresh().await?;
+                    has_refreshed = true;
                     continue;
                 }
-                match self
-                    .ask(&replicas[replica_index], &segment, tail_wait)
-                    .await
-                {
-                    ReplicaAnswer::Records(records) => {
-                        self.preferred_replica = replica_index;
-                        if let Some(last_record) = records.last() {
-                            self.next_sequence = last_record.sequence.next();
-                        }
-                        return Ok(Fetched::Records(records));
-                    }
-                    ReplicaAnswer::SegmentFinished => {
-                        is_segment_finished = true;
-                        break;
-                    }
-                    ReplicaAnswer::Nothing if segment.is_open() && tail_wait.is_some() => {
-                        // A follower asks one replica per wait. If this one
-                        // is cut off from the writer, the next call asks its
-                        // neighbour, and the refresh notices a seal.
-                        self.preferred_replica = (replica_index + 1) % replicas.len();
-                        self.refresh().await?;
-                        return Ok(Fetched::NothingNew);
-                    }
-                    ReplicaAnswer::Nothing => {}
-                    ReplicaAnswer::Failed(reason) => {
+                ReplicasAnswer::NoRecords { last_failure } => last_failure,
+            };
+
+            // No replica produced records. A segment that was uploaded can
+            // still be read from the object store.
+            if let Some(tiered) = &segment.tiered {
+                match self.fetch_tiered(&segment, tiered).await {
+                    Ok(records) => return Ok(Fetched::Records(records)),
+                    Err(reason) => {
                         tracing::debug!(
-                            replica = %replicas[replica_index].replica_id,
+                            segment = %segment.segment_id,
                             %reason,
-                            "read failed, trying another replica"
+                            "read from the object store failed"
                         );
                         last_failure = Some(reason);
                     }
                 }
             }
 
-            // No replica produced records. Look at the metadata again: the
-            // segment may have been sealed, repaired or followed by another.
+            // Look at the metadata again: the segment may have been sealed,
+            // repaired, tiered or followed by another.
             self.refresh().await?;
-            if is_segment_finished {
-                has_refreshed = true;
-                continue;
-            }
             let is_still_open = self
                 .stream
                 .segment_containing(self.next_sequence)
                 .is_some_and(SegmentRecord::is_open);
-            let Some(reason) = last_failure else {
-                if is_still_open {
-                    return Ok(Fetched::NothingNew);
-                }
+            let reason = match last_failure {
+                Some(reason) => reason,
+                None if is_still_open => return Ok(Fetched::NothingNew),
                 // A sealed segment holds the position but every copy asked
                 // was short: wait for repair like for a failed replica.
-                failed_rounds += 1;
-                if failed_rounds >= self.settings.max_attempts_per_read {
-                    return Err(ReadError::Unavailable {
-                        segment: segment.address(self.stream.stream_id),
-                        reason: "every reachable copy of the sealed segment is incomplete"
-                            .to_owned(),
-                    });
-                }
-                sleep(self.settings.retry_interval).await;
-                continue;
+                None => "every reachable copy of the sealed segment is incomplete".to_owned(),
             };
             failed_rounds += 1;
             if failed_rounds >= self.settings.max_attempts_per_read {
@@ -320,6 +318,112 @@ impl Cursor {
             }
             sleep(self.settings.retry_interval).await;
         }
+    }
+
+    /// Asks the replicas of `segment` for the records at the cursor's
+    /// position, starting with the preferred one, until one has them.
+    /// Moves the cursor past the records it returns.
+    async fn ask_replicas(
+        &mut self,
+        segment: &SegmentRecord,
+        replicas: &[ConnectedReplica],
+        tail_wait: Option<Duration>,
+    ) -> ReplicasAnswer {
+        let mut last_failure = None;
+        for attempt in 0..replicas.len() {
+            let replica_index = (self.preferred_replica + attempt) % replicas.len();
+            if segment.copies[replica_index].state == CopyState::Bad {
+                continue;
+            }
+            match self.ask(&replicas[replica_index], segment, tail_wait).await {
+                ReplicaAnswer::Records(records) => {
+                    self.preferred_replica = replica_index;
+                    if let Some(last_record) = records.last() {
+                        self.next_sequence = last_record.sequence.next();
+                    }
+                    return ReplicasAnswer::Records(records);
+                }
+                ReplicaAnswer::SegmentFinished => return ReplicasAnswer::SegmentFinished,
+                ReplicaAnswer::Nothing if segment.is_open() && tail_wait.is_some() => {
+                    // A follower asks one replica per wait. If this one is
+                    // cut off from the writer, the next call asks its
+                    // neighbour.
+                    self.preferred_replica = (replica_index + 1) % replicas.len();
+                    return ReplicasAnswer::NothingNewAtTheTail;
+                }
+                ReplicaAnswer::Nothing => {}
+                ReplicaAnswer::Failed(reason) => {
+                    tracing::debug!(
+                        replica = %replicas[replica_index].replica_id,
+                        %reason,
+                        "read failed, trying another replica"
+                    );
+                    last_failure = Some(reason);
+                }
+            }
+        }
+        ReplicasAnswer::NoRecords { last_failure }
+    }
+
+    /// Reads the records at the cursor's position from the object store
+    /// and moves past them. Fails with the reason if the object store
+    /// cannot serve them.
+    async fn fetch_tiered(
+        &mut self,
+        segment: &SegmentRecord,
+        tiered: &TieredRecord,
+    ) -> Result<Vec<LogRecord>, String> {
+        let Some(artifact_store) = self.context.artifact_store.clone() else {
+            return Err(
+                "the segment is in the object store, and this client was given none".to_owned(),
+            );
+        };
+        let Some(sealed_end) = segment.sealed_end() else {
+            return Err("the segment is recorded as tiered but not as sealed".to_owned());
+        };
+        let is_open = self
+            .open_tiered_segment
+            .as_ref()
+            .is_some_and(|(open_segment_id, _object)| *open_segment_id == segment.segment_id);
+        if !is_open {
+            let opened = TieredSegment::open(
+                artifact_store.as_ref(),
+                segment.address(self.stream.stream_id),
+                sealed_end,
+                tiered,
+                self.settings.request_timeout,
+            )
+            .await
+            .map_err(|tiered_error| tiered_error.to_string())?;
+            self.open_tiered_segment = Some((segment.segment_id, opened));
+        }
+        let Some((_segment_id, tiered_segment)) = &self.open_tiered_segment else {
+            return Err("the tiered segment was not opened".to_owned());
+        };
+        let fetched = tiered_segment
+            .read_from(
+                artifact_store.as_ref(),
+                self.next_sequence,
+                self.settings.max_response_bytes,
+            )
+            .await;
+        let records = match fetched {
+            Ok(records) => records,
+            Err(tiered_error) => {
+                // Open the object afresh next time: it may have been
+                // replaced by a new upload.
+                self.open_tiered_segment = None;
+                return Err(tiered_error.to_string());
+            }
+        };
+        let Some(last_record) = records.last() else {
+            return Err(format!(
+                "the object holds no record at {}",
+                self.next_sequence
+            ));
+        };
+        self.next_sequence = last_record.sequence.next();
+        Ok(records)
     }
 
     /// Sends one read to one replica and classifies its answer.

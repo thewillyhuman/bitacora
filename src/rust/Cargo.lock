@@ -28,6 +28,7 @@ dependencies = [
 name = "bitacora-client"
 version = "0.0.0"
 dependencies = [
+ "bitacora-artifact",
  "bitacora-meta",
  "bitacora-segment",
  "bitacora-testkit",
