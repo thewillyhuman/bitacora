@@ -53,13 +53,21 @@ impl ReplicaConnector for ClusterConnector {
     }
 }
 
+/// A node's disk and the identity that belongs to it.
+struct Storage {
+    replica_id: ReplicaId,
+    disk: MemoryDisk,
+    /// How many disks the node has gone through.
+    disks_lost: u32,
+}
+
 /// One storage node: a replica process, the disk it lives on, and the
 /// network path to it.
 pub struct Node {
-    replica_id: ReplicaId,
+    node_number: usize,
     address: String,
     failure_domains: Vec<String>,
-    disk: MemoryDisk,
+    storage: Mutex<Storage>,
     link: Arc<Link>,
     settings: ReplicaSettings,
     connector: ClusterConnector,
@@ -80,10 +88,14 @@ impl Node {
         let replica =
             open_replica(&disk, &replica_id, settings, &connector, &has_failed_write).await;
         let node = Self {
+            node_number,
             address: format!("{replica_id}:7000"),
-            replica_id,
             failure_domains,
-            disk,
+            storage: Mutex::new(Storage {
+                replica_id,
+                disk,
+                disks_lost: 0,
+            }),
             link: Arc::new(Link::new(replica)),
             settings,
             connector,
@@ -94,10 +106,16 @@ impl Node {
         node
     }
 
-    /// The identity of the node's data directory.
+    /// The identity of the node's current data directory. It changes when
+    /// the node loses its disk.
     #[must_use]
-    pub const fn replica_id(&self) -> &ReplicaId {
-        &self.replica_id
+    pub fn replica_id(&self) -> ReplicaId {
+        self.storage().replica_id.clone()
+    }
+
+    fn storage(&self) -> std::sync::MutexGuard<'_, Storage> {
+        // Plain data replaced in one step.
+        self.storage.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The address the node is registered under.
@@ -106,10 +124,11 @@ impl Node {
         &self.address
     }
 
-    /// The node's disk, for injecting disk faults and inspecting files.
+    /// The node's current disk, for injecting disk faults and inspecting
+    /// files. The handle shares the disk's content.
     #[must_use]
-    pub const fn disk(&self) -> &MemoryDisk {
-        &self.disk
+    pub fn disk(&self) -> MemoryDisk {
+        self.storage().disk.clone()
     }
 
     /// The network path to the node, for injecting network faults.
@@ -160,7 +179,27 @@ impl Node {
             replica.stop();
         }
         self.link.set_replica(None);
-        self.disk.crash_keeping(surviving_content);
+        self.disk().crash_keeping(surviving_content);
+    }
+
+    /// Kills the replica process and replaces the node's disk with an empty
+    /// one, as when a machine is rebuilt. Everything the node stored is
+    /// gone, and once restarted it runs under a new identity, so that it can
+    /// never claim copies it no longer holds. The old identity stays in the
+    /// registry until it ages out or is removed.
+    pub fn lose_disk(&self) {
+        if let Some(replica) = self.replica() {
+            replica.stop();
+        }
+        self.link.set_replica(None);
+        let mut storage = self.storage();
+        storage.disks_lost += 1;
+        storage.replica_id = ReplicaId::new(format!(
+            "replica-{}-disk-{}",
+            self.node_number, storage.disks_lost
+        ))
+        .expect("valid identifier");
+        storage.disk = MemoryDisk::new();
     }
 
     /// Starts the replica process again on the same disk. Does nothing if
@@ -170,10 +209,11 @@ impl Node {
             return;
         }
         self.has_failed_write.store(false, Ordering::Relaxed);
-        self.disk.fail_flushes(false);
+        let (disk, replica_id) = (self.disk(), self.replica_id());
+        disk.fail_flushes(false);
         let replica = open_replica(
-            &self.disk,
-            &self.replica_id,
+            &disk,
+            &replica_id,
             self.settings,
             &self.connector,
             &self.has_failed_write,
@@ -220,13 +260,13 @@ impl Node {
 
     async fn registration(&self, clock: &dyn Clock) -> ReplicaRecord {
         let space = self
-            .disk
+            .disk()
             .space()
             .await
             .expect("a memory disk always reports its space");
         ReplicaRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            replica_id: self.replica_id.clone(),
+            replica_id: self.replica_id(),
             address: self.address.clone(),
             failure_domains: self.failure_domains.clone(),
             capacity_bytes: space.capacity_bytes,
@@ -352,7 +392,7 @@ impl Cluster {
     pub fn replica_ids(&self, node_numbers: &[usize]) -> Vec<ReplicaId> {
         node_numbers
             .iter()
-            .map(|node_number| self.nodes[*node_number].replica_id.clone())
+            .map(|node_number| self.nodes[*node_number].replica_id())
             .collect()
     }
 
@@ -437,7 +477,7 @@ mod tests {
         let status = cluster.connector().connect(node.address()).status().await;
         assert_eq!(
             status.map(|status| status.replica_id),
-            Ok(node.replica_id().clone())
+            Ok(node.replica_id())
         );
     }
 
@@ -534,6 +574,39 @@ mod tests {
         });
         node.restart().await;
         assert_eq!(node.local_end(SEGMENT).await, Some(SequenceNumber::ZERO));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_that_lost_its_disk_returns_empty_under_a_new_identity() {
+        let cluster = cluster_with_three_records().await;
+        let node = &cluster.nodes()[0];
+        let identity_before = node.replica_id();
+        node.lose_disk();
+        node.restart().await;
+        let status = node.link().status().await.expect("status");
+        assert!(
+            status.replica_id != identity_before
+                && status.replica_id == node.replica_id()
+                && status.segment_count == 0,
+            "{status:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_that_lost_its_disk_registers_next_to_its_old_identity() {
+        let cluster = cluster_with_three_records().await;
+        cluster.nodes()[0].lose_disk();
+        cluster.nodes()[0].restart().await;
+        cluster.renew_registrations().await.expect("renewed");
+        let registered: Vec<String> = cluster
+            .metadata()
+            .list_replicas()
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|replica| replica.replica_id.to_string())
+            .collect();
+        assert_eq!(registered, ["replica-0", "replica-0-disk-1"]);
     }
 
     #[tokio::test(start_paused = true)]

@@ -332,7 +332,7 @@ async fn copy_on_a_replica_removed_from_the_registry_becomes_bad() {
     .await;
     cluster
         .metadata()
-        .remove_replica(cluster.nodes()[2].replica_id())
+        .remove_replica(&cluster.nodes()[2].replica_id())
         .await
         .expect("removed");
     run_pass(&cluster).await;
