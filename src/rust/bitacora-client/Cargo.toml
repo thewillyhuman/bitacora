@@ -1,0 +1,26 @@
+[package]
+name = "bitacora-client"
+description = "The bitacora client library: stream writer, reader and admin, including the write and failover protocols."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bitacora-meta.workspace = true
+bitacora-segment.workspace = true
+bitacora-types.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+bitacora-replica.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
