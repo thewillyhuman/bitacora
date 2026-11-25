@@ -12,9 +12,16 @@
 
 mod key_value;
 mod memory_store;
+mod records;
+mod store;
 
 pub use key_value::{
     Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome,
     VersionedValue,
 };
 pub use memory_store::MemoryKeyValueStore;
+pub use records::{
+    CheckpointRecord, CopyRecord, CopyState, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
+    RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,
+};
+pub use store::{MAX_NAME_LENGTH_BYTES, MetaError, MetadataStore};
