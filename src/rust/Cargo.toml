@@ -4,6 +4,7 @@ members = [
     "bitacora-client",
     "bitacora-controller",
     "bitacora-meta",
+    "bitacora-model",
     "bitacora-replica",
     "bitacora-segment",
     "bitacora-sim",
@@ -24,6 +25,7 @@ authors = ["Guillermo Facundo Colunga"]
 bitacora-client = { path = "bitacora-client", version = "0.0.0" }
 bitacora-controller = { path = "bitacora-controller", version = "0.0.0" }
 bitacora-meta = { path = "bitacora-meta", version = "0.0.0" }
+bitacora-model = { path = "bitacora-model", version = "0.0.0" }
 bitacora-replica = { path = "bitacora-replica", version = "0.0.0" }
 bitacora-segment = { path = "bitacora-segment", version = "0.0.0" }
 bitacora-sim = { path = "bitacora-sim", version = "0.0.0" }
@@ -41,6 +43,14 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1"
+
+# The protocol model's tests explore a few million states. That is pure
+# computation, so this one crate is optimized even in development builds;
+# the checks then take seconds instead of minutes. Bazel does the same in
+# bitacora-model/BUILD.bazel.
+[profile.dev.package.bitacora-model]
+opt-level = 3
+overflow-checks = true
 
 [workspace.lints.rust]
 # Unsafe code is forbidden by default. A module that needs it carries an

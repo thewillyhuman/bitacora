@@ -1,0 +1,4 @@
+change_type: new_component
+component: model
+note: "Add an executable model of the append, roll and failover protocols that is checked exhaustively against invariants I1 to I4."
+issues: [0]

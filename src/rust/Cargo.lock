@@ -56,6 +56,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-model"
+version = "0.0.0"
+
+[[package]]
 name = "bitacora-replica"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,20 @@
+load("//src/rust:defs.bzl", "bitacora_library")
+
+exports_files(["Cargo.toml"])
+
+# The unit tests explore the whole state space of the protocol model, a few
+# million states. That is pure computation, so this one crate is optimized
+# even in a fast build: the checks then take seconds instead of minutes.
+# Overflow checks stay on, because the model does arithmetic on positions.
+# Cargo does the same through the profile override in //src/rust:Cargo.toml.
+OPTIMIZED = [
+    "-Copt-level=3",
+    "-Coverflow-checks=on",
+]
+
+bitacora_library(
+    name = "bitacora_model",
+    rustc_flags = OPTIMIZED,
+    test_rustc_flags = OPTIMIZED,
+    test_size = "medium",
+)

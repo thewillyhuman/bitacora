@@ -20,7 +20,14 @@ def _declare_lints():
             workspace = _WORKSPACE_MANIFEST,
         )
 
-def bitacora_library(name, deps = [], test_deps = [], test_data = [], test_size = "small", **kwargs):
+def bitacora_library(
+        name,
+        deps = [],
+        test_deps = [],
+        test_data = [],
+        test_size = "small",
+        test_rustc_flags = [],
+        **kwargs):
     """Declares a library crate and the test target for its unit tests.
 
     Args:
@@ -29,6 +36,8 @@ def bitacora_library(name, deps = [], test_deps = [], test_data = [], test_size 
         test_deps: first-party crates only the unit tests depend on.
         test_data: files the unit tests read at run time.
         test_size: Bazel test size of the unit tests.
+        test_rustc_flags: extra compiler flags for the unit tests, for the
+            rare crate whose tests are compute-bound and need optimizing.
         **kwargs: passed through to `rust_library`.
     """
     _declare_lints()
@@ -53,6 +62,7 @@ def bitacora_library(name, deps = [], test_deps = [], test_data = [], test_size 
         data = test_data,
         lint_config = _LINTS,
         proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+        rustc_flags = test_rustc_flags,
         deps = test_deps + all_crate_deps(normal_dev = True),
     )
 
