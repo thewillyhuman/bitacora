@@ -5,6 +5,7 @@ members = [
     "bitacora-artifact",
     "bitacora-client",
     "bitacora-controller",
+    "bitacora-kv",
     "bitacora-materializer",
     "bitacora-meta",
     "bitacora-meta-etcd",
@@ -31,6 +32,7 @@ bitacora = { path = "bitacora", version = "0.0.0" }
 bitacora-artifact = { path = "bitacora-artifact", version = "0.0.0" }
 bitacora-client = { path = "bitacora-client", version = "0.0.0" }
 bitacora-controller = { path = "bitacora-controller", version = "0.0.0" }
+bitacora-kv = { path = "bitacora-kv", version = "0.0.0" }
 bitacora-materializer = { path = "bitacora-materializer", version = "0.0.0" }
 bitacora-meta = { path = "bitacora-meta", version = "0.0.0" }
 bitacora-meta-etcd = { path = "bitacora-meta-etcd", version = "0.0.0" }

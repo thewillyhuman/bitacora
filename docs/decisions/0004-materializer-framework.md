@@ -164,6 +164,41 @@ manifest and the sweep after that manifest's commit deletes it, so a query
 that still reads the old artifact loses it only after the catalog that
 replaces it is durable.
 
+## bitacora-kv reads are made linearizable with a barrier record
+
+`KvStore::get` appends a record without operations, the barrier, and waits
+for it to commit at a sequence S. It then waits until the materializer has
+applied S and reads the key's bucket as of S.
+
+Why S is safe under writer failover. A write that finished before the read
+began is in the log below S: if this store committed it, it got a lower
+sequence number; if a newer writer committed it, that writer had fenced a
+recovery quorum and sealed this store's segment first, and the barrier,
+appended later, cannot reach a write quorum of unfenced replicas. So a
+barrier that commits proves the store was still the writer while the read
+was under way. This is the commit rule of the log (invariants I1 and I4)
+used as a leadership check; nothing new has to be trusted.
+
+What a read does when it cannot. If the barrier does not commit, `get`
+returns `NotCurrent` and no value. If the materializer does not reach S in
+`read_wait`, it returns an error too. It never answers from pages it cannot
+vouch for. `get_as_of` and `scan` read at a sequence the caller names, are
+not linearizable, and need no barrier.
+
+Cost and alternative. Every linearizable read adds one small record to the
+log. The alternative is a round of heartbeats that confirms the writer's
+epoch on a write quorum without appending, as a read index does in Raft. It
+needs support in the writer that the client library does not have yet.
+
+Writes. One call appends one record and the store never retries, so a write
+is applied at most once. A write that returns `OutcomeUnknown` may or may not
+be in the log; a caller that repeats it makes a second write. The store does
+not deduplicate and has no compare-and-set: both are left out.
+
+The record format, the bucket page format, the bucket count (64) and the
+hash (CRC-32C of the key) are constants of the crate, not settings. Changing
+any of them for an existing store would silently lose keys.
+
 ## One addition to the core contract
 
 `Materializer::wants_checkpoint` (default `false`) lets an instance ask for

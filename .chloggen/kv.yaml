@@ -1,0 +1,4 @@
+change_type: new_component
+component: kv
+note: "Add bitacora-kv, the reference materializer: a versioned key-value store on one stream with linearizable reads, reads of history and scans."
+issues: [4]
