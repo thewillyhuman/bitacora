@@ -1,0 +1,26 @@
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
+
+exports_files(["Cargo.toml"])
+
+bitacora_library(
+    name = "bitacora_meta_etcd",
+    deps = ["//src/rust/bitacora-meta:bitacora_meta"],
+)
+
+# Runs the store against a real etcd, which the test starts on free local
+# ports. Medium because it starts a process and talks to it over localhost;
+# it still finishes in seconds, hence the short timeout.
+bitacora_integration_test(
+    name = "etcd_test",
+    size = "medium",
+    timeout = "short",
+    srcs = glob(["tests/etcd/*.rs"]),
+    crate_root = "tests/etcd/main.rs",
+    data = ["//src/rust:etcd"],
+    env = {"BITA_ETCD_BINARY": "$(rootpath //src/rust:etcd)"},
+    deps = [
+        ":bitacora_meta_etcd",
+        "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+)

@@ -34,6 +34,7 @@ crate.from_cargo(
         "//src/rust/bitacora-client:Cargo.toml",
         "//src/rust/bitacora-controller:Cargo.toml",
         "//src/rust/bitacora-meta:Cargo.toml",
+        "//src/rust/bitacora-meta-etcd:Cargo.toml",
         "//src/rust/bitacora-model:Cargo.toml",
         "//src/rust/bitacora-replica:Cargo.toml",
         "//src/rust/bitacora-segment:Cargo.toml",
@@ -50,4 +51,85 @@ crate.annotation(
     crate = "tokio",
     rustc_flags = ["--cfg=tokio_unstable"],
 )
+
+# etcd-client compiles etcd's protocol files in its build script, and that
+# needs the protocol buffer compiler. Bazel hands it the pinned one below,
+# so the build does not depend on what the machine has installed. The labels
+# name aliases of this module, hence the `@@//` of the main repository.
+crate.annotation(
+    build_script_env = {"PROTOC": "$(execpath @@//src/rust:protoc)"},
+    build_script_tools = [
+        "@@//src/rust:protoc",
+        "@@//src/rust:protoc_well_known_types",
+    ],
+    crate = "etcd-client",
+)
 use_repo(crate, "crates")
+
+# Programs that builds and tests run, as released by their projects. Each
+# archive is pinned by its checksum; //src/rust:BUILD.bazel picks the one
+# for the platform. To add a platform, add its archive here and there.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# etcd, which the tests of the metadata store's etcd backend start. The
+# checksums are the ones in the SHA256SUMS file of the release.
+ETCD_BUILD_FILE = """exports_files(["etcd"], visibility = ["//visibility:public"])"""
+
+http_archive(
+    name = "etcd_macos_arm64",
+    build_file_content = ETCD_BUILD_FILE,
+    sha256 = "8a133f870071370311a031f3bfda1d4c0bbfe1d73c53e23223b0363957813d76",
+    strip_prefix = "etcd-v3.6.17-darwin-arm64",
+    urls = ["https://github.com/etcd-io/etcd/releases/download/v3.6.17/etcd-v3.6.17-darwin-arm64.zip"],
+)
+
+http_archive(
+    name = "etcd_linux_x86_64",
+    build_file_content = ETCD_BUILD_FILE,
+    sha256 = "5c6365e03d0c81f605458f3f9a115f6daaebca08d1fb42d3ab0f1a38fd30909c",
+    strip_prefix = "etcd-v3.6.17-linux-amd64",
+    urls = ["https://github.com/etcd-io/etcd/releases/download/v3.6.17/etcd-v3.6.17-linux-amd64.tar.gz"],
+)
+
+http_archive(
+    name = "etcd_linux_arm64",
+    build_file_content = ETCD_BUILD_FILE,
+    sha256 = "cb49ad3c3a722957c8ddfd77870539f7db89d00c2a970c014dead2cb62792814",
+    strip_prefix = "etcd-v3.6.17-linux-arm64",
+    urls = ["https://github.com/etcd-io/etcd/releases/download/v3.6.17/etcd-v3.6.17-linux-arm64.tar.gz"],
+)
+
+# protoc, which the build script of etcd-client runs. The release has no
+# checksum file; these are the digests GitHub publishes for its assets.
+# protoc looks for the well-known types in `include`, next to its `bin`.
+PROTOC_BUILD_FILE = """
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["bin/protoc"])
+
+filegroup(
+    name = "well_known_types",
+    srcs = glob(["include/**/*.proto"]),
+)
+"""
+
+http_archive(
+    name = "protoc_macos_arm64",
+    build_file_content = PROTOC_BUILD_FILE,
+    sha256 = "9cd98a532c5c5e0c4161314de0225de27e4c8a323917b6ea7b1b714d3ae23466",
+    urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-osx-aarch_64.zip"],
+)
+
+http_archive(
+    name = "protoc_linux_x86_64",
+    build_file_content = PROTOC_BUILD_FILE,
+    sha256 = "121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278",
+    urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip"],
+)
+
+http_archive(
+    name = "protoc_linux_arm64",
+    build_file_content = PROTOC_BUILD_FILE,
+    sha256 = "8b8f18bd2b30346efbc698dd5a73dd7c805f3ef8380f6dfc95c768f3f1852f6a",
+    urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-aarch_64.zip"],
+)

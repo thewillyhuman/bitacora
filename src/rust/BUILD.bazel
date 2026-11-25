@@ -9,3 +9,74 @@ exports_files(
     ],
     visibility = ["//visibility:public"],
 )
+
+# Programs that the workspace's builds and tests run. //:MODULE.bazel fetches
+# one pinned release per platform; these aliases pick the one for the
+# platform at hand, and fail with a clear message on any other.
+config_setting(
+    name = "macos_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+_NO_PINNED_RELEASE = "no release of this program is pinned for this platform; add one in //:MODULE.bazel"
+
+# The etcd server, for tests that need a real one.
+alias(
+    name = "etcd",
+    actual = select(
+        {
+            ":linux_arm64": "@etcd_linux_arm64//:etcd",
+            ":linux_x86_64": "@etcd_linux_x86_64//:etcd",
+            ":macos_arm64": "@etcd_macos_arm64//:etcd",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# The protocol buffer compiler, for the build script of etcd-client.
+alias(
+    name = "protoc",
+    actual = select(
+        {
+            ":linux_arm64": "@protoc_linux_arm64//:bin/protoc",
+            ":linux_x86_64": "@protoc_linux_x86_64//:bin/protoc",
+            ":macos_arm64": "@protoc_macos_arm64//:bin/protoc",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# The files protoc reads when a protocol file imports `google/protobuf/...`.
+alias(
+    name = "protoc_well_known_types",
+    actual = select(
+        {
+            ":linux_arm64": "@protoc_linux_arm64//:well_known_types",
+            ":linux_x86_64": "@protoc_linux_x86_64//:well_known_types",
+            ":macos_arm64": "@protoc_macos_arm64//:well_known_types",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)

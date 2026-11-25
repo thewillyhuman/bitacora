@@ -1,0 +1,24 @@
+[package]
+name = "bitacora-meta-etcd"
+description = "The etcd backend of the bitacora metadata store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bitacora-meta.workspace = true
+bytes.workspace = true
+etcd-client.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+bitacora-types.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -40,6 +40,9 @@ bazel test --config=lint //...  # what continuous integration runs
 
 `Cargo.toml` stays the source of truth for dependencies and lint levels, so
 `cargo` and rust-analyzer work in `src/rust/` as in any Cargo workspace.
+Unlike Bazel, they use what the machine has: the etcd client needs `protoc`
+on the path to build, and the tests that need etcd run only when
+`BITA_ETCD_BINARY` names an etcd program.
 
 ## Changelog and releases
 

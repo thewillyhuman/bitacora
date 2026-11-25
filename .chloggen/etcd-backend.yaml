@@ -1,0 +1,4 @@
+change_type: new_component
+component: meta
+note: "Add the etcd backend of the metadata store as the crate bitacora-meta-etcd, tested against a real etcd that Bazel fetches and pins."
+issues: [2]
