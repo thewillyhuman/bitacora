@@ -83,6 +83,22 @@ pub trait Disk: Send + Sync + 'static {
     /// Fails with the underlying error.
     async fn remove_file(&self, path: &str) -> io::Result<()>;
 
+    /// Moves the file at `from_path` to `to_path`, replacing a file already
+    /// there. The move is atomic and durable: once it returns, `to_path`
+    /// holds the moved file and `from_path` is gone, also after a crash. A
+    /// crash before it returns leaves either both files as they were, or
+    /// the move done. A reader of `to_path` never sees a mix.
+    ///
+    /// This is how a file is replaced without a moment at which its old
+    /// content is gone and its new content is not yet there. No handle to
+    /// either file may be open during the move.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`io::ErrorKind::NotFound`] if `from_path` does not exist,
+    /// or with the underlying error; `to_path` is then as it was.
+    async fn rename_file(&self, from_path: &str, to_path: &str) -> io::Result<()>;
+
     /// Lists every file on the disk, sorted by path.
     ///
     /// # Errors

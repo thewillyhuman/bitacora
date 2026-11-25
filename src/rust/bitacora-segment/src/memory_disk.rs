@@ -207,6 +207,22 @@ impl Disk for MemoryDisk {
         Ok(())
     }
 
+    async fn rename_file(&self, from_path: &str, to_path: &str) -> io::Result<()> {
+        let mut state = self.lock();
+        // Making a move durable is a flush of the directory.
+        if state.are_flushes_failing {
+            return Err(io::Error::other("injected flush failure"));
+        }
+        let Some(moved_file) = state.files_by_path.remove(from_path) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{from_path} does not exist"),
+            ));
+        };
+        state.files_by_path.insert(to_path.to_owned(), moved_file);
+        Ok(())
+    }
+
     async fn list_files(&self) -> io::Result<Vec<String>> {
         Ok(self.lock().files_by_path.keys().cloned().collect())
     }
@@ -468,6 +484,101 @@ mod tests {
         assert_eq!(
             disk.read_file("7/3.state").await.expect("read"),
             Some(Bytes::from_static(b"state"))
+        );
+    }
+
+    #[tokio::test]
+    async fn renamed_file_is_found_under_its_new_name_only() {
+        let disk = MemoryDisk::new();
+        disk.write_file_atomically("7/3.seg.repair", Bytes::from_static(b"new copy"))
+            .await
+            .expect("write");
+
+        disk.rename_file("7/3.seg.repair", "7/3.seg")
+            .await
+            .expect("rename");
+
+        assert_eq!(
+            disk.read_file("7/3.seg").await.expect("read"),
+            Some(Bytes::from_static(b"new copy"))
+        );
+        assert_eq!(disk.read_file("7/3.seg.repair").await.expect("read"), None);
+    }
+
+    #[tokio::test]
+    async fn rename_replaces_the_file_that_was_there() {
+        let disk = MemoryDisk::new();
+        disk.write_file_atomically("7/3.seg", Bytes::from_static(b"old copy"))
+            .await
+            .expect("write");
+        disk.write_file_atomically("7/3.seg.repair", Bytes::from_static(b"new copy"))
+            .await
+            .expect("write");
+
+        disk.rename_file("7/3.seg.repair", "7/3.seg")
+            .await
+            .expect("rename");
+
+        assert_eq!(
+            disk.read_file("7/3.seg").await.expect("read"),
+            Some(Bytes::from_static(b"new copy"))
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_survives_a_crash() {
+        let disk = MemoryDisk::new();
+        disk.write_file_atomically("7/3.seg.repair", Bytes::from_static(b"new copy"))
+            .await
+            .expect("write");
+        disk.rename_file("7/3.seg.repair", "7/3.seg")
+            .await
+            .expect("rename");
+
+        disk.crash();
+
+        assert_eq!(
+            disk.read_file("7/3.seg").await.expect("read"),
+            Some(Bytes::from_static(b"new copy"))
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_of_a_missing_file_fails_and_leaves_the_target_alone() {
+        let disk = MemoryDisk::new();
+        disk.write_file_atomically("7/3.seg", Bytes::from_static(b"old copy"))
+            .await
+            .expect("write");
+
+        let renamed = disk.rename_file("7/3.seg.repair", "7/3.seg").await;
+
+        assert_eq!(
+            renamed.map_err(|error| error.kind()),
+            Err(io::ErrorKind::NotFound)
+        );
+        assert_eq!(
+            disk.read_file("7/3.seg").await.expect("read"),
+            Some(Bytes::from_static(b"old copy"))
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_fails_without_effect_while_flushes_fail() {
+        let disk = MemoryDisk::new();
+        disk.write_file_atomically("7/3.seg", Bytes::from_static(b"old copy"))
+            .await
+            .expect("write");
+        disk.write_file_atomically("7/3.seg.repair", Bytes::from_static(b"new copy"))
+            .await
+            .expect("write");
+        disk.fail_flushes(true);
+
+        let renamed = disk.rename_file("7/3.seg.repair", "7/3.seg").await;
+
+        assert!(renamed.is_err());
+        assert_eq!(
+            disk.read_file("7/3.seg").await.expect("read"),
+            Some(Bytes::from_static(b"old copy"))
         );
     }
 

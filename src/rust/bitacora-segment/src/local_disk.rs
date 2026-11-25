@@ -221,6 +221,19 @@ impl Disk for LocalDisk {
         .await
     }
 
+    async fn rename_file(&self, from_path: &str, to_path: &str) -> io::Result<()> {
+        let source_path = self.resolve(from_path)?;
+        let target_path = self.resolve(to_path)?;
+        run_blocking(move || {
+            fs::rename(&source_path, &target_path)?;
+            // The move is two directory changes when the files are in two
+            // directories, and neither is durable until its directory is.
+            sync_directory(parent_of(&target_path)?)?;
+            sync_directory(parent_of(&source_path)?)
+        })
+        .await
+    }
+
     async fn list_files(&self) -> io::Result<Vec<String>> {
         let root_directory = Arc::clone(&self.root_directory);
         run_blocking(move || {
@@ -345,6 +358,48 @@ mod tests {
         assert_eq!(
             reopened.read_at(0, 64).await.expect("read"),
             Bytes::from_static(b"header\0\0")
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_replaces_the_file_that_was_there() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let disk = disk_in(&directory).await;
+        disk.write_file_atomically("7/3.seg", Bytes::from_static(b"old copy"))
+            .await
+            .expect("write");
+        disk.write_file_atomically("7/3.seg.repair", Bytes::from_static(b"new copy"))
+            .await
+            .expect("write");
+
+        disk.rename_file("7/3.seg.repair", "7/3.seg")
+            .await
+            .expect("rename");
+
+        assert_eq!(
+            disk.read_file("7/3.seg").await.expect("read"),
+            Some(Bytes::from_static(b"new copy"))
+        );
+        assert_eq!(disk.read_file("7/3.seg.repair").await.expect("read"), None);
+    }
+
+    #[tokio::test]
+    async fn rename_of_a_missing_file_fails_and_leaves_the_target_alone() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let disk = disk_in(&directory).await;
+        disk.write_file_atomically("7/3.seg", Bytes::from_static(b"old copy"))
+            .await
+            .expect("write");
+
+        let renamed = disk.rename_file("7/3.seg.repair", "7/3.seg").await;
+
+        assert_eq!(
+            renamed.map_err(|error| error.kind()),
+            Err(io::ErrorKind::NotFound)
+        );
+        assert_eq!(
+            disk.read_file("7/3.seg").await.expect("read"),
+            Some(Bytes::from_static(b"old copy"))
         );
     }
 
