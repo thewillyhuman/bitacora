@@ -6,6 +6,7 @@ use bitacora_meta::MetadataStore;
 use bitacora_types::Clock;
 use bitacora_types::replica_api::ReplicaConnector;
 
+use crate::admin::StreamAdmin;
 use crate::context::ClientContext;
 use crate::error::OpenError;
 use crate::reader::StreamReader;
@@ -77,6 +78,13 @@ impl BitacoraClient {
             policy,
         )
         .await
+    }
+
+    /// Returns the administrative interface: creating, describing,
+    /// truncating and deleting streams, and registering materializers.
+    #[must_use]
+    pub fn admin(&self) -> StreamAdmin {
+        StreamAdmin::new(Arc::clone(&self.context))
     }
 
     /// Returns a reader of `stream_name`. Any number of readers can follow

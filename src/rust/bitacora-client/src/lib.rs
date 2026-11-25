@@ -6,11 +6,14 @@
 //!
 //! - [`StreamWriter`]: `append`, `append_batch`, `durable_sequence`, `close`.
 //! - [`StreamReader`]: `read_range`, `follow_from`, `low_water_mark`.
+//! - [`StreamAdmin`]: `create_stream`, `describe_stream`, `truncate_before`,
+//!   `delete_stream`, `register_materializer`, `unregister_materializer`.
 //!
 //! Everything it needs from the outside world is injected through
 //! [`BitacoraClient::new`], so the same code runs against a real cluster and
 //! inside the deterministic simulator.
 
+mod admin;
 mod client;
 mod context;
 mod error;
@@ -21,6 +24,7 @@ mod writer;
 #[cfg(test)]
 mod tests;
 
+pub use admin::{StreamAdmin, StreamDescription, StreamOptions};
 pub use client::{BitacoraClient, ClientSettings};
 pub use error::{AppendError, OpenError, ReadError};
 pub use reader::{RecordStream, StreamReader};
