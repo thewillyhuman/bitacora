@@ -106,6 +106,11 @@ pub struct SegmentFile {
     header: SegmentHeader,
     /// Where the next batch frame goes.
     end_offset_bytes: u64,
+    /// The length the file is currently extended to.
+    allocated_bytes: u64,
+    /// How much the file grows by when it fills up. Zero lets writes extend
+    /// it one batch at a time.
+    growth_bytes: u64,
     /// The last sequence number held, or the position before the segment's
     /// first record if the copy is empty.
     local_end: SequenceNumber,
@@ -127,8 +132,9 @@ impl std::fmt::Debug for SegmentFile {
 impl SegmentFile {
     /// Creates an empty copy at `path` and makes it durable.
     ///
-    /// The file is preallocated to `preallocated_bytes`, so that later
-    /// flushes only persist data.
+    /// The file is preallocated to `preallocated_bytes` and grows by the same
+    /// amount whenever it fills up, so that a flush only has to persist data
+    /// and not a change of the file's size.
     ///
     /// # Errors
     ///
@@ -139,8 +145,9 @@ impl SegmentFile {
         header: SegmentHeader,
         preallocated_bytes: u64,
     ) -> Result<Self, SegmentError> {
+        let allocated_bytes = preallocated_bytes.max(HEADER_END_OFFSET);
         let mut file = disk
-            .create_file(path, preallocated_bytes.max(HEADER_END_OFFSET))
+            .create_file(path, allocated_bytes)
             .await
             .map_err(io_error("create", path))?;
         file.write_at(0, Bytes::copy_from_slice(&header.encode()))
@@ -154,6 +161,8 @@ impl SegmentFile {
             path: path.to_owned(),
             header,
             end_offset_bytes: HEADER_END_OFFSET,
+            allocated_bytes,
+            growth_bytes: preallocated_bytes,
             local_end: header.first_sequence.preceding(),
             index: SparseIndex::new(),
         })
@@ -164,7 +173,8 @@ impl SegmentFile {
     /// The scan keeps the longest run of valid, consecutive batches and
     /// reports why it stopped. Whatever follows was never acknowledged; it is
     /// left in place and overwritten by the next append. The file itself is
-    /// not modified.
+    /// not modified. `growth_bytes` is how much the file grows by when it
+    /// fills up, as in [`SegmentFile::create`].
     ///
     /// # Errors
     ///
@@ -174,6 +184,7 @@ impl SegmentFile {
         disk: &dyn Disk,
         path: &str,
         expected: SegmentAddress,
+        growth_bytes: u64,
     ) -> Result<(Self, ScanStop), SegmentError> {
         let file = disk.open_file(path).await.map_err(io_error("open", path))?;
         let header_bytes = file
@@ -202,6 +213,8 @@ impl SegmentFile {
             path: path.to_owned(),
             header,
             end_offset_bytes: HEADER_END_OFFSET,
+            allocated_bytes: file_bytes,
+            growth_bytes,
             local_end: header.first_sequence.preceding(),
             index: SparseIndex::new(),
         };
@@ -272,6 +285,8 @@ impl SegmentFile {
         for batch in batches {
             frames.extend_from_slice(batch.frame());
         }
+        self.grow_to_fit(self.end_offset_bytes + to_u64(total_bytes))
+            .await?;
         self.file
             .write_at(self.end_offset_bytes, frames.freeze())
             .await
@@ -395,6 +410,7 @@ impl SegmentFile {
             .await
             .map_err(io_error("truncate", &self.path))?;
         self.index.forget_from(cut_offset_bytes);
+        self.allocated_bytes = cut_offset_bytes;
         self.end_offset_bytes = cut_offset_bytes;
         self.local_end = end;
         Ok(())
@@ -410,7 +426,9 @@ impl SegmentFile {
         self.file
             .set_length(self.end_offset_bytes)
             .await
-            .map_err(io_error("release unused space", &self.path))
+            .map_err(io_error("release unused space", &self.path))?;
+        self.allocated_bytes = self.end_offset_bytes;
+        Ok(())
     }
 
     /// Rereads the whole copy from disk and verifies every checksum, as the
@@ -430,6 +448,25 @@ impl SegmentFile {
             )
             .await?;
         self.require_intact(region_end)
+    }
+
+    /// Extends the file by whole growth steps until `needed_bytes` fit.
+    ///
+    /// Growing ahead of the data keeps the size change out of the flush that
+    /// acknowledges an append: it is made durable here, once per step.
+    async fn grow_to_fit(&mut self, needed_bytes: u64) -> Result<(), SegmentError> {
+        if self.growth_bytes == 0 || needed_bytes <= self.allocated_bytes {
+            return Ok(());
+        }
+        let missing_bytes = needed_bytes - self.allocated_bytes;
+        let growth_steps = missing_bytes.div_ceil(self.growth_bytes);
+        let grown_bytes = self.allocated_bytes + growth_steps * self.growth_bytes;
+        self.file
+            .set_length(grown_bytes)
+            .await
+            .map_err(io_error("grow", &self.path))?;
+        self.allocated_bytes = grown_bytes;
+        Ok(())
     }
 
     /// Returns the closest indexed place at or before `sequence` to start a
@@ -588,7 +625,7 @@ mod tests {
     }
 
     async fn reopen(disk: &MemoryDisk) -> (SegmentFile, ScanStop) {
-        SegmentFile::open(disk, PATH, SEGMENT)
+        SegmentFile::open(disk, PATH, SEGMENT, PREALLOCATED_BYTES)
             .await
             .expect("reopen")
     }
@@ -839,7 +876,7 @@ mod tests {
 
     #[tokio::test]
     async fn opening_a_missing_segment_fails() {
-        let opened = SegmentFile::open(&MemoryDisk::new(), PATH, SEGMENT).await;
+        let opened = SegmentFile::open(&MemoryDisk::new(), PATH, SEGMENT, PREALLOCATED_BYTES).await;
         assert!(matches!(opened, Err(SegmentError::Io { .. })));
     }
 
@@ -848,7 +885,7 @@ mod tests {
         let disk = MemoryDisk::new();
         new_segment(&disk).await;
         let other_segment = SegmentAddress::new(StreamId::new(7), SegmentId::new(4));
-        let opened = SegmentFile::open(&disk, PATH, other_segment).await;
+        let opened = SegmentFile::open(&disk, PATH, other_segment, PREALLOCATED_BYTES).await;
         assert!(matches!(opened, Err(SegmentError::WrongSegment { .. })));
     }
 
@@ -857,7 +894,7 @@ mod tests {
         let disk = MemoryDisk::new();
         new_segment(&disk).await;
         disk.corrupt_byte(PATH, 20, 0x01);
-        let opened = SegmentFile::open(&disk, PATH, SEGMENT).await;
+        let opened = SegmentFile::open(&disk, PATH, SEGMENT, PREALLOCATED_BYTES).await;
         assert!(matches!(opened, Err(SegmentError::InvalidHeader { .. })));
     }
 
@@ -952,6 +989,36 @@ mod tests {
         let disk = MemoryDisk::new();
         let mut segment = segment_with_three_batches(&disk).await;
         segment.release_unused_space().await.expect("release");
+        let file_bytes = disk.durable_content(PATH).expect("file exists").len();
+        assert_eq!(to_u64(file_bytes), segment.content_bytes());
+    }
+
+    #[tokio::test]
+    async fn full_file_grows_by_whole_preallocation_steps() {
+        let disk = MemoryDisk::new();
+        let mut segment = new_segment(&disk).await;
+        let payload = Bytes::from(vec![0xAB; 3 * 1024]);
+        for sequence in FIRST_SEQUENCE..FIRST_SEQUENCE + 2 {
+            let large_batch = Batch::encode(
+                SEGMENT,
+                SequenceNumber::new(sequence),
+                std::slice::from_ref(&payload),
+            )
+            .expect("valid batch");
+            segment.append(&[large_batch]).await.expect("append");
+        }
+        let file_bytes = disk.durable_content(PATH).expect("file exists").len();
+        assert_eq!(to_u64(file_bytes), 2 * PREALLOCATED_BYTES);
+    }
+
+    #[tokio::test]
+    async fn file_without_preallocation_grows_only_with_its_content() {
+        let disk = MemoryDisk::new();
+        let mut segment = SegmentFile::create(&disk, PATH, header(), 0)
+            .await
+            .expect("new segment");
+        segment.append(&[batch(100, 3)]).await.expect("append");
+        segment.flush().await.expect("flush");
         let file_bytes = disk.durable_content(PATH).expect("file exists").len();
         assert_eq!(to_u64(file_bytes), segment.content_bytes());
     }
