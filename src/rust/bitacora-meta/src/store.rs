@@ -34,6 +34,31 @@ const MAX_UPDATE_ATTEMPTS: u32 = 32;
 /// The longest stream or materializer name accepted.
 pub const MAX_NAME_LENGTH_BYTES: usize = 255;
 
+/// How many keys one transaction of a restore changes. etcd refuses a
+/// transaction with more operations than it is configured for, 128 by
+/// default; this stays well below with room for the conditions.
+const RESTORE_BATCH_KEYS: usize = 48;
+
+/// What a restore does about keys the store already holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreMode {
+    /// The store must be empty. If it is not, the restore fails and
+    /// changes nothing.
+    IntoEmptyStore,
+    /// The store ends up as the snapshot was: keys of the snapshot are
+    /// overwritten and every other key is deleted.
+    ReplaceEverything,
+}
+
+/// What a restore changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RestoreOutcome {
+    /// How many keys were written from the snapshot.
+    pub keys_written: usize,
+    /// How many keys the snapshot does not hold were deleted.
+    pub keys_deleted: usize,
+}
+
 const STREAM_KEY_PREFIX: &str = "streams/";
 const DELETED_STREAM_KEY_PREFIX: &str = "deleted-streams/";
 const CHECKPOINT_KEY_PREFIX: &str = "checkpoints/";
@@ -833,6 +858,180 @@ impl MetadataStore {
             });
         }
         Ok(MetadataSnapshot { taken_at, entries })
+    }
+
+    /// Writes the content of a snapshot back into the store, after the
+    /// store was lost (design, section 14, "Disaster recovery").
+    ///
+    /// Every key of the snapshot is written with the bytes it had. With
+    /// [`RestoreMode::ReplaceEverything`], keys the snapshot does not hold
+    /// are deleted, so that the store ends up as the snapshot was.
+    ///
+    /// The restore is several transactions, not one: a backend limits how
+    /// much one transaction may change. Run it while no writer, controller
+    /// or materializer uses the store. If it fails half way, run it again
+    /// with [`RestoreMode::ReplaceEverything`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetaError::InvalidState`] if the mode is
+    /// [`RestoreMode::IntoEmptyStore`] and the store holds a key, or gets
+    /// one from somebody else while the restore runs. Fails if the store is
+    /// unavailable.
+    pub async fn restore(
+        &self,
+        snapshot: &MetadataSnapshot,
+        mode: RestoreMode,
+    ) -> Result<RestoreOutcome, MetaError> {
+        let existing_entries = self.key_value_store.list("").await?;
+        if mode == RestoreMode::IntoEmptyStore && !existing_entries.is_empty() {
+            return Err(MetaError::InvalidState {
+                reason: format!(
+                    "the metadata store holds {} keys; restoring into it would mix two states",
+                    existing_entries.len()
+                ),
+            });
+        }
+        let mut snapshot_keys = BTreeSet::new();
+        let mut mutations = Vec::with_capacity(snapshot.entries.len());
+        for entry in &snapshot.entries {
+            snapshot_keys.insert(entry.key.as_str());
+            mutations.push(Mutation::Put {
+                key: entry.key.clone(),
+                value: entry.value.clone(),
+            });
+        }
+        let mut keys_deleted = 0;
+        for (existing_key, _stored) in &existing_entries {
+            if !snapshot_keys.contains(existing_key.as_str()) {
+                mutations.push(Mutation::Delete {
+                    key: existing_key.clone(),
+                });
+                keys_deleted += 1;
+            }
+        }
+
+        for batch in mutations.chunks(RESTORE_BATCH_KEYS) {
+            let mut conditions = Vec::new();
+            if mode == RestoreMode::IntoEmptyStore {
+                for mutation in batch {
+                    if let Mutation::Put { key, .. } = mutation {
+                        conditions.push(Condition::IsAbsent { key: key.clone() });
+                    }
+                }
+            }
+            let outcome = self
+                .key_value_store
+                .transact(conditions, batch.to_vec())
+                .await?;
+            if outcome == TransactionOutcome::ConditionFailed {
+                return Err(MetaError::InvalidState {
+                    reason: "somebody else wrote to the metadata store while it was restored"
+                        .to_owned(),
+                });
+            }
+        }
+        Ok(RestoreOutcome {
+            keys_written: snapshot.entries.len(),
+            keys_deleted,
+        })
+    }
+
+    /// Writes a stream record that was put together outside the store, as
+    /// `bita metadata rebuild` does from what replicas and the object store
+    /// hold. The record replaces the stream's record if the stream is
+    /// known, and creates it otherwise. The stream identifier counter is
+    /// raised to the record's identifier if it is below, so that a stream
+    /// created later never reuses it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetaError::InvalidName`] if the record's name cannot be
+    /// used in a key, and [`MetaError::InvalidState`] if the name belongs
+    /// to a stream with another identifier, the identifier belongs to a
+    /// stream with another name, or the stream is recorded as deleted.
+    /// Fails if the store is unavailable.
+    pub async fn adopt_stream(&self, record: &StreamRecord) -> Result<(), MetaError> {
+        validate_name(&record.name)?;
+        let stream_key = stream_key(&record.name);
+        let deleted_key = deleted_stream_key(record.stream_id);
+        for _attempt in 0..MAX_UPDATE_ATTEMPTS {
+            if self.key_value_store.get(&deleted_key).await?.is_some() {
+                return Err(MetaError::InvalidState {
+                    reason: format!(
+                        "stream {} is recorded as deleted; its records are being removed",
+                        record.stream_id
+                    ),
+                });
+            }
+            for known_stream in self.list_streams().await? {
+                if known_stream.stream_id == record.stream_id && known_stream.name != record.name {
+                    return Err(MetaError::InvalidState {
+                        reason: format!(
+                            "stream {} is already known as {:?}",
+                            record.stream_id, known_stream.name
+                        ),
+                    });
+                }
+            }
+            let stream_condition = match self.key_value_store.get(&stream_key).await? {
+                None => Condition::IsAbsent {
+                    key: stream_key.clone(),
+                },
+                Some(stored) => {
+                    let known_stream: StreamRecord = decode(&stream_key, &stored.value)?;
+                    if known_stream.stream_id != record.stream_id {
+                        return Err(MetaError::InvalidState {
+                            reason: format!(
+                                "the name {:?} belongs to stream {}, not to stream {}",
+                                record.name, known_stream.stream_id, record.stream_id
+                            ),
+                        });
+                    }
+                    Condition::HasRevision {
+                        key: stream_key.clone(),
+                        revision: stored.revision,
+                    }
+                }
+            };
+            let counter = self.key_value_store.get(STREAM_ID_COUNTER_KEY).await?;
+            let (last_stream_id, counter_condition) = match &counter {
+                Some(stored) => (
+                    decode::<u64>(STREAM_ID_COUNTER_KEY, &stored.value)?,
+                    Condition::HasRevision {
+                        key: STREAM_ID_COUNTER_KEY.to_owned(),
+                        revision: stored.revision,
+                    },
+                ),
+                None => (
+                    0,
+                    Condition::IsAbsent {
+                        key: STREAM_ID_COUNTER_KEY.to_owned(),
+                    },
+                ),
+            };
+            let raised_counter = last_stream_id.max(record.stream_id.get());
+            let outcome = self
+                .key_value_store
+                .transact(
+                    vec![
+                        counter_condition,
+                        stream_condition,
+                        Condition::IsAbsent {
+                            key: deleted_key.clone(),
+                        },
+                    ],
+                    vec![
+                        put(STREAM_ID_COUNTER_KEY, &raised_counter),
+                        put(&stream_key, record),
+                    ],
+                )
+                .await?;
+            if outcome == TransactionOutcome::Applied {
+                return Ok(());
+            }
+        }
+        Err(too_much_contention(&stream_key))
     }
 
     // ---- helpers ----
@@ -2178,6 +2377,277 @@ mod tests {
             store.snapshot(NOW).await,
             Err(MetaError::Unavailable(_))
         ));
+    }
+
+    // ---- restore ----
+
+    /// A snapshot of a store with a stream, an open segment and a
+    /// materializer.
+    async fn snapshot_of_a_used_store() -> MetadataSnapshot {
+        let store = store_with_open_segment().await;
+        store
+            .register_materializer(STREAM, "pages")
+            .await
+            .expect("materializer is registered");
+        store.snapshot(NOW).await.expect("store is available")
+    }
+
+    #[tokio::test]
+    async fn restore_into_an_empty_store_brings_back_every_key() {
+        let snapshot = snapshot_of_a_used_store().await;
+        let (restored, _key_value_store) = new_store();
+        restored
+            .restore(&snapshot, RestoreMode::IntoEmptyStore)
+            .await
+            .expect("the snapshot is restored");
+        assert_eq!(
+            restored.snapshot(NOW).await.map(|after| after.entries),
+            Ok(snapshot.entries)
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_store_serves_the_streams_it_held() {
+        let snapshot = snapshot_of_a_used_store().await;
+        let (restored, _key_value_store) = new_store();
+        restored
+            .restore(&snapshot, RestoreMode::IntoEmptyStore)
+            .await
+            .expect("the snapshot is restored");
+        let stream = restored.get_stream(STREAM).await.expect("stream exists");
+        assert_eq!(stream.epoch, Epoch::new(1));
+    }
+
+    #[tokio::test]
+    async fn restore_reports_how_many_keys_it_wrote() {
+        let snapshot = snapshot_of_a_used_store().await;
+        let (restored, _key_value_store) = new_store();
+        let outcome = restored
+            .restore(&snapshot, RestoreMode::IntoEmptyStore)
+            .await;
+        assert_eq!(
+            outcome,
+            Ok(RestoreOutcome {
+                keys_written: 3,
+                keys_deleted: 0
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_into_a_store_that_holds_keys_is_refused() {
+        let snapshot = snapshot_of_a_used_store().await;
+        let used_store = store_with_stream().await;
+        let refused = used_store
+            .restore(&snapshot, RestoreMode::IntoEmptyStore)
+            .await;
+        assert!(matches!(refused, Err(MetaError::InvalidState { .. })));
+    }
+
+    #[tokio::test]
+    async fn refused_restore_changes_nothing() {
+        let snapshot = snapshot_of_a_used_store().await;
+        let used_store = store_with_stream().await;
+        let before = used_store.snapshot(NOW).await.expect("store is available");
+        let _refused = used_store
+            .restore(&snapshot, RestoreMode::IntoEmptyStore)
+            .await;
+        assert_eq!(used_store.snapshot(NOW).await, Ok(before));
+    }
+
+    #[tokio::test]
+    async fn restore_that_replaces_everything_leaves_exactly_the_snapshot() {
+        let snapshot = snapshot_of_a_used_store().await;
+        let (used_store, _key_value_store) = new_store();
+        for name in ["audit", "payments"] {
+            used_store
+                .create_stream(
+                    name,
+                    ReplicationSettings::DEFAULT,
+                    RetentionPolicy::default(),
+                    None,
+                )
+                .await
+                .expect("stream is created");
+        }
+        used_store
+            .restore(&snapshot, RestoreMode::ReplaceEverything)
+            .await
+            .expect("the snapshot is restored");
+        assert_eq!(
+            used_store.snapshot(NOW).await.map(|after| after.entries),
+            Ok(snapshot.entries)
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_that_replaces_everything_reports_the_keys_it_deleted() {
+        let snapshot = snapshot_of_a_used_store().await;
+        let (used_store, _key_value_store) = new_store();
+        used_store
+            .create_stream(
+                "audit",
+                ReplicationSettings::DEFAULT,
+                RetentionPolicy::default(),
+                None,
+            )
+            .await
+            .expect("stream is created");
+        let outcome = used_store
+            .restore(&snapshot, RestoreMode::ReplaceEverything)
+            .await;
+        // The counter is in both; only the other stream's record goes.
+        assert_eq!(
+            outcome,
+            Ok(RestoreOutcome {
+                keys_written: 3,
+                keys_deleted: 1
+            })
+        );
+    }
+
+    /// A backend limits how much one transaction may change, so a restore
+    /// is split. The split must not lose or reorder anything.
+    #[tokio::test]
+    async fn restore_of_more_keys_than_one_transaction_takes_brings_back_every_key() {
+        let (source, _key_value_store) = new_store();
+        for number in 0..(RESTORE_BATCH_KEYS * 3 + 5) {
+            source
+                .put_replica(&replica(&format!("replica-{number}"), 1_000))
+                .await
+                .expect("replica is registered");
+        }
+        let snapshot = source.snapshot(NOW).await.expect("store is available");
+        let (restored, _key_value_store) = new_store();
+        restored
+            .restore(&snapshot, RestoreMode::IntoEmptyStore)
+            .await
+            .expect("the snapshot is restored");
+        assert_eq!(
+            restored.snapshot(NOW).await.map(|after| after.entries),
+            Ok(snapshot.entries)
+        );
+    }
+
+    // ---- adopted streams ----
+
+    /// The record of a stream called `name` with identifier `stream_id`,
+    /// as a rebuild would put it together.
+    async fn rebuilt_stream(name: &str, stream_id: u64) -> StreamRecord {
+        let (scratch, _key_value_store) = new_store();
+        let mut record = scratch
+            .create_stream(
+                name,
+                ReplicationSettings::DEFAULT,
+                RetentionPolicy::default(),
+                None,
+            )
+            .await
+            .expect("stream is created");
+        record.stream_id = StreamId::new(stream_id);
+        record.epoch = Epoch::new(9);
+        record
+    }
+
+    #[tokio::test]
+    async fn adopted_stream_is_read_back_as_it_was_given() {
+        let (store, _key_value_store) = new_store();
+        let record = rebuilt_stream("orders", 7).await;
+        store
+            .adopt_stream(&record)
+            .await
+            .expect("stream is adopted");
+        assert_eq!(store.get_stream("orders").await, Ok(record));
+    }
+
+    #[tokio::test]
+    async fn stream_created_after_an_adoption_gets_a_higher_identifier() {
+        let (store, _key_value_store) = new_store();
+        store
+            .adopt_stream(&rebuilt_stream("orders", 7).await)
+            .await
+            .expect("stream is adopted");
+        let created = store
+            .create_stream(
+                "audit",
+                ReplicationSettings::DEFAULT,
+                RetentionPolicy::default(),
+                None,
+            )
+            .await
+            .expect("stream is created");
+        assert_eq!(created.stream_id, StreamId::new(8));
+    }
+
+    #[tokio::test]
+    async fn adoption_does_not_lower_the_identifier_counter() {
+        let (store, _key_value_store) = new_store();
+        store
+            .adopt_stream(&rebuilt_stream("orders", 7).await)
+            .await
+            .expect("stream is adopted");
+        store
+            .adopt_stream(&rebuilt_stream("audit", 3).await)
+            .await
+            .expect("stream is adopted");
+        let created = store
+            .create_stream(
+                "payments",
+                ReplicationSettings::DEFAULT,
+                RetentionPolicy::default(),
+                None,
+            )
+            .await
+            .expect("stream is created");
+        assert_eq!(created.stream_id, StreamId::new(8));
+    }
+
+    #[tokio::test]
+    async fn adoption_replaces_the_record_of_the_same_stream() {
+        let store = store_with_stream().await;
+        let rebuilt = rebuilt_stream(STREAM, 1).await;
+        store
+            .adopt_stream(&rebuilt)
+            .await
+            .expect("stream is adopted");
+        assert_eq!(
+            store.get_stream(STREAM).await.map(|stream| stream.epoch),
+            Ok(Epoch::new(9))
+        );
+    }
+
+    #[tokio::test]
+    async fn adoption_under_a_name_that_belongs_to_another_stream_is_refused() {
+        let store = store_with_stream().await;
+        let refused = store.adopt_stream(&rebuilt_stream(STREAM, 7).await).await;
+        assert!(matches!(refused, Err(MetaError::InvalidState { .. })));
+    }
+
+    #[tokio::test]
+    async fn adoption_of_a_stream_known_under_another_name_is_refused() {
+        let store = store_with_stream().await;
+        let refused = store.adopt_stream(&rebuilt_stream("audit", 1).await).await;
+        assert!(matches!(refused, Err(MetaError::InvalidState { .. })));
+    }
+
+    #[tokio::test]
+    async fn adoption_of_a_stream_recorded_as_deleted_is_refused() {
+        let store = store_with_stream().await;
+        store
+            .delete_stream(STREAM)
+            .await
+            .expect("stream is deleted");
+        let refused = store.adopt_stream(&rebuilt_stream("orders", 1).await).await;
+        assert!(matches!(refused, Err(MetaError::InvalidState { .. })));
+    }
+
+    #[tokio::test]
+    async fn adoption_under_a_name_that_cannot_be_a_key_is_refused() {
+        let (store, _key_value_store) = new_store();
+        let mut record = rebuilt_stream("orders", 7).await;
+        record.name = "not/a/name".to_owned();
+        let refused = store.adopt_stream(&record).await;
+        assert!(matches!(refused, Err(MetaError::InvalidName { .. })));
     }
 
     #[tokio::test]

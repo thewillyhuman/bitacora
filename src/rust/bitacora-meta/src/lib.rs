@@ -34,4 +34,4 @@ pub use snapshot::{
     MetadataSnapshot, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_KEY_PREFIX, SNAPSHOT_MAGIC, SnapshotEntry,
     SnapshotError, snapshot_object_key, snapshot_time_of,
 };
-pub use store::{MAX_NAME_LENGTH_BYTES, MetaError, MetadataStore};
+pub use store::{MAX_NAME_LENGTH_BYTES, MetaError, MetadataStore, RestoreMode, RestoreOutcome};
