@@ -1,0 +1,22 @@
+[package]
+name = "bitacora-sim"
+description = "Deterministic simulation of a bitacora cluster with fault injection and a history checker."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+bitacora-client.workspace = true
+bitacora-controller.workspace = true
+bitacora-meta.workspace = true
+bitacora-testkit.workspace = true
+bitacora-types.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

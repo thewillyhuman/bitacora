@@ -80,6 +80,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-sim"
+version = "0.0.0"
+dependencies = [
+ "bitacora-client",
+ "bitacora-controller",
+ "bitacora-meta",
+ "bitacora-testkit",
+ "bitacora-types",
+ "bytes",
+ "tokio",
+]
+
+[[package]]
 name = "bitacora-testkit"
 version = "0.0.0"
 dependencies = [

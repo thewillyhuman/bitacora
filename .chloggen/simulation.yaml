@@ -1,0 +1,4 @@
+change_type: new_component
+component: sim
+note: "Add deterministic simulation of a whole cluster with seeded fault injection and a history checker for the durability, uniqueness, prefix and single-writer invariants."
+issues: [2]

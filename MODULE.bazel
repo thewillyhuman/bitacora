@@ -35,8 +35,17 @@ crate.from_cargo(
         "//src/rust/bitacora-meta:Cargo.toml",
         "//src/rust/bitacora-replica:Cargo.toml",
         "//src/rust/bitacora-segment:Cargo.toml",
+        "//src/rust/bitacora-sim:Cargo.toml",
         "//src/rust/bitacora-testkit:Cargo.toml",
         "//src/rust/bitacora-types:Cargo.toml",
     ],
+)
+# tokio's unstable API is what lets the simulator seed the runtime's own
+# random choices (which waiter a watch channel wakes first, for example), so
+# that a seed replays a run exactly. Cargo gets the same flag from
+# src/rust/.cargo/config.toml.
+crate.annotation(
+    crate = "tokio",
+    rustc_flags = ["--cfg=tokio_unstable"],
 )
 use_repo(crate, "crates")

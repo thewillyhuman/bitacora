@@ -1,0 +1,5 @@
+# tokio's unstable API is what lets the simulator seed the runtime's own
+# random choices, so that a seed replays a run exactly. Bazel passes the
+# same flag to tokio in //:MODULE.bazel.
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

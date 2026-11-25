@@ -1,0 +1,27 @@
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
+
+exports_files(["Cargo.toml"])
+
+SIMULATION_DEPS = [
+    "//src/rust/bitacora-client:bitacora_client",
+    "//src/rust/bitacora-controller:bitacora_controller",
+    "//src/rust/bitacora-meta:bitacora_meta",
+    "//src/rust/bitacora-testkit:bitacora_testkit",
+    "//src/rust/bitacora-types:bitacora_types",
+]
+
+bitacora_library(
+    name = "bitacora_sim",
+    deps = SIMULATION_DEPS,
+)
+
+# Runs the fault matrix over a range of seeds. Continuous integration runs
+# the default budget; set BITA_SIM_SEEDS to run more, for example nightly:
+#   bazel test //src/rust/bitacora-sim:fault_matrix_test \
+#       --test_env=BITA_SIM_SEEDS=2000 --test_timeout=3600
+bitacora_integration_test(
+    name = "fault_matrix_test",
+    size = "medium",
+    srcs = ["tests/fault_matrix.rs"],
+    deps = SIMULATION_DEPS + [":bitacora_sim"],
+)
