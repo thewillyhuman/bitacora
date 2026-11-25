@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+bitacora-artifact.workspace = true
 bitacora-meta.workspace = true
 bitacora-types.workspace = true
 tokio.workspace = true

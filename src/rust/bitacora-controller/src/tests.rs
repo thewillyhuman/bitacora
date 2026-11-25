@@ -15,7 +15,7 @@ use bytes::Bytes;
 
 use crate::{Controller, ControllerSettings, PassReport};
 
-const STREAM: &str = "orders";
+pub(crate) const STREAM: &str = "orders";
 
 fn controller(cluster: &Cluster, identity: &str) -> Controller {
     Controller::new(
@@ -58,7 +58,7 @@ async fn create_stream(cluster: &Cluster) {
         .expect("the stream is created");
 }
 
-async fn stream(cluster: &Cluster) -> StreamRecord {
+pub(crate) async fn stream(cluster: &Cluster) -> StreamRecord {
     cluster
         .metadata()
         .get_stream(STREAM)
@@ -66,7 +66,7 @@ async fn stream(cluster: &Cluster) -> StreamRecord {
         .expect("the stream exists")
 }
 
-fn client(cluster: &Cluster, settings: WriterSettings) -> BitacoraClient {
+pub(crate) fn client(cluster: &Cluster, settings: WriterSettings) -> BitacoraClient {
     BitacoraClient::new(
         cluster.metadata().clone(),
         cluster.connector(),
@@ -548,7 +548,7 @@ async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
 
 /// A cluster whose stream has `sealed_segment_count` sealed segments of one
 /// record each (so segment `n` holds exactly record `n`) and an open one.
-async fn cluster_with_segments(node_count: usize, sealed_segment_count: u64) -> Cluster {
+pub(crate) async fn cluster_with_segments(node_count: usize, sealed_segment_count: u64) -> Cluster {
     let cluster = Cluster::start(node_count).await;
     create_stream(&cluster).await;
     run_pass(&cluster).await;
@@ -581,7 +581,7 @@ async fn cluster_with_segments(node_count: usize, sealed_segment_count: u64) -> 
 }
 
 /// Registers materializer `name` and commits its checkpoint at `sequence`.
-async fn checkpoint_at(cluster: &Cluster, name: &str, sequence: u64) {
+pub(crate) async fn checkpoint_at(cluster: &Cluster, name: &str, sequence: u64) {
     let metadata = cluster.metadata();
     let stream_id = stream(cluster).await.stream_id;
     metadata
@@ -599,7 +599,7 @@ async fn checkpoint_at(cluster: &Cluster, name: &str, sequence: u64) {
         .expect("committed");
 }
 
-async fn listed_segments(cluster: &Cluster) -> Vec<u64> {
+pub(crate) async fn listed_segments(cluster: &Cluster) -> Vec<u64> {
     stream(cluster)
         .await
         .segments
@@ -610,7 +610,7 @@ async fn listed_segments(cluster: &Cluster) -> Vec<u64> {
 
 /// The segments of the stream that the node at `node_number` holds a copy
 /// of. The open segment is not among them until a record is appended to it.
-async fn held_segments(cluster: &Cluster, node_number: usize) -> Vec<u64> {
+pub(crate) async fn held_segments(cluster: &Cluster, node_number: usize) -> Vec<u64> {
     cluster.nodes()[node_number]
         .replica()
         .expect("the node is running")

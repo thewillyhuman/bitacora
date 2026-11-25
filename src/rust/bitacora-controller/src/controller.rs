@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bitacora_artifact::ArtifactStore;
 use bitacora_meta::{
     CheckpointRecord, CopyRecord, CopyState, MetaError, MetadataStore, PlacementPolicy,
     ReplicaRecord, SegmentRecord, StreamRecord, choose_additional_replica, choose_replica_set,
@@ -22,6 +23,8 @@ use bitacora_types::{
     Clock, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId, Timestamp,
 };
 use tokio::time::{sleep, timeout};
+
+mod tiering;
 
 /// How the controller paces itself and judges replicas.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +48,17 @@ pub struct ControllerSettings {
     /// How many copies one pass rebuilds at most, so that a pass stays
     /// short and placement keeps up while a failed node is re-replicated.
     pub max_repairs_per_pass: usize,
+    /// How long after its seal a fully replicated segment is uploaded to
+    /// the object store.
+    pub tiering_delay: Duration,
+    /// How long after the upload the replicas keep their copies, so that
+    /// recent data is read from local disks.
+    pub hot_read_window: Duration,
+    /// How long uploading one segment may take.
+    pub upload_timeout: Duration,
+    /// How many segments one pass uploads at most, so that a pass stays
+    /// short.
+    pub max_uploads_per_pass: usize,
 }
 
 impl Default for ControllerSettings {
@@ -58,6 +72,10 @@ impl Default for ControllerSettings {
             replica_lost_after: Duration::from_mins(5),
             repair_timeout: Duration::from_mins(30),
             max_repairs_per_pass: 8,
+            tiering_delay: Duration::from_mins(15),
+            hot_read_window: Duration::from_hours(24),
+            upload_timeout: Duration::from_mins(30),
+            max_uploads_per_pass: 4,
         }
     }
 }
@@ -74,6 +92,11 @@ pub struct PassReport {
     pub copies_marked_bad: usize,
     /// How many bad copies of sealed segments were rebuilt from a good one.
     pub copies_repaired: usize,
+    /// How many sealed segments were uploaded to the object store.
+    pub segments_tiered: usize,
+    /// How many tiered segments were left to the object store alone, their
+    /// hot-read window being over.
+    pub segments_released: usize,
     /// How many segments below the low-water mark were deleted.
     pub segments_deleted: usize,
     /// How many segment copies were removed from replicas because their
@@ -114,6 +137,9 @@ pub struct Controller {
     connector: Arc<dyn ReplicaConnector>,
     clock: Arc<dyn Clock>,
     settings: ControllerSettings,
+    /// Where sealed segments are tiered to. A controller without one tiers
+    /// nothing and does everything else.
+    artifact_store: Option<Arc<dyn ArtifactStore>>,
 }
 
 impl Controller {
@@ -130,7 +156,18 @@ impl Controller {
             connector,
             clock,
             settings,
+            artifact_store: None,
         }
+    }
+
+    /// Gives the controller the object store that sealed segments are
+    /// tiered to (design, section 10, "Tiering"). It must be the store the
+    /// replicas upload to. Without one, the controller tiers nothing and
+    /// does everything else.
+    #[must_use]
+    pub fn with_artifact_store(mut self, artifact_store: Arc<dyn ArtifactStore>) -> Self {
+        self.artifact_store = Some(artifact_store);
+        self
     }
 
     /// Runs passes forever, as long as this instance holds or can take the
@@ -192,7 +229,13 @@ impl Controller {
         self.ensure_standby(stream, survey, report).await?;
         self.reconcile_sealed_copies(stream, survey, report).await?;
         self.repair_bad_copies(&stream.name, survey, report).await?;
-        self.truncate(&stream.name, survey.now, report).await
+        self.tier_sealed_segments(&stream.name, survey, report)
+            .await?;
+        self.release_tiered_segments(&stream.name, survey.now, report)
+            .await?;
+        self.truncate(&stream.name, survey.now, report).await?;
+        self.delete_tiered_segments_below_the_mark(&stream.name, report)
+            .await
     }
 
     /// Reads the registry and asks every live replica what it holds.
@@ -534,9 +577,13 @@ impl Controller {
                     std::mem::take(&mut record.segments)
                         .into_iter()
                         .partition(|segment| {
-                            segment
-                                .sealed_end()
-                                .is_some_and(|sealed_end| sealed_end < low_water_mark)
+                            // A tiered segment stays listed until its
+                            // object is deleted, so that a controller that
+                            // stops in between still knows about the object.
+                            segment.tiered.is_none()
+                                && segment
+                                    .sealed_end()
+                                    .is_some_and(|sealed_end| sealed_end < low_water_mark)
                         });
                 record.segments = kept;
                 Ok(deleted)
@@ -612,7 +659,9 @@ impl Controller {
                 || !replica.is_alive(survey.now, self.settings.replica_lost_after)
         });
         for deleted in deleted_streams {
-            if has_every_replica_answered && !streams_with_copies_left.contains(&deleted.stream_id)
+            if has_every_replica_answered
+                && !streams_with_copies_left.contains(&deleted.stream_id)
+                && self.delete_objects_of_stream(deleted.stream_id).await
             {
                 self.metadata
                     .forget_deleted_stream(deleted.stream_id)

@@ -1,0 +1,4 @@
+change_type: enhancement
+component: controller
+note: "Tier sealed segments to the object store after a delay, release their local copies after the hot-read window, and delete their objects when the log is truncated or the stream is deleted."
+issues: [3]

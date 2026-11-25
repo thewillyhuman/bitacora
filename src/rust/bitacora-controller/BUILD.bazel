@@ -11,6 +11,7 @@ bitacora_library(
         "//src/rust/bitacora-testkit:bitacora_testkit",
     ],
     deps = [
+        "//src/rust/bitacora-artifact:bitacora_artifact",
         "//src/rust/bitacora-meta:bitacora_meta",
         "//src/rust/bitacora-types:bitacora_types",
     ],

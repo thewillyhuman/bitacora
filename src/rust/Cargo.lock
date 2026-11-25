@@ -43,6 +43,7 @@ dependencies = [
 name = "bitacora-controller"
 version = "0.0.0"
 dependencies = [
+ "bitacora-artifact",
  "bitacora-client",
  "bitacora-meta",
  "bitacora-replica",
