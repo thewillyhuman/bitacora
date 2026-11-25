@@ -311,13 +311,20 @@ pub struct Cluster {
 
 impl Cluster {
     /// Starts `node_count` nodes named `replica-0`, `replica-1`, ... with
-    /// small segment files, and registers them.
+    /// small segment files, each on a host of its own, and registers them.
+    ///
+    /// The host label matters when a node loses its disk: its old and its
+    /// new identity are then registered side by side for a while, and the
+    /// label is what keeps placement from taking them for two machines.
     pub async fn start(node_count: usize) -> Self {
         let small_segments = ReplicaSettings {
             preallocated_segment_bytes: 4 * 1024,
             ..ReplicaSettings::default()
         };
-        Self::start_with(node_count, small_segments, |_node_number| Vec::new()).await
+        Self::start_with(node_count, small_segments, |node_number| {
+            vec![format!("host-{node_number}")]
+        })
+        .await
     }
 
     /// Starts `node_count` nodes with the given replica settings, where
