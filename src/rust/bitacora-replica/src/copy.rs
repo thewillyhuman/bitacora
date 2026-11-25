@@ -651,6 +651,14 @@ impl SegmentCopy {
 
     /// Reports what the replica holds for this segment.
     pub(crate) fn status(&self) -> SegmentStatus {
+        let descriptor = self.file.as_ref().map(|file| {
+            let header = file.header();
+            SegmentDescriptor {
+                address: header.address,
+                epoch: header.epoch,
+                first_sequence: header.first_sequence,
+            }
+        });
         SegmentStatus {
             address: self.address,
             local_end: self.file.as_ref().map(SegmentFile::local_end),
@@ -658,6 +666,7 @@ impl SegmentCopy {
             sealed_end: self.state.sealed_end,
             size_bytes: self.file.as_ref().map_or(0, SegmentFile::content_bytes),
             is_damaged: self.damage.is_some(),
+            descriptor,
         }
     }
 

@@ -243,6 +243,7 @@ impl From<domain::SegmentStatus> for wire::SegmentStatus {
             sealed_end: status.sealed_end.map(SequenceNumber::get),
             size_bytes: status.size_bytes,
             is_damaged: status.is_damaged,
+            descriptor: status.descriptor.map(wire::SegmentDescriptor::from),
         }
     }
 }
@@ -250,13 +251,21 @@ impl From<domain::SegmentStatus> for wire::SegmentStatus {
 impl TryFrom<wire::SegmentStatus> for domain::SegmentStatus {
     type Error = MalformedMessage;
 
-    /// Reads what a replica knows about a segment copy.
+    /// Reads what a replica knows about a segment copy. The descriptor is
+    /// optional: a replica without a file for the segment, and a replica
+    /// older than the field, send none.
     ///
     /// # Errors
     ///
-    /// Returns [`MalformedMessage::MissingField`] without an address.
+    /// Returns [`MalformedMessage::MissingField`] without an address, and
+    /// whatever reading the descriptor returns if one is present and
+    /// malformed.
     fn try_from(status: wire::SegmentStatus) -> Result<Self, Self::Error> {
         let address = required_field(status.address, "SegmentStatus.address")?;
+        let descriptor = match status.descriptor {
+            Some(descriptor) => Some(descriptor.try_into()?),
+            None => None,
+        };
         Ok(Self {
             address: address.into(),
             local_end: optional_sequence(status.local_end),
@@ -264,6 +273,7 @@ impl TryFrom<wire::SegmentStatus> for domain::SegmentStatus {
             sealed_end: optional_sequence(status.sealed_end),
             size_bytes: status.size_bytes,
             is_damaged: status.is_damaged,
+            descriptor,
         })
     }
 }

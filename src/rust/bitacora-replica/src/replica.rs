@@ -895,6 +895,58 @@ mod tests {
         );
     }
 
+    /// The header is what lets a stream's segment list be reconstructed
+    /// from the replicas if the metadata store is lost.
+    #[tokio::test]
+    async fn listed_copy_with_a_file_reports_what_its_header_says() {
+        let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
+        replica
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        let listed = replica.list_segments().await.expect("list");
+        assert_eq!(
+            listed[0].descriptor,
+            Some(SegmentDescriptor {
+                address: SEGMENT,
+                epoch: EPOCH,
+                first_sequence: SequenceNumber::new(FIRST_SEQUENCE),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn listed_copy_without_a_file_reports_no_header() {
+        let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
+        replica
+            .fence(FenceRequest {
+                segment: SEGMENT,
+                epoch: EPOCH,
+            })
+            .await
+            .expect("fence");
+        let listed = replica.list_segments().await.expect("list");
+        assert_eq!(listed[0].descriptor, None);
+    }
+
+    #[tokio::test]
+    async fn reported_header_survives_a_restart() {
+        let disk = MemoryDisk::new();
+        let replica = open_replica(&disk, "replica-a").await;
+        replica
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        let before_the_restart = replica.list_segments().await.expect("list");
+        replica.stop();
+        let restarted = open_replica(&disk, "replica-a").await;
+        let after_the_restart = restarted.list_segments().await.expect("list");
+        assert_eq!(
+            after_the_restart[0].descriptor,
+            before_the_restart[0].descriptor
+        );
+    }
+
     // ---- integrity ----
 
     #[tokio::test]

@@ -494,6 +494,14 @@ message SegmentStatus {
 
   // Whether the copy failed a checksum or a flush and must be replaced.
   bool is_damaged = 6;
+
+  // What the header of the replica's segment file says: the segment's epoch
+  // and first sequence number, with the address repeated. Absent if the
+  // replica holds no file for the segment, only fencing or sealing state,
+  // and in answers of replicas older than this field. It lets the segment
+  // list of a stream be reconstructed from the replicas if the metadata
+  // store is lost.
+  SegmentDescriptor descriptor = 7;
 }
 
 // Asks a replica for every segment copy it holds.

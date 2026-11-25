@@ -277,6 +277,12 @@ pub struct SegmentStatus {
     pub size_bytes: u64,
     /// Whether the copy failed a checksum or a flush and must be replaced.
     pub is_damaged: bool,
+    /// What the header of the replica's segment file says: the segment's
+    /// epoch and first sequence number, with the address repeated. `None`
+    /// if the replica holds no file for the segment, only fencing or
+    /// sealing state. It is what lets the segment list of a stream be
+    /// reconstructed from the replicas if the metadata store is lost.
+    pub descriptor: Option<SegmentDescriptor>,
 }
 
 /// What a replica reports about itself.

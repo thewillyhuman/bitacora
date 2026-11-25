@@ -971,6 +971,7 @@ mod tests {
             sealed_end: sealed_end.map(SequenceNumber::new),
             size_bytes: 0,
             is_damaged: false,
+            descriptor: None,
         }
     }
 

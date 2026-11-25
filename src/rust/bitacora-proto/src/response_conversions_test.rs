@@ -35,6 +35,7 @@ fn segment_status(segment_id: u64) -> domain::SegmentStatus {
         sealed_end: None,
         size_bytes: 4096,
         is_damaged: false,
+        descriptor: None,
     }
 }
 

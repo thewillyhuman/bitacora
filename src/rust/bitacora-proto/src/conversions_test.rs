@@ -29,6 +29,7 @@ fn sealed_segment_status() -> domain::SegmentStatus {
         sealed_end: Some(SequenceNumber::new(60)),
         size_bytes: 4096,
         is_damaged: false,
+        descriptor: Some(segment_descriptor()),
     }
 }
 
@@ -97,12 +98,50 @@ fn status_of_a_copy_without_data_keeps_its_ends_absent() {
         local_end: None,
         sealed_end: None,
         is_damaged: true,
+        descriptor: None,
         ..sealed_segment_status()
     };
 
     let message = wire::SegmentStatus::from(status);
 
     assert_eq!(domain::SegmentStatus::try_from(message), Ok(status));
+}
+
+#[test]
+fn status_of_a_copy_with_a_file_carries_what_its_header_says() {
+    let message = wire::SegmentStatus::from(sealed_segment_status());
+
+    let status = domain::SegmentStatus::try_from(message).expect("a valid status");
+
+    assert_eq!(status.descriptor, Some(segment_descriptor()));
+}
+
+/// A replica older than the descriptor field sends none. Its status must still be read.
+#[test]
+fn status_from_a_replica_that_sends_no_descriptor_is_read_without_one() {
+    let message = wire::SegmentStatus {
+        descriptor: None,
+        ..wire::SegmentStatus::from(sealed_segment_status())
+    };
+
+    let status = domain::SegmentStatus::try_from(message).expect("a valid status");
+
+    assert_eq!(status.descriptor, None);
+}
+
+#[test]
+fn status_whose_descriptor_starts_at_sequence_zero_is_malformed() {
+    let mut message = wire::SegmentStatus::from(sealed_segment_status());
+    if let Some(descriptor) = &mut message.descriptor {
+        descriptor.first_sequence = 0;
+    }
+
+    assert_eq!(
+        domain::SegmentStatus::try_from(message),
+        Err(MalformedMessage::ZeroRecordSequence {
+            field: "SegmentDescriptor.first_sequence"
+        })
+    );
 }
 
 #[test]
