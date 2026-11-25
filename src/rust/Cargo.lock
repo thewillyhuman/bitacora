@@ -335,6 +335,7 @@ dependencies = [
  "async-trait",
  "bitacora-types",
  "bytes",
+ "crc32c",
  "serde",
  "serde_json",
  "thiserror",

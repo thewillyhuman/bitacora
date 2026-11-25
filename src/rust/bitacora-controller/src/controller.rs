@@ -8,7 +8,7 @@
 //! what the pass saw.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
@@ -24,6 +24,7 @@ use bitacora_types::{
 };
 use tokio::time::{sleep, timeout};
 
+mod snapshot;
 mod tiering;
 
 /// How the controller paces itself and judges replicas.
@@ -59,6 +60,11 @@ pub struct ControllerSettings {
     /// How many segments one pass uploads at most, so that a pass stays
     /// short.
     pub max_uploads_per_pass: usize,
+    /// How often the whole metadata store is copied to the object store.
+    pub metadata_snapshot_interval: Duration,
+    /// How many of the newest metadata snapshots are kept; older ones are
+    /// deleted. At least one is always kept.
+    pub metadata_snapshots_kept: usize,
 }
 
 impl Default for ControllerSettings {
@@ -76,6 +82,9 @@ impl Default for ControllerSettings {
             hot_read_window: Duration::from_hours(24),
             upload_timeout: Duration::from_mins(30),
             max_uploads_per_pass: 4,
+            metadata_snapshot_interval: Duration::from_mins(5),
+            // One day of snapshots at the default interval.
+            metadata_snapshots_kept: 288,
         }
     }
 }
@@ -107,6 +116,9 @@ pub struct PassReport {
     /// durability at risk. Segments left to the object store alone and
     /// segments awaiting deletion are not counted.
     pub segments_missing_copies: usize,
+    /// How many snapshots of the metadata store were written to the object
+    /// store: one when a snapshot was due, otherwise none.
+    pub metadata_snapshots_written: usize,
     /// How many streams could not be fully handled; they are retried on the
     /// next pass.
     pub streams_with_errors: usize,
@@ -154,6 +166,10 @@ pub struct Controller {
     /// Where sealed segments are tiered to. A controller without one tiers
     /// nothing and does everything else.
     artifact_store: Option<Arc<dyn ArtifactStore>>,
+    /// When the newest metadata snapshot in the object store was taken, as
+    /// far as this instance knows. It only saves a listing of the object
+    /// store on every pass; `None` means "look".
+    newest_metadata_snapshot_at: Mutex<Option<Timestamp>>,
 }
 
 impl Controller {
@@ -171,6 +187,7 @@ impl Controller {
             clock,
             settings,
             artifact_store: None,
+            newest_metadata_snapshot_at: Mutex::new(None),
         }
     }
 
@@ -243,6 +260,7 @@ impl Controller {
             }
         }
         self.remove_leftover_copies(&survey, &mut report).await?;
+        self.snapshot_metadata(survey.now, &mut report).await;
         Ok(report)
     }
 

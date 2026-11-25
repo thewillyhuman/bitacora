@@ -24,6 +24,7 @@ use crate::records::{
     RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
     WriterLease,
 };
+use crate::snapshot::{MetadataSnapshot, SnapshotEntry};
 
 /// How many times a read-modify-write is retried when other writers keep
 /// changing the same key. Conflicts are rare: a stream's key changes on
@@ -804,6 +805,34 @@ impl MetadataStore {
             .await?
             .map(|stored| decode(CONTROLLER_LEADER_KEY, &stored.value))
             .transpose()
+    }
+
+    // ---- snapshots ----
+
+    /// Reads the whole store as it is at one moment, for a backup in the
+    /// object store (design, section 14).
+    ///
+    /// The snapshot is one listing of every key. Both backends answer a
+    /// listing from one consistent view of the store, so a snapshot never
+    /// mixes two states: a stream's record and the checkpoints of its
+    /// materializers, for example, are from the same instant.
+    ///
+    /// `taken_at` is recorded in the snapshot; the store has no clock of
+    /// its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the store is unavailable.
+    pub async fn snapshot(&self, taken_at: Timestamp) -> Result<MetadataSnapshot, MetaError> {
+        let stored_entries = self.key_value_store.list("").await?;
+        let mut entries = Vec::with_capacity(stored_entries.len());
+        for (key, stored) in stored_entries {
+            entries.push(SnapshotEntry {
+                key,
+                value: stored.value,
+            });
+        }
+        Ok(MetadataSnapshot { taken_at, entries })
     }
 
     // ---- helpers ----
@@ -2084,6 +2113,71 @@ mod tests {
                 leading_since: None,
             }))
         );
+    }
+
+    // ---- snapshots ----
+
+    #[tokio::test]
+    async fn snapshot_of_an_empty_store_has_no_entries() {
+        let (store, _key_value_store) = new_store();
+        let snapshot = store.snapshot(NOW).await.expect("store is available");
+        assert_eq!(snapshot.entries, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn snapshot_records_when_it_was_taken() {
+        let (store, _key_value_store) = new_store();
+        let snapshot = store.snapshot(NOW).await.expect("store is available");
+        assert_eq!(snapshot.taken_at, NOW);
+    }
+
+    #[tokio::test]
+    async fn snapshot_holds_every_key_of_the_store_in_key_order() {
+        let store = store_with_open_segment().await;
+        store
+            .register_materializer(STREAM, "pages")
+            .await
+            .expect("materializer is registered");
+        let snapshot = store.snapshot(NOW).await.expect("store is available");
+        let keys: Vec<&str> = snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "checkpoints/1/pages",
+                "counters/stream-id",
+                "streams/orders"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_holds_the_stored_bytes_of_each_key() {
+        let (store, key_value_store) = new_store();
+        store
+            .try_lead("controller-1", NOW, LEADERSHIP_EXPIRY)
+            .await
+            .expect("store is available");
+        let stored = key_value_store
+            .get(CONTROLLER_LEADER_KEY)
+            .await
+            .expect("store is available")
+            .expect("the leader record exists");
+        let snapshot = store.snapshot(NOW).await.expect("store is available");
+        assert_eq!(snapshot.entries[0].value, stored.value);
+    }
+
+    #[tokio::test]
+    async fn snapshot_fails_while_the_store_is_unavailable() {
+        let (store, key_value_store) = new_store();
+        key_value_store.set_unavailable(true);
+        assert!(matches!(
+            store.snapshot(NOW).await,
+            Err(MetaError::Unavailable(_))
+        ));
     }
 
     #[tokio::test]

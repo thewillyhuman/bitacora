@@ -67,9 +67,41 @@ reference say so plainly, and the default takeover policy waits for a live write
 carries `leading_since`, which a renewal keeps and a takeover sets. Records written before the field
 existed read as "unknown".
 
+### Metadata snapshots
+
+The design copies the metadata store to the object store every five minutes (section 14). The controller
+does it, at the end of its pass: it already runs on a timer and already has the object store.
+
+A snapshot is one object:
+
+```text
+snapshot  magic 8 "BITAMETA" | format version u32 | taken at, unix milliseconds u64 | entry count u64
+          | entry* | crc32c u32
+entry     key length u32 | key, UTF-8 | value length u32 | value
+```
+
+Integers are little-endian and the checksum covers every byte before it. The values are the bytes the
+store held, which are JSON records, so the snapshot format knows nothing about streams and a snapshot
+can be restored by any version that reads those records. A snapshot is read in one listing of the store,
+which both backends answer from one consistent view, so it never mixes two states.
+
+Snapshots are named `metadata-snapshots/<unix milliseconds, 20 digits>`, so that a listing gives them
+oldest first and the name says when each was taken. The newest 288 are kept by default, a day at the
+default interval; older ones are deleted, and the newest is never deleted whatever the setting. Both
+numbers are controller settings.
+
+The controller is otherwise stateless, and stays so where it matters: it remembers when the newest
+snapshot was taken only to save a listing of the object store on every pass. An instance that does not
+know lists once. Two controllers that both believe they lead write at most one snapshot too many each.
+
+A snapshot that cannot be written never fails a pass. It is logged and tried again on the next one.
+
 ## Consequences
 
 - The tool needs no etcd to be tested, and its tests take a fraction of a second.
+- A cluster with an object store can lose its whole metadata store and lose at most the last interval of
+  metadata changes; what the replicas hold beyond that is found again by `bita metadata rebuild`.
+- Without an object store there are no snapshots.
 - The object store can only be named in the configuration file. `stream read` of a segment that replicas
   no longer hold needs that file.
 - `replica drain` cannot complete a drain by itself: writers roll when they next append. It reports what

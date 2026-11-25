@@ -25,8 +25,8 @@
 //! | the counters of the pass report | + the report's values | | |
 //!
 //! The counters of the pass report are `standbys_placed`, `copies_confirmed`, `copies_marked_bad`,
-//! `copies_repaired`, `segments_tiered`, `segments_released`, `segments_deleted`, `copies_removed` and
-//! `stream_errors`, each as `bitacora_controller_<name>_total`.
+//! `copies_repaired`, `segments_tiered`, `segments_released`, `segments_deleted`, `copies_removed`,
+//! `metadata_snapshots_written` and `stream_errors`, each as `bitacora_controller_<name>_total`.
 //!
 //! Only the leader knows how many segments miss copies, so a standby reports zero and a dashboard takes
 //! the maximum over the instances. After a failed round the last known value is kept: a metadata store
@@ -81,6 +81,8 @@ pub(crate) struct ControllerMetrics {
     segments_deleted: Counter,
     /// Leftover segment copies removed from replicas.
     copies_removed: Counter,
+    /// Snapshots of the metadata store written to the object store.
+    metadata_snapshots_written: Counter,
     /// Streams a pass could not fully handle.
     stream_errors: Counter,
 }
@@ -145,6 +147,10 @@ impl ControllerMetrics {
                 "controller_copies_removed",
                 "Leftover segment copies removed from replicas",
             ),
+            metadata_snapshots_written: registry.counter(
+                "controller_metadata_snapshots_written",
+                "Snapshots of the metadata store written to the object store",
+            ),
             stream_errors: registry.counter(
                 "controller_stream_errors",
                 "Streams a pass could not fully handle; they are retried on the next pass",
@@ -189,6 +195,8 @@ impl ControllerMetrics {
         self.segments_released.add(report.segments_released as u64);
         self.segments_deleted.add(report.segments_deleted as u64);
         self.copies_removed.add(report.copies_removed as u64);
+        self.metadata_snapshots_written
+            .add(report.metadata_snapshots_written as u64);
         self.stream_errors.add(report.streams_with_errors as u64);
     }
 }

@@ -1,0 +1,4 @@
+change_type: enhancement
+component: controller
+note: "Copy the whole metadata store to the object store every five minutes as one checksummed snapshot, and keep the newest 288."
+issues: [3]

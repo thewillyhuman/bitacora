@@ -65,6 +65,7 @@ fn report_with_distinct_values() -> PassReport {
         copies_removed: 8,
         segments_missing_copies: 9,
         streams_with_errors: 10,
+        metadata_snapshots_written: 11,
     }
 }
 
@@ -239,6 +240,7 @@ fn every_counter_of_the_report_reaches_its_own_metric() {
         ("segments_deleted", "7"),
         ("copies_removed", "8"),
         ("stream_errors", "10"),
+        ("metadata_snapshots_written", "11"),
     ];
 
     metrics.record_round(&Ok(led_round()), ROUND_TOOK);

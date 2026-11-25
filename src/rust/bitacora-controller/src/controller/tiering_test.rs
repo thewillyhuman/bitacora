@@ -266,11 +266,26 @@ async fn cluster_with_tiered_segments() -> Cluster {
     cluster
 }
 
-/// The keys of the objects in the cluster's object store.
+/// The keys of the segment objects in the cluster's object store. The controller also keeps snapshots of
+/// the metadata store there, which these tests do not look at.
 async fn stored_object_keys(cluster: &Cluster) -> Vec<String> {
     let objects = cluster
         .artifact_store()
-        .list_prefix("")
+        .list_prefix("streams/")
+        .await
+        .expect("the object store is up");
+    let mut object_keys = Vec::new();
+    for object in objects {
+        object_keys.push(object.object_key);
+    }
+    object_keys
+}
+
+/// The keys of everything materializers wrote to the cluster's object store.
+async fn materializer_object_keys(cluster: &Cluster) -> Vec<String> {
+    let objects = cluster
+        .artifact_store()
+        .list_prefix("materializers/")
         .await
         .expect("the object store is up");
     let mut object_keys = Vec::new();
@@ -662,7 +677,10 @@ async fn deleted_stream_leaves_no_materializer_artifacts_in_the_object_store() {
 
     run_tiering_pass(&cluster).await;
 
-    assert_eq!(stored_object_keys(&cluster).await, Vec::<String>::new());
+    assert_eq!(
+        materializer_object_keys(&cluster).await,
+        Vec::<String>::new()
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -688,7 +706,7 @@ async fn artifacts_of_other_streams_survive_the_deletion_of_a_stream() {
     run_tiering_pass(&cluster).await;
 
     assert_eq!(
-        stored_object_keys(&cluster).await,
+        materializer_object_keys(&cluster).await,
         [artifact_of_another_stream]
     );
 }

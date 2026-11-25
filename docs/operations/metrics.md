@@ -126,6 +126,7 @@ instance leads, makes one pass over every stream.
 | `bitacora_controller_segments_released_total` | counter | Tiered segments left to the object store alone |
 | `bitacora_controller_segments_deleted_total` | counter | Segments below the low-water mark deleted |
 | `bitacora_controller_copies_removed_total` | counter | Leftover segment copies removed from replicas |
+| `bitacora_controller_metadata_snapshots_written_total` | counter | Snapshots of the metadata store written to the object store |
 | `bitacora_controller_stream_errors_total` | counter | Streams a pass could not fully handle; they are retried on the next pass |
 
 Reading them across instances:
