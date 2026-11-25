@@ -5,6 +5,7 @@ exports_files(["Cargo.toml"])
 bitacora_library(
     name = "bitacora_replica",
     deps = [
+        "//src/rust/bitacora-artifact:bitacora_artifact",
         "//src/rust/bitacora-segment:bitacora_segment",
         "//src/rust/bitacora-types:bitacora_types",
     ],

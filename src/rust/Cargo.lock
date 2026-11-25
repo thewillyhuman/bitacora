@@ -75,6 +75,7 @@ name = "bitacora-replica"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bitacora-artifact",
  "bitacora-segment",
  "bitacora-types",
  "bytes",

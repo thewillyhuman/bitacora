@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bitacora_artifact::ArtifactStore;
 use bitacora_segment::{Disk, DiskSpace};
 use bitacora_types::replica_api::{
     AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadLimit, ReadRequest,
     ReadResponse, RepairRequest, RepairResponse, ReplicaApi, ReplicaConnector, ReplicaError,
-    ReplicaStatus, SealRequest, SealResponse, SegmentStatus,
+    ReplicaStatus, SealRequest, SealResponse, SegmentStatus, UploadRequest, UploadResponse,
 };
 use bitacora_types::{ReplicaId, SegmentAddress, SegmentId, StreamId};
 use bytes::Bytes;
@@ -19,6 +20,7 @@ use tokio::time::Instant;
 
 use crate::actor::{SegmentHandle, WriteFailureHandler};
 use crate::copy::{Admission, RepairPace, SegmentCopy};
+use crate::upload::{UploadPace, upload_sealed_copy};
 
 /// The file that ties a data directory to its replica identity.
 const REPLICA_ID_PATH: &str = "replica.id";
@@ -44,6 +46,11 @@ pub struct ReplicaSettings {
     pub repair_bytes_per_second: u64,
     /// How long one read from a peer may take during repair.
     pub repair_request_timeout: Duration,
+    /// The target size of one read of a local copy, and of one read of the
+    /// stored object, while a sealed segment is uploaded.
+    pub upload_chunk_bytes: usize,
+    /// How long one request to the object store may take.
+    pub object_store_timeout: Duration,
 }
 
 impl Default for ReplicaSettings {
@@ -57,6 +64,8 @@ impl Default for ReplicaSettings {
             repair_chunk_bytes: 1024 * 1024,
             repair_bytes_per_second: 128 * 1024 * 1024,
             repair_request_timeout: Duration::from_secs(30),
+            upload_chunk_bytes: 8 * 1024 * 1024,
+            object_store_timeout: Duration::from_mins(5),
         }
     }
 }
@@ -76,6 +85,9 @@ pub struct Replica {
     settings: ReplicaSettings,
     /// How this replica reaches its peers when it repairs a copy.
     connector: Arc<dyn ReplicaConnector>,
+    /// Where this replica uploads sealed segments to. A replica without
+    /// one refuses uploads and does everything else.
+    artifact_store: Option<Arc<dyn ArtifactStore>>,
     registry: Mutex<Registry>,
     is_draining: AtomicBool,
     is_stopped: AtomicBool,
@@ -149,12 +161,22 @@ impl Replica {
             disk,
             settings,
             connector,
+            artifact_store: None,
             registry: Mutex::new(registry),
             is_draining: AtomicBool::new(false),
             is_stopped: AtomicBool::new(false),
             last_space_measurement: Mutex::new(None),
             on_write_failure,
         })
+    }
+
+    /// Gives the replica the object store it uploads sealed segments to
+    /// (design, section 10, "Tiering"). Without one, the replica refuses
+    /// [`ReplicaApi::upload_segment`] and does everything else.
+    #[must_use]
+    pub fn with_artifact_store(mut self, artifact_store: Arc<dyn ArtifactStore>) -> Self {
+        self.artifact_store = Some(artifact_store);
+        self
     }
 
     /// The identity of this replica's data directory.
@@ -398,6 +420,31 @@ impl ReplicaApi for Replica {
             .await?;
         tracing::info!(%segment, local_end = %repaired.local_end, "segment copy repaired");
         Ok(repaired)
+    }
+
+    async fn upload_segment(&self, request: UploadRequest) -> Result<UploadResponse, ReplicaError> {
+        self.fail_if_stopped()?;
+        let Some(artifact_store) = &self.artifact_store else {
+            return Err(ReplicaError::InvalidRequest {
+                reason: "this replica has no object store to upload to".to_owned(),
+            });
+        };
+        let segment = request.segment.address;
+        let Some(handle) = self.existing_handle(segment) else {
+            return Err(ReplicaError::SegmentNotFound { segment });
+        };
+        let pace = UploadPace {
+            chunk_bytes: self.settings.upload_chunk_bytes,
+            object_store_timeout: self.settings.object_store_timeout,
+        };
+        let uploaded = upload_sealed_copy(&handle, artifact_store.as_ref(), &request, pace).await?;
+        tracing::info!(
+            %segment,
+            object_key = %request.object_key,
+            size_bytes = uploaded.size_bytes,
+            "segment copy uploaded to the object store"
+        );
+        Ok(uploaded)
     }
 
     async fn delete_segment(&self, segment: SegmentAddress) -> Result<(), ReplicaError> {

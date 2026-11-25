@@ -1,0 +1,4 @@
+change_type: enhancement
+component: replica
+note: "Replicas upload a sealed segment to the object store on request and verify the stored object before answering."
+issues: [3]

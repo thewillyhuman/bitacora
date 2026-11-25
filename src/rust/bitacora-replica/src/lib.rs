@@ -14,6 +14,7 @@
 mod actor;
 mod copy;
 mod replica;
+mod upload;
 
 pub use actor::WriteFailureHandler;
 pub use replica::{Replica, ReplicaSettings};

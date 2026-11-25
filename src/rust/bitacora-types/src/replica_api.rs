@@ -238,6 +238,29 @@ pub struct RepairResponse {
     pub local_end: SequenceNumber,
 }
 
+/// Asks a replica to upload its copy of a sealed segment to the object
+/// store as one tiered object (design, section 10, "Tiering").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UploadRequest {
+    /// The sealed segment to upload.
+    pub segment: SegmentDescriptor,
+    /// The segment's final sequence number, as recorded in the metadata
+    /// store. A copy that is not sealed exactly there is not uploaded.
+    pub sealed_end: SequenceNumber,
+    /// The key to store the object under. An object already there is
+    /// replaced.
+    pub object_key: String,
+}
+
+/// The replica's answer to an [`UploadRequest`], sent once the object is
+/// stored and was read back intact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UploadResponse {
+    /// The size of the stored object, which a reader needs to find its
+    /// footer.
+    pub size_bytes: u64,
+}
+
 /// What a replica knows about one of its segment copies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegmentStatus {
@@ -292,6 +315,10 @@ pub trait ReplicaApi: Send + Sync {
     /// Completes the replica's copy of a sealed segment from another
     /// replica, verifying every batch on the way.
     async fn repair_segment(&self, request: RepairRequest) -> Result<RepairResponse, ReplicaError>;
+
+    /// Uploads the replica's copy of a sealed segment to the object store
+    /// and reads it back to verify what was stored.
+    async fn upload_segment(&self, request: UploadRequest) -> Result<UploadResponse, ReplicaError>;
 
     /// Deletes the replica's copy of a segment. Deleting an absent copy
     /// succeeds.
@@ -417,6 +444,13 @@ impl ReplicaApi for UnreachableReplica {
         &self,
         _request: RepairRequest,
     ) -> Result<RepairResponse, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn upload_segment(
+        &self,
+        _request: UploadRequest,
+    ) -> Result<UploadResponse, ReplicaError> {
         self.unavailable()
     }
 

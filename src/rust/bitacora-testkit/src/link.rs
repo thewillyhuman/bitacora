@@ -8,7 +8,7 @@ use bitacora_replica::Replica;
 use bitacora_types::replica_api::{
     AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadRequest, ReadResponse,
     RepairRequest, RepairResponse, ReplicaApi, ReplicaError, ReplicaStatus, SealRequest,
-    SealResponse, SegmentStatus,
+    SealResponse, SegmentStatus, UploadRequest, UploadResponse,
 };
 use bitacora_types::{ReplicaId, SegmentAddress};
 
@@ -152,6 +152,13 @@ impl ReplicaApi for Link {
         .await
     }
 
+    async fn upload_segment(&self, request: UploadRequest) -> Result<UploadResponse, ReplicaError> {
+        self.carry(None, |replica| async move {
+            replica.upload_segment(request).await
+        })
+        .await
+    }
+
     async fn delete_segment(&self, segment: SegmentAddress) -> Result<(), ReplicaError> {
         self.carry(None, |replica| async move {
             replica.delete_segment(segment).await
@@ -220,6 +227,14 @@ impl ReplicaApi for AddressedLink {
         self.link
             .carry(Some(&self.expected_replica_id), |replica| async move {
                 replica.repair_segment(request).await
+            })
+            .await
+    }
+
+    async fn upload_segment(&self, request: UploadRequest) -> Result<UploadResponse, ReplicaError> {
+        self.link
+            .carry(Some(&self.expected_replica_id), |replica| async move {
+                replica.upload_segment(request).await
             })
             .await
     }
