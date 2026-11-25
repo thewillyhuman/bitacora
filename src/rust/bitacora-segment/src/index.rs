@@ -63,6 +63,12 @@ impl SparseIndex {
             .copied()
     }
 
+    /// The indexed batches, in file order.
+    #[must_use]
+    pub fn entries(&self) -> &[IndexEntry] {
+        &self.entries
+    }
+
     /// Forgets every batch at or after `offset_bytes`, after the file was cut
     /// there.
     pub fn forget_from(&mut self, offset_bytes: u64) {

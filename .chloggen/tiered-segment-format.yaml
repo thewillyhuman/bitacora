@@ -1,0 +1,4 @@
+change_type: enhancement
+component: segment
+note: "Define the object a sealed segment becomes in the object store: its frames, a block index for range reads and a checksummed footer."
+issues: [3]

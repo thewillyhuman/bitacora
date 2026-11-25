@@ -12,6 +12,7 @@ mod index;
 mod local_disk;
 mod memory_disk;
 mod state;
+pub mod tiered;
 
 pub use disk::{Disk, DiskFile, DiskSpace};
 pub use file::{SegmentError, SegmentFile};
