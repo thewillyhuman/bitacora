@@ -6,7 +6,7 @@ use std::time::Duration;
 use bitacora_client::{
     BitacoraClient, ClientSettings, StreamWriter, TakeoverPolicy, WriterSettings,
 };
-use bitacora_meta::{CopyState, RetentionPolicy, StreamRecord};
+use bitacora_meta::{CopyState, KeyValueStore, RetentionPolicy, StreamRecord};
 use bitacora_replica::ReplicaSettings;
 use bitacora_testkit::Cluster;
 use bitacora_types::replica_api::ReplicaApi;
@@ -541,6 +541,339 @@ async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
         stream(&cluster).await.segments[0].copies[lost].replica_id,
         cluster.replica_ids(&[4])[0],
         "replica-4 is the other node of zone 1"
+    );
+}
+
+// ---- truncation and retention ----
+
+/// A cluster whose stream has `sealed_segment_count` sealed segments of one
+/// record each (so segment `n` holds exactly record `n`) and an open one.
+async fn cluster_with_segments(node_count: usize, sealed_segment_count: u64) -> Cluster {
+    let cluster = Cluster::start(node_count).await;
+    create_stream(&cluster).await;
+    run_pass(&cluster).await;
+    let one_record_per_segment = WriterSettings {
+        target_segment_bytes: 1024,
+        // Only size rolls the segment, however far a test moves the clock.
+        target_segment_age: Duration::from_hours(100_000),
+        ..WriterSettings::default()
+    };
+    let writer = client(&cluster, one_record_per_segment)
+        .open_writer(STREAM, TakeoverPolicy::Force)
+        .await
+        .expect("the writer opens");
+    for _segment in 0..sealed_segment_count {
+        run_pass(&cluster).await;
+        writer
+            .append(Bytes::from(vec![0xAB; 2048]))
+            .await
+            .expect("the record commits");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // Leak the writer: the stream keeps an open segment and a live lease,
+    // which is the state truncation has to respect.
+    std::mem::forget(writer);
+    assert_eq!(
+        stream(&cluster).await.segments.len(),
+        usize::try_from(sealed_segment_count).expect("small") + 1
+    );
+    cluster
+}
+
+/// Registers materializer `name` and commits its checkpoint at `sequence`.
+async fn checkpoint_at(cluster: &Cluster, name: &str, sequence: u64) {
+    let metadata = cluster.metadata();
+    let stream_id = stream(cluster).await.stream_id;
+    metadata
+        .register_materializer(STREAM, name)
+        .await
+        .expect("registered");
+    let token = metadata
+        .acquire_checkpoint(stream_id, name)
+        .await
+        .expect("acquired")
+        .fencing_token;
+    metadata
+        .commit_checkpoint(stream_id, name, token, SequenceNumber::new(sequence), None)
+        .await
+        .expect("committed");
+}
+
+async fn listed_segments(cluster: &Cluster) -> Vec<u64> {
+    stream(cluster)
+        .await
+        .segments
+        .iter()
+        .map(|segment| segment.segment_id.get())
+        .collect()
+}
+
+/// The segments of the stream that the node at `node_number` holds a copy
+/// of. The open segment is not among them until a record is appended to it.
+async fn held_segments(cluster: &Cluster, node_number: usize) -> Vec<u64> {
+    cluster.nodes()[node_number]
+        .replica()
+        .expect("the node is running")
+        .list_segments()
+        .await
+        .expect("lists")
+        .iter()
+        .map(|status| status.address.segment_id.get())
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_deleted_without_a_materializer_or_a_request() {
+    let cluster = cluster_with_segments(3, 3).await;
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (report.segments_deleted, listed_segments(&cluster).await),
+        (0, vec![1, 2, 3, 4])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn segments_below_every_checkpoint_are_deleted() {
+    let cluster = cluster_with_segments(3, 3).await;
+    checkpoint_at(&cluster, "pages", 2).await;
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (
+            report.segments_deleted,
+            listed_segments(&cluster).await,
+            stream(&cluster).await.low_water_mark
+        ),
+        (2, vec![3, 4], SequenceNumber::new(3))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleted_segments_are_removed_from_their_replicas() {
+    let cluster = cluster_with_segments(3, 3).await;
+    checkpoint_at(&cluster, "pages", 2).await;
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (report.copies_removed, held_segments(&cluster, 0).await),
+        (6, vec![3])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn slowest_materializer_pins_the_log() {
+    let cluster = cluster_with_segments(3, 3).await;
+    checkpoint_at(&cluster, "pages", 3).await;
+    checkpoint_at(&cluster, "blocks", 0).await;
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (report.segments_deleted, listed_segments(&cluster).await),
+        (0, vec![1, 2, 3, 4])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn unregistering_the_slow_materializer_releases_the_log() {
+    let cluster = cluster_with_segments(3, 3).await;
+    checkpoint_at(&cluster, "pages", 3).await;
+    checkpoint_at(&cluster, "blocks", 0).await;
+    cluster
+        .metadata()
+        .unregister_materializer(STREAM, "blocks")
+        .await
+        .expect("unregistered");
+    run_pass(&cluster).await;
+    assert_eq!(listed_segments(&cluster).await, [4]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn owner_request_deletes_whole_segments_only() {
+    let cluster = cluster_with_segments(3, 3).await;
+    cluster
+        .metadata()
+        .update_stream(STREAM, |record| {
+            record.truncate_before = Some(SequenceNumber::new(3));
+            Ok(())
+        })
+        .await
+        .expect("requested");
+    run_pass(&cluster).await;
+    assert_eq!(
+        (
+            listed_segments(&cluster).await,
+            stream(&cluster).await.low_water_mark
+        ),
+        (vec![3, 4], SequenceNumber::new(3))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn open_segment_survives_a_checkpoint_past_its_start() {
+    let cluster = cluster_with_segments(3, 2).await;
+    checkpoint_at(&cluster, "pages", 500).await;
+    run_pass(&cluster).await;
+    assert_eq!(
+        (
+            listed_segments(&cluster).await,
+            stream(&cluster).await.low_water_mark
+        ),
+        (vec![3], SequenceNumber::new(3))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retention_period_keeps_recently_sealed_segments() {
+    let cluster = cluster_with_segments(3, 3).await;
+    cluster
+        .metadata()
+        .update_stream(STREAM, |record| {
+            record.retention = RetentionPolicy::keep_for(Duration::from_hours(1));
+            Ok(())
+        })
+        .await
+        .expect("policy set");
+    checkpoint_at(&cluster, "pages", 3).await;
+    let while_recent = run_pass(&cluster).await;
+    tokio::time::advance(Duration::from_hours(2)).await;
+    cluster.renew_registrations().await.expect("renewed");
+    run_pass(&cluster).await;
+    let oldest_segment_left = listed_segments(&cluster).await.into_iter().min();
+    assert!(
+        while_recent.segments_deleted == 0 && oldest_segment_left > Some(3),
+        "deleted {} while recent, oldest left is {oldest_segment_left:?}",
+        while_recent.segments_deleted
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn materializer_registered_after_a_truncation_does_not_move_the_mark_back() {
+    let cluster = cluster_with_segments(3, 3).await;
+    checkpoint_at(&cluster, "pages", 2).await;
+    run_pass(&cluster).await;
+    let late_checkpoint = cluster
+        .metadata()
+        .register_materializer(STREAM, "blocks")
+        .await
+        .expect("registered");
+    run_pass(&cluster).await;
+    assert_eq!(
+        (
+            late_checkpoint.checkpoint,
+            stream(&cluster).await.low_water_mark
+        ),
+        (SequenceNumber::new(2), SequenceNumber::new(3))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replica_that_missed_a_deletion_is_cleaned_up_when_it_returns() {
+    let cluster = cluster_with_segments(3, 3).await;
+    checkpoint_at(&cluster, "pages", 2).await;
+    cluster.nodes()[2].set_reachable(false);
+    run_pass(&cluster).await;
+    let held_while_away = held_segments(&cluster, 2).await;
+    cluster.nodes()[2].set_reachable(true);
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (
+            held_while_away,
+            report.copies_removed,
+            held_segments(&cluster, 2).await
+        ),
+        (vec![1, 2, 3], 2, vec![3])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn copy_replaced_by_repair_is_removed_when_its_replica_returns() {
+    let cluster = cluster_with_a_sealed_segment(4, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+    run_pass(&cluster).await;
+    cluster.nodes()[2].crash();
+    tokio::time::advance(ControllerSettings::default().replica_lost_after * 2).await;
+    cluster.renew_registrations().await.expect("renewed");
+    run_pass(&cluster).await;
+
+    cluster.nodes()[2].restart().await;
+    cluster.renew_registrations().await.expect("renewed");
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (report.copies_removed, held_segments(&cluster, 2).await),
+        (1, Vec::new())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleted_stream_is_removed_from_replicas_and_then_forgotten() {
+    let cluster = cluster_with_segments(3, 2).await;
+    cluster
+        .metadata()
+        .delete_stream(STREAM)
+        .await
+        .expect("deleted");
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (
+            report.copies_removed,
+            held_segments(&cluster, 0).await,
+            cluster.metadata().list_deleted_streams().await
+        ),
+        (6, Vec::new(), Ok(Vec::new()))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleted_stream_is_remembered_while_a_replica_has_not_been_cleaned() {
+    let cluster = cluster_with_segments(3, 2).await;
+    cluster.nodes()[2].set_reachable(false);
+    cluster
+        .metadata()
+        .delete_stream(STREAM)
+        .await
+        .expect("deleted");
+    run_pass(&cluster).await;
+    let remembered = cluster
+        .metadata()
+        .list_deleted_streams()
+        .await
+        .expect("lists")
+        .len();
+    cluster.nodes()[2].set_reachable(true);
+    run_pass(&cluster).await;
+    assert_eq!(
+        (
+            remembered,
+            held_segments(&cluster, 2).await,
+            cluster.metadata().list_deleted_streams().await
+        ),
+        (1, Vec::new(), Ok(Vec::new()))
+    );
+}
+
+/// What a metadata store restored from an older snapshot does not know
+/// must survive until an operator rebuilds the metadata from it.
+#[tokio::test(start_paused = true)]
+async fn segments_of_a_stream_the_metadata_store_does_not_know_are_left_alone() {
+    let cluster = cluster_with_segments(3, 2).await;
+    let known_stream = stream(&cluster).await;
+    let key = "streams/orders";
+    // Forget the stream without leaving a note, as a restore would.
+    cluster
+        .key_value_store()
+        .transact(
+            Vec::new(),
+            vec![bitacora_meta::Mutation::Delete {
+                key: key.to_owned(),
+            }],
+        )
+        .await
+        .expect("forgotten");
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (report.copies_removed, held_segments(&cluster, 0).await),
+        (0, vec![1, 2]),
+        "stream {} was known before",
+        known_stream.stream_id
     );
 }
 

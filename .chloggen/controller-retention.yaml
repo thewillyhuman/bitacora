@@ -1,0 +1,4 @@
+change_type: enhancement
+component: controller
+note: "Advance the low-water mark from materializer checkpoints, truncation requests and the retention period, delete whole segments below it, and remove copies left behind by retention, repair or stream deletion."
+issues: [3]
