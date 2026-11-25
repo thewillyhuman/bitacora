@@ -1,0 +1,29 @@
+[package]
+name = "bitacora-materializer"
+description = "The bitacora materializer framework: turns a prefix of a stream into queryable state, with checkpoints, fencing and artifact storage."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bitacora-artifact.workspace = true
+bitacora-client.workspace = true
+bitacora-meta.workspace = true
+bitacora-types.workspace = true
+bytes.workspace = true
+crc32c.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+bitacora-controller.workspace = true
+bitacora-testkit.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

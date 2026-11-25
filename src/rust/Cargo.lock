@@ -144,6 +144,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-materializer"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bitacora-artifact",
+ "bitacora-client",
+ "bitacora-controller",
+ "bitacora-meta",
+ "bitacora-testkit",
+ "bitacora-types",
+ "bytes",
+ "crc32c",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bitacora-meta"
 version = "0.0.0"
 dependencies = [

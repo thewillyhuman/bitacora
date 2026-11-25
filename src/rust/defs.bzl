@@ -72,6 +72,8 @@ def bitacora_library(
         name = name + "_doc_test",
         size = "small",
         crate = ":" + name,
+        # An example may use what the crate's tests use; the crate's own
+        # dependencies come with the crate.
         deps = test_deps + all_crate_deps(normal_dev = True),
     )
 

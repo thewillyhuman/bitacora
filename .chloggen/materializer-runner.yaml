@@ -1,0 +1,4 @@
+change_type: new_component
+component: materializer
+note: "Add the materializer contract, the runner that tails a stream, checkpoints under a fencing token and lets the log be truncated, and the sweeper of orphan artifacts."
+issues: [4]
