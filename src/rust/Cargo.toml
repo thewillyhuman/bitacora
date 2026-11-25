@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "bitacora-meta",
     "bitacora-replica",
     "bitacora-segment",
     "bitacora-types",
@@ -16,6 +17,7 @@ authors = ["Guillermo Facundo Colunga"]
 
 [workspace.dependencies]
 # First-party crates.
+bitacora-meta = { path = "bitacora-meta", version = "0.0.0" }
 bitacora-replica = { path = "bitacora-replica", version = "0.0.0" }
 bitacora-segment = { path = "bitacora-segment", version = "0.0.0" }
 bitacora-types = { path = "bitacora-types", version = "0.0.0" }

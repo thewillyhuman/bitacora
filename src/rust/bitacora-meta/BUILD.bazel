@@ -1,0 +1,8 @@
+load("//src/rust:defs.bzl", "bitacora_library")
+
+exports_files(["Cargo.toml"])
+
+bitacora_library(
+    name = "bitacora_meta",
+    deps = ["//src/rust/bitacora-types:bitacora_types"],
+)
