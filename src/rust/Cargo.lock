@@ -296,6 +296,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-clusterkit"
+version = "0.0.0"
+dependencies = [
+ "bitacora",
+ "bitacora-meta",
+ "bitacora-process",
+ "bytes",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "bitacora-controller"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,23 @@
+[package]
+name = "bitacora-clusterkit"
+description = "A bitacora cluster of real processes on one machine, for tests: etcd, replica daemons and a controller daemon on loopback ports."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bitacora.workspace = true
+bitacora-process.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+bitacora-meta.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

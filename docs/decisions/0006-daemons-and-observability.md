@@ -161,6 +161,22 @@ briefly away must not make durability look fine. An instance whose round
 failed reports that it is not leading, so "no instance leads" is one alert
 for a cluster that nobody looks after, whatever the cause.
 
+### A small test of real processes
+
+Both daemons take their disk, stores and sockets as arguments, so almost
+everything about them is tested inside a test process, on in-memory stores.
+What that cannot show (the programs themselves, their configuration files,
+real sockets and files, signals, exit codes, a real etcd) is covered by one
+test in `src/rust/bitacora-clusterkit`: etcd, three replica daemons and a
+controller daemon on loopback ports, used through `bitacora::connect`. A
+replica is killed with SIGKILL and restarted; every daemon is probed, scraped
+and stopped with SIGTERM. It runs in about five seconds and is the design's
+"layer 4", kept small on purpose: the protocol is tested where it can be
+tested deterministically.
+
+Its first runs found a bug that no in-process test could: a local-directory
+object store that is opened by several processes at once.
+
 ## What is not implemented
 
 - **Traces.** No daemon emits OpenTelemetry traces. Log events carry the

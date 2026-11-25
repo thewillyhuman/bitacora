@@ -9,6 +9,7 @@ members = [
     "bitacora-artifact",
     "bitacora-artifact-s3",
     "bitacora-client",
+    "bitacora-clusterkit",
     "bitacora-controller",
     "bitacora-kv",
     "bitacora-materializer",
@@ -38,6 +39,7 @@ bitacora = { path = "bitacora", version = "0.0.0" }
 bitacora-artifact = { path = "bitacora-artifact", version = "0.0.0" }
 bitacora-artifact-s3 = { path = "bitacora-artifact-s3", version = "0.0.0" }
 bitacora-client = { path = "bitacora-client", version = "0.0.0" }
+bitacora-clusterkit = { path = "bitacora-clusterkit", version = "0.0.0" }
 bitacora-controller = { path = "bitacora-controller", version = "0.0.0" }
 bitacora-kv = { path = "bitacora-kv", version = "0.0.0" }
 bitacora-materializer = { path = "bitacora-materializer", version = "0.0.0" }

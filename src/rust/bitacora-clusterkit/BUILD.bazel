@@ -1,0 +1,39 @@
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
+
+exports_files(["Cargo.toml"])
+
+bitacora_library(
+    name = "bitacora_clusterkit",
+    deps = [
+        "//src/rust/bitacora",
+        "//src/rust/bitacora-process:bitacora_process",
+    ],
+)
+
+# A cluster of real processes: etcd, three replica daemons and a controller
+# daemon on loopback ports. Medium because it starts processes and talks to
+# them over localhost. It finishes in about five seconds; the timeout of a
+# medium test is kept, so that on a machine slow enough to exhaust the test's
+# own allowances it is the test that fails, with the daemons' logs, and not
+# Bazel that kills it without a word.
+bitacora_integration_test(
+    name = "real_cluster_test",
+    size = "medium",
+    srcs = ["tests/real_cluster_test.rs"],
+    data = [
+        "//src/rust:etcd",
+        "//src/rust/bita-controller",
+        "//src/rust/bita-replica",
+    ],
+    env = {
+        "BITA_CONTROLLER_BINARY": "$(rootpath //src/rust/bita-controller)",
+        "BITA_ETCD_BINARY": "$(rootpath //src/rust:etcd)",
+        "BITA_REPLICA_BINARY": "$(rootpath //src/rust/bita-replica)",
+    },
+    deps = [
+        ":bitacora_clusterkit",
+        "//src/rust/bitacora",
+        "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-process:bitacora_process",
+    ],
+)

@@ -44,7 +44,10 @@ bazel test --config=lint //...  # what continuous integration runs
 Unlike Bazel, they use what the machine has: the etcd client needs `protoc`
 on the path to build, the S3 client needs a C compiler, and the tests that
 need a server run only when a variable names its program: `BITA_ETCD_BINARY`
-for etcd, `BITA_S3_SERVER_BINARY` for the Versity S3 Gateway.
+for etcd, `BITA_S3_SERVER_BINARY` for the Versity S3 Gateway. The test that
+runs a cluster of real processes also needs `BITA_REPLICA_BINARY` and
+`BITA_CONTROLLER_BINARY` to name the two daemons, for example the ones in
+`target/debug`.
 
 ## Changelog and releases
 
