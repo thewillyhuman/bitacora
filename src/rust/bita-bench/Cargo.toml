@@ -1,0 +1,35 @@
+[package]
+name = "bita-bench"
+description = "The bitacora benchmark tool: drives a cluster with append and read workloads and reports throughput and latency percentiles."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bita-bench"
+path = "src/main.rs"
+
+[dependencies]
+bitacora.workspace = true
+bytes.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# A load generator must not be limited to one core: the workers of a workload
+# run on all of them.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+toml.workspace = true
+
+[dev-dependencies]
+bitacora-meta.workspace = true
+bitacora-testkit.workspace = true
+bitacora-types.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

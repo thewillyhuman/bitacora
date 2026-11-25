@@ -1,0 +1,16 @@
+load("//src/rust:defs.bzl", "bitacora_binary")
+
+exports_files(["Cargo.toml"])
+
+# The benchmark tool. Its unit tests run the workloads against the in-process
+# test cluster under a virtual clock.
+bitacora_binary(
+    name = "bita-bench",
+    srcs = glob(["src/**/*.rs"]),
+    test_deps = [
+        "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-testkit:bitacora_testkit",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+    deps = ["//src/rust/bitacora:bitacora"],
+)

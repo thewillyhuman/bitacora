@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "bita",
+    "bita-bench",
     "bita-controller",
     "bita-replica",
     "bitacora",

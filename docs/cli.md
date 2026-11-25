@@ -2,7 +2,8 @@
 
 `bita` is what an operator uses to look at a bitacora cluster and to carry out the routine procedures of
 the design (section 14): create and inspect streams, drain a replica before a restart, remove a failed
-one, and see which controller leads.
+one, see which controller leads, and recover a lost metadata store. Load testing has a tool of its own,
+`bita-bench`, described in `benchmark.md`.
 
 Commands are `bita <noun> <verb>`. `bita help`, `bita <noun> --help` and `bita <noun> <verb> --help`
 describe every option. A test keeps this page and the tool in step: every command has a section here,

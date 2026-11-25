@@ -31,6 +31,7 @@ crate.from_cargo(
     manifests = [
         "//src/rust:Cargo.toml",
         "//src/rust/bita:Cargo.toml",
+        "//src/rust/bita-bench:Cargo.toml",
         "//src/rust/bita-controller:Cargo.toml",
         "//src/rust/bita-replica:Cargo.toml",
         "//src/rust/bitacora:Cargo.toml",

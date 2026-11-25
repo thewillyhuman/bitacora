@@ -155,9 +155,44 @@ The dangerous case is a replica that does not answer: its copies are not in the 
 is rebuilt the controller removes copies that the stream's record does not list. That is why an
 unanswered replica is a problem and not an assumption.
 
+### The benchmark tool
+
+`bita-bench` drives a cluster through the client library, like an application, and reports throughput
+and append-to-commit latency (design, section 16, "Benchmarks"). It reports what it measured and judges
+nothing: the design's targets are proposals, and the tool must not turn into a place where they are
+quietly restated as facts.
+
+**The histogram is in-tree and fixed-size.** Latencies are counted in whole microseconds. Values below 32
+have a bucket each; above that, every power of two is split into 32 buckets, up to 2^36 microseconds
+(about 19 hours), 1024 buckets in all. A bucket is therefore never wider than 1/32 of its values, and a
+quantile, reported as its bucket's upper bound, is at most 3.2 % above the true value and never below
+it. The maximum is kept exactly. Recording is an index computation and an increment: no allocation, no
+lock, since every worker has a histogram of its own and they are merged at the end. A histogram crate
+would do the same with more configuration; this is seventy lines with the error bound as a unit test.
+
+**All arithmetic is in integers.** Milliseconds, microseconds and bytes; rates are rounded down. The JSON
+field names carry the units.
+
+**A paced workload measures from the moment an append was due.** With `--rate`, sends are numbered and
+send `n` is due at `n` intervals after the start, computed from the number so that nothing drifts.
+Latency counts from that moment. Measuring from the actual send would leave out the time appends spend
+queued behind a stall, which is the classic way a load generator hides the pauses it was meant to find.
+Without `--rate` the workload is closed-loop and the reference says what that does and does not show.
+
+**One writer per stream, many appends in flight.** A stream has one writer, so concurrency within a
+stream is appends in flight on one writer, and `--streams` adds writers. The tool runs on a
+multi-threaded runtime, the only binary that needs one, so that it is not itself limited to one core.
+
+**Not done.** The design lists a fault schedule among the benchmark's options. Faults are injected by the
+deterministic simulator; the benchmark does not inject any. Reference runs against Kafka and BookKeeper
+are a matter of running them.
+
 ## Consequences
 
 - The tool needs no etcd to be tested, and its tests take a fraction of a second.
+- The benchmark's workloads are tested against the in-process cluster under a virtual clock, so its
+  limits, pacing and accounting are covered without a real run. Its numbers on real hardware are covered
+  by nothing but running it.
 - A cluster with an object store can lose its whole metadata store and lose at most the last interval of
   metadata changes; what the replicas hold beyond that is found again by `bita metadata rebuild`.
 - Without an object store there are no snapshots.

@@ -1,0 +1,4 @@
+change_type: new_component
+component: bench
+note: "Add bita-bench: append workloads with a chosen number of appends in flight, an optional target rate and several streams, and a read scan, reporting throughput and latency percentiles as text or JSON."
+issues: [5]
