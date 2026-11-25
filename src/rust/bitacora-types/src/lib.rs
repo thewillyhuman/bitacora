@@ -7,6 +7,7 @@
 mod identifiers;
 mod random;
 mod records;
+pub mod replica_api;
 mod replication;
 
 pub use identifiers::{
