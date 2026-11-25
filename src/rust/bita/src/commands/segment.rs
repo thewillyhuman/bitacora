@@ -87,41 +87,54 @@ pub(crate) struct SegmentList {
     pub(crate) segments: Vec<SegmentRow>,
 }
 
+impl SegmentRow {
+    /// The cells of this segment's row in a table made by [`segment_table`].
+    pub(super) fn table_row(&self) -> Vec<String> {
+        let sealed_end = match self.sealed_end {
+            Some(end) => end.to_string(),
+            None => "-".to_owned(),
+        };
+        let state = if self.awaits_deletion {
+            format!("{} (awaits deletion)", self.state)
+        } else {
+            self.state.clone()
+        };
+        let mut copies = Vec::with_capacity(self.copies.len());
+        for copy in &self.copies {
+            copies.push(format!("{}={}", copy.replica_id, copy.state));
+        }
+        let object = match (&self.object_key, self.object_size_bytes) {
+            (Some(object_key), Some(size_bytes)) => {
+                format!("{object_key} ({})", format_bytes(size_bytes))
+            }
+            _no_object => "-".to_owned(),
+        };
+        vec![
+            self.segment_id.to_string(),
+            self.epoch.to_string(),
+            self.first_sequence.to_string(),
+            sealed_end,
+            state,
+            copies.join(" "),
+            object,
+        ]
+    }
+}
+
+/// An empty table with the columns of a segment listing. The rebuild report shows its planned segments
+/// in the same table.
+pub(super) fn segment_table() -> Table {
+    Table::new(&[
+        "SEGMENT", "EPOCH", "FIRST", "END", "STATE", "COPIES", "OBJECT",
+    ])
+}
+
 impl SegmentList {
     /// Renders the segments as a table, one row each.
     pub(crate) fn render_text(&self) -> String {
-        let mut table = Table::new(&[
-            "SEGMENT", "EPOCH", "FIRST", "END", "STATE", "COPIES", "OBJECT",
-        ]);
+        let mut table = segment_table();
         for segment in &self.segments {
-            let sealed_end = match segment.sealed_end {
-                Some(end) => end.to_string(),
-                None => "-".to_owned(),
-            };
-            let state = if segment.awaits_deletion {
-                format!("{} (awaits deletion)", segment.state)
-            } else {
-                segment.state.clone()
-            };
-            let mut copies = Vec::with_capacity(segment.copies.len());
-            for copy in &segment.copies {
-                copies.push(format!("{}={}", copy.replica_id, copy.state));
-            }
-            let object = match (&segment.object_key, segment.object_size_bytes) {
-                (Some(object_key), Some(size_bytes)) => {
-                    format!("{object_key} ({})", format_bytes(size_bytes))
-                }
-                _no_object => "-".to_owned(),
-            };
-            table.push_row(vec![
-                segment.segment_id.to_string(),
-                segment.epoch.to_string(),
-                segment.first_sequence.to_string(),
-                sealed_end,
-                state,
-                copies.join(" "),
-                object,
-            ]);
+            table.push_row(segment.table_row());
         }
         table.render()
     }
@@ -147,7 +160,7 @@ fn segment_state_name(segment: &SegmentRecord) -> &'static str {
 }
 
 /// Describes one segment of `stream`.
-fn segment_row(stream: &StreamRecord, segment: &SegmentRecord) -> SegmentRow {
+pub(super) fn segment_row(stream: &StreamRecord, segment: &SegmentRecord) -> SegmentRow {
     let mut copies = Vec::with_capacity(segment.copies.len());
     for copy in &segment.copies {
         copies.push(CopyCell {

@@ -478,3 +478,204 @@ fn lapsed_leadership_is_rendered_as_lapsed() {
          valid until: 2026-11-25T22:03:54Z\n"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn metadata_snapshot_list_command_lists_the_snapshots() {
+    let started = TestCluster::with_stream(3).await;
+    started.run_controller_pass().await;
+    let command = Command::Metadata(MetadataCommand::Snapshot(SnapshotCommand::List));
+
+    let output = run_command(&started, command).await.expect("runs");
+
+    assert!(matches!(output, CommandOutput::SnapshotList(list) if list.snapshots.len() == 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn metadata_restore_command_passes_the_dry_run_on() {
+    let started = TestCluster::with_stream(3).await;
+    started.run_controller_pass().await;
+    let command = Command::Metadata(MetadataCommand::Restore {
+        snapshot: "latest".to_owned(),
+        force: false,
+        dry_run: true,
+    });
+
+    let output = run_command(&started, command).await.expect("runs");
+
+    assert!(matches!(output, CommandOutput::RestoreReport(report) if report.is_dry_run));
+}
+
+#[tokio::test(start_paused = true)]
+async fn metadata_rebuild_command_plans_without_applying_by_default() {
+    let started = TestCluster::with_stream(3).await;
+    let command = Command::Metadata(MetadataCommand::Rebuild {
+        names: Vec::new(),
+        replicas: Vec::new(),
+        apply: false,
+        force: false,
+    });
+
+    let output = run_command(&started, command).await.expect("runs");
+
+    assert!(matches!(output, CommandOutput::RebuildReport(report) if !report.is_applied));
+}
+
+#[test]
+fn snapshots_are_rendered_as_a_table() {
+    let output = CommandOutput::SnapshotList(metadata::SnapshotList {
+        snapshots: vec![metadata::SnapshotRow {
+            object_key: "metadata-snapshots/00000001798761599000".to_owned(),
+            taken_at: "2026-12-31T23:59:59Z".to_owned(),
+            age_seconds: 300,
+            size_bytes: 1_300,
+        }],
+    });
+
+    assert_eq!(
+        output.render(OutputFormat::Table),
+        "SNAPSHOT                                 TAKEN AT              AGE  SIZE\n\
+         metadata-snapshots/00000001798761599000  2026-12-31T23:59:59Z  5m   1.2 KiB\n"
+    );
+}
+
+/// A restore report with every count set to a distinct value.
+fn restore_report(is_dry_run: bool, keys_in_store_before: usize) -> metadata::RestoreReport {
+    metadata::RestoreReport {
+        snapshot: "metadata-snapshots/00000001798761599000".to_owned(),
+        taken_at: "2026-12-31T23:59:59Z".to_owned(),
+        is_dry_run,
+        keys_in_store_before,
+        keys_written: 12,
+        keys_deleted: 2,
+    }
+}
+
+#[test]
+fn restore_is_rendered_with_what_to_do_next() {
+    let output = CommandOutput::RestoreReport(restore_report(false, 0));
+
+    assert_eq!(
+        output.render(OutputFormat::Table),
+        "snapshot:                 metadata-snapshots/00000001798761599000\n\
+         taken at:                 2026-12-31T23:59:59Z\n\
+         outcome:                  restored\n\
+         keys in the store before: 0\n\
+         keys written:             12\n\
+         keys deleted:             2\n\
+         next: run `bita metadata rebuild` to pick up what changed after the snapshot\n"
+    );
+}
+
+#[test]
+fn dry_run_of_a_restore_into_a_used_store_says_that_it_needs_force() {
+    let output = CommandOutput::RestoreReport(restore_report(true, 5));
+
+    assert_eq!(
+        output.render(OutputFormat::Table),
+        "snapshot:                 metadata-snapshots/00000001798761599000\n\
+         taken at:                 2026-12-31T23:59:59Z\n\
+         outcome:                  dry run: nothing was written\n\
+         keys in the store before: 5\n\
+         keys written:             12\n\
+         keys deleted:             2\n\
+         the metadata store is not empty: the restore needs --force and replaces it\n"
+    );
+}
+
+/// A rebuild report of one stream with one segment, one assumption and the given problems.
+fn rebuild_report(is_applied: bool, problems: Vec<String>) -> rebuild::RebuildReport {
+    rebuild::RebuildReport {
+        is_applied,
+        replicas: vec![rebuild::AskedReplica {
+            replica_id: "replica-a".to_owned(),
+            address: "10.0.0.1:7000".to_owned(),
+            has_answered: true,
+            copies: 3,
+        }],
+        tiered_objects: 1,
+        streams: vec![rebuild::RebuiltStream {
+            stream_id: 7,
+            name: Some("orders".to_owned()),
+            epoch: Some(12),
+            low_water_mark: Some(1),
+            next_segment_id: Some(3),
+            segments: vec![segment::SegmentRow {
+                segment_id: 2,
+                epoch: 4,
+                first_sequence: 1,
+                sealed_end: Some(9),
+                state: "sealed".to_owned(),
+                awaits_deletion: false,
+                copies: vec![segment::CopyCell {
+                    replica_id: "replica-a".to_owned(),
+                    state: "unverified".to_owned(),
+                }],
+                object_key: None,
+                object_size_bytes: None,
+            }],
+            assumptions: vec!["replication is assumed".to_owned()],
+            problems,
+            is_written: is_applied,
+        }],
+        problems: Vec::new(),
+    }
+}
+
+#[test]
+fn rebuild_plan_without_problems_says_how_to_apply_it() {
+    let output = CommandOutput::RebuildReport(rebuild_report(false, Vec::new()));
+
+    assert_eq!(
+        output.render(OutputFormat::Table),
+        "REPLICA    ADDRESS        ANSWERED  COPIES\n\
+         replica-a  10.0.0.1:7000  yes       3\n\
+         tiered segment objects found: 1\n\
+         \n\
+         stream 7 \"orders\": not written\n\
+         epoch 12, low-water mark 1, next segment id 3\n\
+         SEGMENT  EPOCH  FIRST  END  STATE   COPIES                OBJECT\n\
+         2        4      1      9    sealed  replica-a=unverified  -\n\
+         assumptions:\n\
+         \x20 - replication is assumed\n\
+         \n\
+         dry run: nothing was written. Pass --apply to write this plan.\n"
+    );
+}
+
+#[test]
+fn rebuild_plan_with_problems_lists_them_and_asks_for_force() {
+    let output =
+        CommandOutput::RebuildReport(rebuild_report(false, vec!["a segment is lost".to_owned()]));
+
+    let rendered = output.render(OutputFormat::Table);
+
+    assert!(
+        rendered.contains("problems:\n  - a segment is lost\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.ends_with(
+            "dry run: nothing was written. The plan has problems; fix them, or pass --apply \
+             --force to write what could be rebuilt.\n"
+        ),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn applied_rebuild_says_what_happens_next() {
+    let output = CommandOutput::RebuildReport(rebuild_report(true, Vec::new()));
+
+    let rendered = output.render(OutputFormat::Table);
+
+    assert!(
+        rendered.contains("stream 7 \"orders\": written\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.ends_with(
+            "applied. Start the controllers: they verify every copy and rebuild missing ones.\n"
+        ),
+        "{rendered}"
+    );
+}

@@ -31,23 +31,29 @@
 //!
 //! # See also
 //!
-//! - `commands/stream.rs`, `commands/replica.rs`, `commands/segment.rs`, `commands/controller.rs`: the
-//!   commands.
+//! - `commands/stream.rs`, `commands/replica.rs`, `commands/segment.rs`, `commands/controller.rs`,
+//!   `commands/metadata.rs`, `commands/rebuild.rs`: the commands.
 //! - `output.rs`: the text building blocks the results render with.
 
 use bitacora::{AppendError, OpenError, ReadError, TakeoverPolicy};
-use bitacora_meta::MetaError;
+use bitacora_artifact::ArtifactError;
+use bitacora_meta::{MetaError, SnapshotError};
 use bitacora_types::replica_api::ReplicaError;
 use bitacora_types::{InvalidReplicationSettings, InvalidSequenceRange, ReplicaId};
 use bytes::Bytes;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::arguments::{Command, ControllerCommand, ReplicaCommand, SegmentCommand, StreamCommand};
+use crate::arguments::{
+    Command, ControllerCommand, MetadataCommand, ReplicaCommand, SegmentCommand, SnapshotCommand,
+    StreamCommand,
+};
 use crate::cluster::Cluster;
 use crate::output::OutputFormat;
 
 pub(crate) mod controller;
+pub(crate) mod metadata;
+pub(crate) mod rebuild;
 pub(crate) mod replica;
 pub(crate) mod segment;
 pub(crate) mod stream;
@@ -111,6 +117,29 @@ pub(crate) enum CommandError {
         /// What the operating system reported.
         reason: String,
     },
+    /// The command needs the object store and the cluster configuration names none.
+    #[error(
+        "this command needs the cluster's object store: name it in a configuration file and pass \
+         --config"
+    )]
+    NoObjectStore,
+    /// The object store failed a request.
+    #[error("the object store failed: {reason}")]
+    ObjectStore {
+        /// What the object store reported.
+        reason: ArtifactError,
+    },
+    /// The object store did not answer within the request timeout.
+    #[error("the object store did not answer in time")]
+    ObjectStoreTimedOut,
+    /// An object that should be a metadata snapshot is not an intact one.
+    #[error("snapshot {object_key:?} cannot be used: {reason}")]
+    UnreadableSnapshot {
+        /// The object that was read.
+        object_key: String,
+        /// What is wrong with it.
+        reason: SnapshotError,
+    },
 }
 
 /// The result of a command that changes something and has nothing else to report.
@@ -155,6 +184,12 @@ pub(crate) enum CommandOutput {
     SegmentList(segment::SegmentList),
     /// Who leads the controllers.
     ControllerStatus(controller::ControllerStatus),
+    /// The snapshots of the metadata store.
+    SnapshotList(metadata::SnapshotList),
+    /// What a restore of the metadata store did, or would do.
+    RestoreReport(metadata::RestoreReport),
+    /// What a rebuild of the metadata store found, planned and did.
+    RebuildReport(rebuild::RebuildReport),
 }
 
 impl CommandOutput {
@@ -194,6 +229,9 @@ impl CommandOutput {
             Self::DrainReport(report) => report.render_text(),
             Self::SegmentList(list) => list.render_text(),
             Self::ControllerStatus(status) => status.render_text(),
+            Self::SnapshotList(list) => list.render_text(),
+            Self::RestoreReport(report) => report.render_text(),
+            Self::RebuildReport(report) => report.render_text(),
         }
     }
 }
@@ -230,6 +268,36 @@ pub(crate) async fn run(
         )),
         Command::Controller(ControllerCommand::Status) => Ok(CommandOutput::ControllerStatus(
             controller::status(cluster).await?,
+        )),
+        Command::Metadata(metadata_command) => {
+            run_metadata_command(metadata_command, cluster).await
+        }
+    }
+}
+
+/// Runs one `bita metadata` command.
+async fn run_metadata_command(
+    command: &MetadataCommand,
+    cluster: &Cluster,
+) -> Result<CommandOutput, CommandError> {
+    match command {
+        MetadataCommand::Snapshot(SnapshotCommand::List) => Ok(CommandOutput::SnapshotList(
+            metadata::list_snapshots(cluster).await?,
+        )),
+        MetadataCommand::Restore {
+            snapshot,
+            force,
+            dry_run,
+        } => Ok(CommandOutput::RestoreReport(
+            metadata::restore(cluster, snapshot, *force, *dry_run).await?,
+        )),
+        MetadataCommand::Rebuild {
+            names,
+            replicas,
+            apply,
+            force,
+        } => Ok(CommandOutput::RebuildReport(
+            rebuild::rebuild(cluster, names, replicas, *apply, *force).await?,
         )),
     }
 }

@@ -96,6 +96,65 @@ know lists once. Two controllers that both believe they lead write at most one s
 
 A snapshot that cannot be written never fails a pass. It is logged and tried again on the next one.
 
+### Restoring a snapshot
+
+`bita metadata restore <snapshot>` writes the keys of a snapshot back, verbatim. It refuses a metadata
+store that holds keys, because the result would mix two states; `--force` makes the store exactly what
+the snapshot was. The restore is several transactions, since etcd limits the size of one, so it is for a
+cluster whose writers and controllers are stopped.
+
+A snapshot is older than the cluster by up to one interval. A restored stream record can therefore name
+an epoch that the replicas have already fenced, and miss segments opened since. That is not repaired by
+the restore; it is what the rebuild is for, and the procedure is always restore, then rebuild.
+
+### Rebuilding from the replicas
+
+`bita metadata rebuild` reconstructs stream records from what replicas and the object store hold. To
+make that possible a replica now reports, for every copy with a file, what the file's header says: the
+segment's epoch and first sequence number. The object store's segment objects carry the same in their
+footers, with the sealed end.
+
+What is recovered:
+
+- **The segment list.** A segment is listed if a file or an object says where it starts.
+- **Sealed ends.** Where a replica or the object recorded the seal. Otherwise one below the start of the
+  next segment found: a segment is only opened after its predecessor was sealed, and starts right after
+  it. The last segment without a recorded seal is left open, and the next writer recovers it as after a
+  crash. That may commit records the lost metadata had cut off as an uncommitted tail; it cannot
+  contradict anything, because no later segment holds records.
+- **Copies.** Every replica that reported a segment, as `unverified`, so that the controller checks each
+  against the sealed end. A copy that was not found is recorded on a replica that does not exist, in
+  state `bad`; the controller's existing repair then rebuilds it on a real one. No new mechanism was
+  needed for "fewer copies than the replication asks for".
+- **The epoch.** One above every epoch found in a header, a footer or a replica's fencing state, so that
+  the next writer fences everything, whatever the lost metadata last said.
+- **Identifiers.** The next segment identifier is above every segment seen, and the stream identifier
+  counter is raised to the stream's, so that neither is reused.
+
+What cannot be recovered, because it is stored nowhere but in the metadata store:
+
+- **The name.** Segment files are addressed by stream identifier. The operator supplies
+  `--name <stream id>=<name>`; a stream without one is not rebuilt. Storing names on replicas would put
+  a second copy of a metadata fact where nothing keeps it true.
+- **Replication, retention, materializers and checkpoints, the truncation request.** Assumed, and
+  reported: three replicas with write quorum two, no retention, no materializers. With no materializer
+  and no truncation request nothing is ever truncated, which is the safe direction.
+- **The low-water mark.** The first sequence number still found.
+- **Seal times.** Now, which only delays tiering and retention.
+
+If the metadata store still has a record of the stream, as after a restore, these come from it, and its
+low-water mark and next segment identifier are not moved back.
+
+The plan is a pure function of the inventory, so every rule above is a unit test on hand-built
+inventories. Assumptions are listed apart from problems. Problems (a replica that did not answer,
+segments that do not connect, no complete copy of a sealed segment, an open segment on fewer replicas
+than recovery needs, a stream without a name) stop `--apply` unless `--force` is given. The default is a
+dry run.
+
+The dangerous case is a replica that does not answer: its copies are not in the plan, and once a stream
+is rebuilt the controller removes copies that the stream's record does not list. That is why an
+unanswered replica is a problem and not an assumption.
+
 ## Consequences
 
 - The tool needs no etcd to be tested, and its tests take a fraction of a second.

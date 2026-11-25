@@ -18,6 +18,7 @@ bitacora_binary(
         "//src/rust/bitacora:bitacora",
         "//src/rust/bitacora-artifact:bitacora_artifact",
         "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-segment:bitacora_segment",
         "//src/rust/bitacora-types:bitacora_types",
     ],
 )

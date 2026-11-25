@@ -1,0 +1,4 @@
+change_type: enhancement
+component: cli
+note: "Add bita metadata snapshot list, restore and rebuild: restore the metadata store from a snapshot in the object store, or reconstruct stream records from what replicas and the object store hold."
+issues: [3]

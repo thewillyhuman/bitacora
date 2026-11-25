@@ -34,6 +34,8 @@ use bitacora::TakeoverPolicy;
 use bitacora_controller::{Controller, ControllerSettings, PassReport};
 use bytes::Bytes;
 
+use bitacora_meta::{KeyValueStore, Mutation};
+
 use super::stream;
 use crate::cluster::Cluster;
 
@@ -112,5 +114,30 @@ impl TestCluster {
             .renew_registrations()
             .await
             .expect("registrations are renewed");
+    }
+
+    /// Deletes every key of the metadata store, as the loss of every etcd member would. The replicas and
+    /// the object store keep what they hold.
+    pub(crate) async fn lose_the_metadata_store(&self) {
+        let key_value_store = self.nodes.key_value_store();
+        let stored_entries = key_value_store.list("").await.expect("the store is listed");
+        let mut deletions = Vec::with_capacity(stored_entries.len());
+        for (key, _stored) in stored_entries {
+            deletions.push(Mutation::Delete { key });
+        }
+        key_value_store
+            .transact(Vec::new(), deletions)
+            .await
+            .expect("the store is emptied");
+    }
+
+    /// How many keys the metadata store holds.
+    pub(crate) async fn metadata_key_count(&self) -> usize {
+        self.nodes
+            .key_value_store()
+            .list("")
+            .await
+            .expect("the store is listed")
+            .len()
     }
 }

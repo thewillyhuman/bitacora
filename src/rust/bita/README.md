@@ -30,7 +30,9 @@ A command never prints. What it has to say is in its result or in its error.
 - Parsing has no side effect, and a wrong command line sends nothing to the cluster.
 - The tool never guesses a cluster: without an etcd endpoint it stops.
 - Destructive commands need a confirmation (`stream delete --yes`, `replica remove --force` for a live
-  replica).
+  replica, `metadata restore --force` into a store that holds keys).
+- `metadata rebuild` writes nothing without `--apply`, and nothing with problems without `--force`. Its
+  plan is a pure function of what the replicas and the object store reported.
 - Results go to standard output and nothing else does.
 - `docs/cli.md` has a section for every command and for nothing else; a test checks both.
 
@@ -46,6 +48,8 @@ A command never prints. What it has to say is in its result or in its error.
 | `src/commands/replica.rs` | `bita replica ...` |
 | `src/commands/segment.rs` | `bita segment ...` |
 | `src/commands/controller.rs` | `bita controller ...` |
+| `src/commands/metadata.rs` | `bita metadata snapshot list` and `bita metadata restore` |
+| `src/commands/rebuild.rs` | `bita metadata rebuild`: gathering, the pure plan, applying |
 | `src/commands/testing.rs` | The in-process cluster the command tests share |
 | `src/output.rs` | Tables and the notations for times, sizes and payloads |
 | `src/duration.rs` | Durations as an operator types them |
@@ -55,5 +59,5 @@ Each file's tests are next to it, in `<file>_test.rs`.
 ## Dependencies
 
 `bitacora` (the client and the connections), `bitacora-meta`, `bitacora-types` and `bitacora-artifact`
-for the interfaces the commands take. The tests add `bitacora-testkit` and `bitacora-controller`. Nothing
+for the interfaces the commands take, and `bitacora-segment` to read the footers of tiered segments. The tests add `bitacora-testkit` and `bitacora-controller`. Nothing
 depends on this crate.

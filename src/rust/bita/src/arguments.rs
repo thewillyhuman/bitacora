@@ -11,7 +11,7 @@
 //! - [`Arguments`]: the options every command takes, and the command.
 //! - [`ClusterArguments`]: where the cluster is.
 //! - [`Command`] and one enum per noun: [`StreamCommand`], [`ReplicaCommand`], [`SegmentCommand`],
-//!   [`ControllerCommand`].
+//!   [`ControllerCommand`], [`MetadataCommand`] with its [`SnapshotCommand`].
 //!
 //! # How it works
 //!
@@ -125,6 +125,9 @@ pub(crate) enum Command {
     /// Inspect the controller.
     #[command(subcommand)]
     Controller(ControllerCommand),
+    /// Recover a lost metadata store: list its snapshots, restore one, or rebuild it from the replicas.
+    #[command(subcommand)]
+    Metadata(MetadataCommand),
 }
 
 /// What can be done to a stream.
@@ -268,6 +271,53 @@ pub(crate) enum ControllerCommand {
     Status,
 }
 
+/// What can be done to recover the metadata store.
+#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
+pub(crate) enum MetadataCommand {
+    /// Inspect the snapshots of the metadata store that the controller keeps in the object store.
+    #[command(subcommand)]
+    Snapshot(SnapshotCommand),
+    /// Write a snapshot back into the metadata store. Run it with writers and controllers stopped,
+    /// and run `bita metadata rebuild` afterwards: a snapshot is some minutes older than the cluster.
+    Restore {
+        /// The snapshot to restore: its object key as `bita metadata snapshot list` shows it, or
+        /// `latest`.
+        snapshot: String,
+        /// Restore into a metadata store that is not empty: keys of the snapshot are overwritten and
+        /// every other key is deleted.
+        #[arg(long)]
+        force: bool,
+        /// Only say what would be written and deleted.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Last resort: put the stream records back together from what the replicas and the object store
+    /// hold. Prints its plan and writes nothing unless --apply is given.
+    Rebuild {
+        /// The name of a stream that the metadata store does not know, as `<stream id>=<name>`. Names
+        /// are not stored on replicas, so every such stream needs one; repeat the option.
+        #[arg(long = "name", value_parser = parse_stream_name, value_name = "ID=NAME")]
+        names: Vec<(u64, String)>,
+        /// A replica to ask that is not in the registry, as `<replica id>=<address>`; repeat the
+        /// option. Registered replicas are always asked.
+        #[arg(long = "replica", value_parser = parse_replica_address, value_name = "ID=ADDRESS")]
+        replicas: Vec<(ReplicaId, String)>,
+        /// Write the rebuilt stream records. Without it, the plan is only printed.
+        #[arg(long)]
+        apply: bool,
+        /// Write what could be rebuilt although the plan has problems.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// What can be done to the snapshots of the metadata store.
+#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
+pub(crate) enum SnapshotCommand {
+    /// List the snapshots in the object store, oldest first.
+    List,
+}
+
 /// Reads a replica identifier, for `clap`.
 ///
 /// # Errors
@@ -278,6 +328,41 @@ fn parse_replica_id(text: &str) -> Result<ReplicaId, String> {
         Ok(replica_id) => Ok(replica_id),
         Err(invalid) => Err(invalid.to_string()),
     }
+}
+
+/// Reads `<stream id>=<name>`, for `clap`.
+///
+/// # Errors
+///
+/// Returns what is wrong with the text, as the usage error shows it.
+fn parse_stream_name(text: &str) -> Result<(u64, String), String> {
+    let Some((stream_id, name)) = text.split_once('=') else {
+        return Err("expected <stream id>=<name>, as in 7=orders".to_owned());
+    };
+    let Ok(stream_id) = stream_id.parse::<u64>() else {
+        return Err(format!(
+            "{stream_id:?} is not a stream id: expected a number"
+        ));
+    };
+    if name.is_empty() {
+        return Err("the name after `=` is empty".to_owned());
+    }
+    Ok((stream_id, name.to_owned()))
+}
+
+/// Reads `<replica id>=<address>`, for `clap`.
+///
+/// # Errors
+///
+/// Returns what is wrong with the text, as the usage error shows it.
+fn parse_replica_address(text: &str) -> Result<(ReplicaId, String), String> {
+    let Some((replica_id, address)) = text.split_once('=') else {
+        return Err("expected <replica id>=<address>, as in replica-a=10.0.0.1:7000".to_owned());
+    };
+    if address.is_empty() {
+        return Err("the address after `=` is empty".to_owned());
+    }
+    Ok((parse_replica_id(replica_id)?, address.to_owned()))
 }
 
 #[cfg(test)]

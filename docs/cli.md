@@ -297,3 +297,124 @@ valid until: 2026-11-25T22:03:54Z
 
 If the state is `lapsed`, no controller leads: placement of new segments, repair, tiering and deletion
 are paused, while appends and reads continue.
+
+## Recovering the metadata store
+
+The metadata store says which segments make up a stream. If every etcd member is lost, the records are
+still on the replicas and in the object store, and these commands put the metadata back. The procedure:
+
+1. Stop the writers and the controllers. Leave the replicas running.
+2. Start an empty etcd.
+3. If the cluster has an object store, restore the newest snapshot: `bita metadata restore latest`.
+4. Look at what the replicas hold beyond the snapshot: `bita metadata rebuild`.
+5. If the plan is right, write it: `bita metadata rebuild --apply`.
+6. Start the controllers, then the writers.
+
+Without an object store there are no snapshots, and the procedure starts at step 4.
+
+### `bita metadata snapshot list`
+
+Lists the snapshots of the metadata store that the controller keeps in the object store, oldest first.
+The controller writes one every five minutes and keeps the newest 288. The command does not touch the
+metadata store, so it works while the store is lost.
+
+```console
+$ bita metadata snapshot list
+SNAPSHOT                                 TAKEN AT              AGE  SIZE
+metadata-snapshots/00000001798761299000  2026-12-31T23:54:59Z  9m   18.4 KiB
+metadata-snapshots/00000001798761599000  2026-12-31T23:59:59Z  4m   18.6 KiB
+```
+
+### `bita metadata restore`
+
+Writes a snapshot back into the metadata store. The argument is the snapshot's object key, or `latest`.
+A snapshot that fails its checksum is not restored, not even in part.
+
+```console
+$ bita metadata restore latest --dry-run
+snapshot:                 metadata-snapshots/00000001798761599000
+taken at:                 2026-12-31T23:59:59Z
+outcome:                  dry run: nothing was written
+keys in the store before: 0
+keys written:             42
+keys deleted:             0
+$ bita metadata restore latest
+snapshot:                 metadata-snapshots/00000001798761599000
+taken at:                 2026-12-31T23:59:59Z
+outcome:                  restored
+keys in the store before: 0
+keys written:             42
+keys deleted:             0
+next: run `bita metadata rebuild` to pick up what changed after the snapshot
+```
+
+A metadata store that already holds keys is refused, because the result would mix two states. `--force`
+restores anyway and makes the store exactly what the snapshot was: every other key is deleted.
+
+A snapshot is up to five minutes older than the cluster. A stream that rolled to a new segment or
+changed its writer since then is behind in the restored store, and a writer cannot take it over until
+`bita metadata rebuild --apply` has brought it up to date.
+
+### `bita metadata rebuild`
+
+The last resort: puts the stream records back together from what the replicas and the object store
+hold. It asks every registered replica, and every replica named with `--replica <id>=<address>`, for its
+segment copies, reads the footer of every segment object in the object store, and plans one record per
+stream found. Without `--apply` it only prints the plan.
+
+```console
+$ bita metadata rebuild --name 1=orders
+REPLICA    ADDRESS        ANSWERED  COPIES
+replica-a  10.0.0.1:7000  yes       2
+replica-b  10.0.0.2:7000  yes       2
+replica-d  10.0.0.4:7000  yes       1
+tiered segment objects found: 1
+
+stream 1 "orders": not written
+epoch 4, low-water mark 1, next segment id 4
+SEGMENT  EPOCH  FIRST  END  STATE     COPIES                                                          OBJECT
+1        1      1      3    released                                                                  streams/1/segments/00000000000000000001 (329 B)
+2        2      4      6    sealed    replica-a=unverified replica-b=unverified rebuild-missing-3=bad  -
+3        3      7      -    open      replica-a=unverified replica-b=unverified replica-d=unverified  -
+assumptions:
+  - segment 3: nothing recorded a seal; it is left open for the next writer to recover
+  - replication is not stored on replicas: assumed 3 replicas with write quorum 2
+  - segment 2: 2 of 3 copies were found; the others are recorded as missing, and the controller rebuilds them
+  - seal times are not stored on replicas: sealed segments count as sealed now, which only delays their tiering and retention
+  - retention policy and materializers are not stored on replicas: none is set, and nothing is truncated until materializers are registered again
+
+dry run: nothing was written. Pass --apply to write this plan.
+```
+
+What the plan does with what it finds:
+
+- A segment is sealed where a replica or its object recorded the seal. If nothing recorded it, it is
+  sealed right before the start of the next segment. The last segment without a recorded seal is left
+  open, and the next writer recovers it as after a crash.
+- Every copy found is recorded as `unverified`, and the controller verifies it. A copy that was not found
+  is recorded on a replica that does not exist, `rebuild-missing-<n>`, in state `bad`, which makes the
+  controller rebuild it elsewhere.
+- A segment with an object and no file on any replica is recorded as left to the object store.
+- The epoch is set above every epoch found, so that the next writer fences everything.
+
+What cannot be recovered, because replicas do not store it:
+
+| Lost | What the rebuild does |
+| --- | --- |
+| The stream's name | It must be given: `--name <stream id>=<name>`, once per stream. |
+| The replication | Assumed three replicas with a write quorum of two. |
+| The retention policy | None is set. |
+| The registered materializers and their checkpoints | None is registered. Nothing is truncated until they are registered again. |
+| The low-water mark | Set to the first sequence number still found. |
+| When each segment was sealed | Now, which only delays tiering and retention. |
+
+If the metadata store still has a record of the stream, for example after a restore, all of these are
+taken from it instead, and its low-water mark and next segment identifier are never moved back.
+
+The plan lists problems apart from assumptions: a replica that did not answer, segments that do not
+connect, a sealed segment without a complete copy, an open segment found on too few replicas for a
+writer to recover it, a stream without a name. A plan with problems is not applied unless `--force` is
+given. A replica that does not answer is the one to fix first: its copies are missing from the plan, and
+once the stream is rebuilt the controller removes copies the plan does not list.
+
+A stream that is recorded as deleted is never rebuilt.

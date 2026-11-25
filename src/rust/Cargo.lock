@@ -165,6 +165,7 @@ dependencies = [
  "bitacora-artifact",
  "bitacora-controller",
  "bitacora-meta",
+ "bitacora-segment",
  "bitacora-testkit",
  "bitacora-types",
  "bytes",

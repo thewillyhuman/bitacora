@@ -233,6 +233,113 @@ fn controller_status_parses() {
 }
 
 #[test]
+fn metadata_snapshot_list_parses() {
+    assert_eq!(
+        command_of("bita metadata snapshot list"),
+        Command::Metadata(MetadataCommand::Snapshot(SnapshotCommand::List))
+    );
+}
+
+#[test]
+fn metadata_restore_writes_and_is_not_forced_by_default() {
+    assert_eq!(
+        command_of("bita metadata restore latest"),
+        Command::Metadata(MetadataCommand::Restore {
+            snapshot: "latest".to_owned(),
+            force: false,
+            dry_run: false,
+        })
+    );
+}
+
+#[test]
+fn metadata_restore_takes_force_and_dry_run() {
+    assert_eq!(
+        command_of(
+            "bita metadata restore metadata-snapshots/00000001798761599000 --force --dry-run"
+        ),
+        Command::Metadata(MetadataCommand::Restore {
+            snapshot: "metadata-snapshots/00000001798761599000".to_owned(),
+            force: true,
+            dry_run: true,
+        })
+    );
+}
+
+#[test]
+fn metadata_rebuild_only_plans_by_default() {
+    assert_eq!(
+        command_of("bita metadata rebuild"),
+        Command::Metadata(MetadataCommand::Rebuild {
+            names: Vec::new(),
+            replicas: Vec::new(),
+            apply: false,
+            force: false,
+        })
+    );
+}
+
+#[test]
+fn metadata_rebuild_takes_names_and_replicas() {
+    let command = command_of(
+        "bita metadata rebuild --name 7=orders --name 9=audit --replica replica-a=10.0.0.1:7000 --apply",
+    );
+
+    assert_eq!(
+        command,
+        Command::Metadata(MetadataCommand::Rebuild {
+            names: vec![(7, "orders".to_owned()), (9, "audit".to_owned())],
+            replicas: vec![(
+                ReplicaId::new("replica-a").expect("a valid identifier"),
+                "10.0.0.1:7000".to_owned()
+            )],
+            apply: true,
+            force: false,
+        })
+    );
+}
+
+#[test]
+fn stream_name_without_an_identifier_is_a_usage_error() {
+    assert_eq!(
+        refusal_of("bita metadata rebuild --name orders"),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
+fn stream_name_with_an_identifier_that_is_no_number_is_a_usage_error() {
+    assert_eq!(
+        refusal_of("bita metadata rebuild --name seven=orders"),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
+fn stream_name_that_is_empty_is_a_usage_error() {
+    assert_eq!(
+        refusal_of("bita metadata rebuild --name 7="),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
+fn replica_address_without_an_identifier_is_a_usage_error() {
+    assert_eq!(
+        refusal_of("bita metadata rebuild --replica 10.0.0.1:7000"),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
+fn replica_address_with_an_invalid_identifier_is_a_usage_error() {
+    assert_eq!(
+        refusal_of("bita metadata rebuild --replica not/a/replica=10.0.0.1:7000"),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
 fn unknown_command_is_a_usage_error() {
     assert_eq!(
         refusal_of("bita stream explode"),
