@@ -68,6 +68,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-testkit"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bitacora-meta",
+ "bitacora-replica",
+ "bitacora-segment",
+ "bitacora-types",
+ "bytes",
+ "tokio",
+]
+
+[[package]]
 name = "bitacora-types"
 version = "0.0.0"
 dependencies = [

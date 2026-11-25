@@ -5,6 +5,7 @@ members = [
     "bitacora-meta",
     "bitacora-replica",
     "bitacora-segment",
+    "bitacora-testkit",
     "bitacora-types",
 ]
 
@@ -22,6 +23,7 @@ bitacora-client = { path = "bitacora-client", version = "0.0.0" }
 bitacora-meta = { path = "bitacora-meta", version = "0.0.0" }
 bitacora-replica = { path = "bitacora-replica", version = "0.0.0" }
 bitacora-segment = { path = "bitacora-segment", version = "0.0.0" }
+bitacora-testkit = { path = "bitacora-testkit", version = "0.0.0" }
 bitacora-types = { path = "bitacora-types", version = "0.0.0" }
 
 # Third-party crates. One version for the whole workspace.
