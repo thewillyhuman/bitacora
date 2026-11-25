@@ -1,0 +1,4 @@
+change_type: new_component
+component: controller
+note: "Add the bita-controller daemon: it runs the controller's rounds against a cluster, with one instance leading and the others standing by, and exposes whether it leads, what each pass did and how many segments are short of copies."
+issues: [5]

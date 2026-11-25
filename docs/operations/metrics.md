@@ -106,6 +106,37 @@ Exposed by `bita-replica` about itself, next to the request metrics of the `repl
 
 The first three are refreshed on every registration renewal; the damaged copies also after every scrub.
 
+## Controller daemon
+
+Exposed by `bita-controller`. One round of its loop takes or renews the leadership and, if the
+instance leads, makes one pass over every stream.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `bitacora_controller_leading` | gauge | 1 if the last round of this instance led, 0 if it stood by or failed |
+| `bitacora_controller_rounds_total` | counter | Rounds that finished, whatever their outcome |
+| `bitacora_controller_round_failures_total` | counter | Rounds that failed because the metadata store could not be used |
+| `bitacora_controller_pass_duration_seconds` | histogram | How long one pass over every stream took |
+| `bitacora_controller_segments_missing_copies` | gauge | Sealed segments with fewer good copies than their stream asks for, as of the last pass: durability at risk |
+| `bitacora_controller_standbys_placed_total` | counter | Standby segments placed |
+| `bitacora_controller_copies_confirmed_total` | counter | Copies of sealed segments confirmed complete |
+| `bitacora_controller_copies_marked_bad_total` | counter | Copies of sealed segments found short, damaged or lost |
+| `bitacora_controller_copies_repaired_total` | counter | Bad copies rebuilt from a good one |
+| `bitacora_controller_segments_tiered_total` | counter | Sealed segments uploaded to the object store |
+| `bitacora_controller_segments_released_total` | counter | Tiered segments left to the object store alone |
+| `bitacora_controller_segments_deleted_total` | counter | Segments below the low-water mark deleted |
+| `bitacora_controller_copies_removed_total` | counter | Leftover segment copies removed from replicas |
+| `bitacora_controller_stream_errors_total` | counter | Streams a pass could not fully handle; they are retried on the next pass |
+
+Reading them across instances:
+
+- `sum(bitacora_controller_leading) == 0` means nobody looks after the cluster: no instance runs, or
+  none can reach the metadata store. Existing streams keep appending and reading; rolls stop when
+  standby segments run out, and repair, tiering and deletion pause.
+- `max(bitacora_controller_segments_missing_copies) > 0` for longer than a repair takes means
+  durability is at risk. Only the leader knows the number; a standby reports 0, and an instance whose
+  round failed keeps the last number it saw.
+
 ## What is not measured
 
 - **Append latency per stream**, the user-facing number of the design. It is only known where appends

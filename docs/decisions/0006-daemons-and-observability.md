@@ -128,6 +128,39 @@ The daemon's `run` takes its disk, stores and sockets as arguments. That is
 what lets the whole daemon run inside a test, on in-memory stores and
 loopback ports, without etcd.
 
+### The controller daemon
+
+`bita-controller` (`src/rust/bita-controller`) runs the controller library's
+rounds in a loop: one round, record what it did, rest for the pass interval.
+
+Ready means a round completed without an error, as leader or as standby. The
+instance then knows that it can reach the metadata store and where it stands.
+A standby is ready on purpose: readiness says "this instance can do its job",
+and standing by is the job of all instances but one. A later round that fails
+does not take readiness away.
+
+Shutdown is bounded. The signal is noticed while resting and while a round
+runs; a running round gets ten seconds to finish and is abandoned after that.
+Abandoning is safe because every write of a pass is conditional on what the
+pass saw, which is the same property that makes two leaders harmless. A pass
+can legitimately take much longer than a supervisor waits (a repair may run
+for half an hour), so "finish the round first" was not an option.
+
+The leadership is not given up on shutdown. It lapses after the leadership
+duration and another instance takes over then. Giving it up explicitly would
+make a planned failover faster by that duration; nothing needs that yet.
+
+The configuration refuses two combinations that would work badly without
+failing: a leadership shorter than two pass intervals, and a
+`replica_lost_after` that is not longer than the liveness window.
+
+The controller's metrics have one rule worth recording. Only the leader knows
+how many segments miss copies, so a standby reports zero, and an instance
+whose round failed keeps the last number it saw: a metadata store that is
+briefly away must not make durability look fine. An instance whose round
+failed reports that it is not leading, so "no instance leads" is one alert
+for a cluster that nobody looks after, whatever the cause.
+
 ## What is not implemented
 
 - **Traces.** No daemon emits OpenTelemetry traces. Log events carry the

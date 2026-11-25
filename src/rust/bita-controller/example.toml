@@ -1,0 +1,64 @@
+# Configuration of one bita-controller. Start it with:
+#
+#   bita-controller --config /etc/bitacora/controller.toml
+#
+# Run two or three with the same configuration except `identity`: one leads
+# and the others stand by. A setting that is misspelled or unknown stops the
+# controller at start.
+
+# The name of this instance, recorded with the leadership so that an operator
+# can see who leads. Give every instance its own.
+identity = "controller-a"
+
+# Where Prometheus scrapes /metrics and probes ask /healthz and /readyz.
+metrics_listen_address = "0.0.0.0:9101"
+
+# How long the controller rests between two passes over the cluster.
+pass_interval_milliseconds = 1000
+
+# How long leadership lasts without renewal. After the leader stops, another
+# instance takes over within this time. Must be at least twice the pass
+# interval, so that a leader that is merely resting does not lose it.
+leadership_duration_seconds = 10
+
+# How long a replica may be silent before its copies are given up and
+# re-created elsewhere. Much longer than the liveness window below, so that a
+# restart or an upgrade does not trigger re-replication.
+replica_lost_after_seconds = 300
+
+# How long after its seal a fully replicated segment is uploaded to the
+# object store. Fifteen minutes.
+tiering_delay_seconds = 900
+
+# How long after the upload the replicas keep their copies, so that recent
+# data is read from local disks. One day.
+hot_read_window_seconds = 86400
+
+# Which replicas may receive new segments.
+[placement]
+# A replica whose registration is older than this is presumed dead. Three
+# times the replicas' registration interval by default.
+liveness_window_seconds = 15
+# A replica whose disk is at least this full receives no new segments.
+refuse_at_used_percent = 85
+
+# Where the cluster is. Every process of one cluster has the same table.
+[cluster]
+etcd_endpoints = [
+    "http://10.0.0.1:2379",
+    "http://10.0.0.2:2379",
+    "http://10.0.0.3:2379",
+]
+etcd_key_prefix = "/bitacora/"
+
+# The object store sealed segments are tiered to. It must be the store the
+# replicas upload to. Leave the table out for a cluster without tiering.
+[cluster.object_store]
+kind = "local_directory"
+path = "/var/lib/bitacora/objects"
+
+[log]
+# error, warn, info, debug or trace.
+level = "info"
+# json for machines, text for a person at a terminal.
+format = "json"

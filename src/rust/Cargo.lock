@@ -108,6 +108,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "bita-controller"
+version = "0.0.0"
+dependencies = [
+ "bitacora",
+ "bitacora-artifact",
+ "bitacora-controller",
+ "bitacora-meta",
+ "bitacora-process",
+ "bitacora-testkit",
+ "bitacora-types",
+ "serde",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "bita-replica"
 version = "0.0.0"
 dependencies = [

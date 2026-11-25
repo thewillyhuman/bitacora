@@ -1,0 +1,24 @@
+load("//src/rust:defs.bzl", "bitacora_binary")
+
+exports_files(["Cargo.toml"])
+
+bitacora_binary(
+    name = "bita-controller",
+    srcs = glob(["src/**/*.rs"]),
+    # A test checks the metrics the daemon exposes against their reference,
+    # and another one parses the example configuration.
+    test_data = [
+        "example.toml",
+        "//docs:operations/metrics.md",
+    ],
+    # The tests run the daemon's loop against an in-process cluster.
+    test_deps = ["//src/rust/bitacora-testkit:bitacora_testkit"],
+    deps = [
+        "//src/rust/bitacora",
+        "//src/rust/bitacora-artifact:bitacora_artifact",
+        "//src/rust/bitacora-controller:bitacora_controller",
+        "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-process:bitacora_process",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+)

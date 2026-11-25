@@ -1,0 +1,33 @@
+[package]
+name = "bita-controller"
+description = "The bitacora controller daemon: placement, repair, tiering and retention for a cluster, leader-elected through the metadata store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bita-controller"
+path = "src/main.rs"
+
+[dependencies]
+bitacora.workspace = true
+bitacora-artifact.workspace = true
+bitacora-controller.workspace = true
+bitacora-meta.workspace = true
+bitacora-process.workspace = true
+bitacora-types.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tracing.workspace = true
+
+[dev-dependencies]
+bitacora-testkit.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+toml.workspace = true
+
+[lints]
+workspace = true
