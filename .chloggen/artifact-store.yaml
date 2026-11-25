@@ -1,0 +1,4 @@
+change_type: new_component
+component: artifact
+note: "Add the artifact store interface with in-memory and local-directory backends and a contract test every backend runs."
+issues: [3]
