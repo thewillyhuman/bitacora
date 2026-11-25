@@ -814,6 +814,7 @@ mod tests {
                 segment(2, 10, Some((19, 2_000))),
                 segment(3, 20, None),
             ],
+            next_segment_id: SegmentId::new(4),
             standby_replicas: None,
             truncate_before: None,
             low_water_mark: SequenceNumber::FIRST,

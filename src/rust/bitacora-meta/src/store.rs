@@ -187,6 +187,7 @@ impl MetadataStore {
                 epoch: Epoch::ZERO,
                 writer: None,
                 segments: Vec::new(),
+                next_segment_id: SegmentId::FIRST,
                 standby_replicas: standby_replicas.clone(),
                 truncate_before: None,
                 low_water_mark: SequenceNumber::FIRST,
@@ -965,11 +966,7 @@ fn open_next_segment(record: &mut StreamRecord, epoch: Epoch) -> Result<SegmentR
         });
     };
     let opened_segment = SegmentRecord {
-        segment_id: record
-            .last_segment()
-            .map_or(SegmentId::FIRST, |last_segment| {
-                last_segment.segment_id.next()
-            }),
+        segment_id: record.next_segment_id,
         epoch,
         first_sequence: record.next_segment_first_sequence(),
         sealed: None,
@@ -982,6 +979,7 @@ fn open_next_segment(record: &mut StreamRecord, epoch: Epoch) -> Result<SegmentR
             .collect(),
         tiered: None,
     };
+    record.next_segment_id = opened_segment.segment_id.next();
     record.segments.push(opened_segment.clone());
     Ok(opened_segment)
 }
@@ -1614,6 +1612,41 @@ mod tests {
         assert_eq!(
             (opened_segments, record.segments.len()),
             (vec![SegmentId::new(2), SegmentId::new(2)], 2)
+        );
+    }
+
+    /// Replicas may still hold copies of segments that retention deleted.
+    /// A new segment that reused one of their identifiers would be taken
+    /// for the old one.
+    #[tokio::test]
+    async fn segment_identifiers_are_not_reused_after_every_segment_is_deleted() {
+        let store = store_with_open_segment().await;
+        store
+            .seal_segment(
+                STREAM,
+                Epoch::new(1),
+                SegmentId::FIRST,
+                SequenceNumber::new(50),
+                SEALED_AT,
+            )
+            .await
+            .expect("segment is sealed");
+        store
+            .update_stream(STREAM, |record| {
+                record.low_water_mark = SequenceNumber::new(51);
+                record.segments.clear();
+                Ok(())
+            })
+            .await
+            .expect("retention deletes the only segment");
+        set_standby(&store).await;
+        let (_record, opened) = store
+            .open_segment(STREAM, Epoch::new(1))
+            .await
+            .expect("segment is opened");
+        assert_eq!(
+            (opened.segment_id, opened.first_sequence),
+            (SegmentId::new(2), SequenceNumber::new(51))
         );
     }
 

@@ -177,6 +177,10 @@ pub struct StreamRecord {
     /// The stream's segments, oldest first. The last one is the open
     /// segment unless it is sealed.
     pub segments: Vec<SegmentRecord>,
+    /// The identifier the next segment gets. Identifiers are never reused,
+    /// not even after every segment was deleted: replicas may still hold
+    /// copies of old segments, and a new segment must not be taken for one.
+    pub next_segment_id: SegmentId,
     /// The replica set the controller pre-allocated for the next segment,
     /// so that a roll never waits on placement.
     pub standby_replicas: Option<Vec<ReplicaId>>,
@@ -326,6 +330,9 @@ mod tests {
             retention: RetentionPolicy::default(),
             epoch: Epoch::new(1),
             writer: None,
+            next_segment_id: SegmentId::new(
+                segments.last().map_or(1, |last| last.segment_id.get() + 1),
+            ),
             segments,
             standby_replicas: None,
             truncate_before: None,
