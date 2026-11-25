@@ -8,6 +8,7 @@ use bitacora_types::replica_api::ReplicaConnector;
 
 use crate::context::ClientContext;
 use crate::error::OpenError;
+use crate::reader::StreamReader;
 use crate::settings::{ReaderSettings, TakeoverPolicy, WriterSettings};
 use crate::writer::StreamWriter;
 
@@ -76,5 +77,16 @@ impl BitacoraClient {
             policy,
         )
         .await
+    }
+
+    /// Returns a reader of `stream_name`. Any number of readers can follow
+    /// the same stream. Nothing is contacted until the reader is used.
+    #[must_use]
+    pub fn open_reader(&self, stream_name: &str) -> StreamReader {
+        StreamReader::new(
+            Arc::clone(&self.context),
+            self.settings.reader.clone(),
+            stream_name,
+        )
     }
 }
