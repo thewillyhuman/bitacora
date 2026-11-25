@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "Add development/cluster.sh, which runs a whole cluster on one machine from the Bazel-built programs: etcd, three replicas and a controller, with start, stop, status, logs and reset."
+issues: [5]

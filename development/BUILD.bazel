@@ -1,0 +1,49 @@
+"""What a developer needs to run bitacora on their own machine."""
+
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "shellcheck_test")
+
+exports_files(["cluster.sh"])
+
+# The programs a cluster is made of, and the tool that talks to it. The
+# script is told where each one is through an environment variable.
+_PROGRAMS = {
+    "BITA_BINARY": "//src/rust/bita",
+    "BITA_CONTROLLER_BINARY": "//src/rust/bita-controller",
+    "BITA_ETCD_BINARY": "//src/rust:etcd",
+    "BITA_REPLICA_BINARY": "//src/rust/bita-replica",
+}
+
+_PROGRAM_LOCATIONS = {
+    variable: "$(rootpath {})".format(program)
+    for variable, program in _PROGRAMS.items()
+}
+
+# `bazel run //development:cluster -- start` builds the programs and runs the
+# script with them. `development/cluster.sh start` does exactly that.
+sh_binary(
+    name = "cluster",
+    srcs = ["cluster.sh"],
+    data = _PROGRAMS.values(),
+    env = _PROGRAM_LOCATIONS,
+)
+
+# Runs a real cluster with the script and uses it through the bita tool.
+# Medium because it starts five processes that talk over localhost; it takes
+# about ten seconds.
+sh_test(
+    name = "cluster_test",
+    size = "medium",
+    srcs = ["cluster_test.sh"],
+    data = ["cluster.sh"] + _PROGRAMS.values(),
+    env = _PROGRAM_LOCATIONS,
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = [
+        "cluster.sh",
+        "cluster_test.sh",
+    ],
+)
