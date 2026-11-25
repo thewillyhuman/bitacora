@@ -11,6 +11,7 @@
 //!
 //! - [`LocalArtifactStore`]: the store.
 //! - `StoreDirectories`: where the store keeps things, and the blocking file operations on them.
+//! - `remove_stale_scratch` and `remove_if_present`: the removal of what crashed processes left behind.
 //! - `RangeReadError`: why a range could not be read from a file.
 //! - `run_blocking` and the error mappers: the plumbing between async callers, blocking system calls and
 //!   [`ArtifactError`].
@@ -19,31 +20,45 @@
 //!
 //! ```text
 //! <root directory>/
-//!   objects/<object key>     one file per object; the key's `/` become directories
-//!   scratch/put-<number>     an object being written, not yet visible
+//!   objects/<object key>                              one file per object; the key's `/` become directories
+//!   scratch/<process id>-<store number>/put-<number>  an object being written by one open store, not yet
+//!                                                     visible
 //! ```
 //!
 //! An object is written to a scratch file, flushed, and only then renamed to its place below `objects/`,
 //! and the directory that received the name is flushed too. A rename within one file system is atomic, so
 //! a reader finds either the whole old object, the whole new object, or nothing; and an object that has a
 //! name has all of its contents on disk. The scratch directory is outside `objects/`, so a half-written
-//! object can never be read or listed, and no object key can collide with a scratch file. Whatever a
-//! crashed write left in `scratch/` is removed when the store is opened.
+//! object can never be read or listed, and no object key can collide with a scratch file.
+//!
+//! One root directory can be opened by several processes at once, and several times by one process: the
+//! replicas, the controller and the clients of a cluster on one machine all share it, as they would share
+//! a bucket. Each open store therefore builds its objects in a scratch directory of its own, named after
+//! its process and a number within the process, so no two stores ever touch each other's half-written
+//! objects. The obvious alternative, one scratch directory that a store empties when it opens, makes
+//! every store that opens destroy the writes in progress of all the others.
+//!
+//! What a crashed process left in `scratch/` is removed by the next store that opens the root, but only
+//! once it has not been touched for a day. No write that is still running is ever that old, so a store
+//! never removes the work of another store that is running. A store that was idle for a day may find its
+//! own scratch directory removed; it creates it again on its next write.
 //!
 //! A listing walks only the directory that the prefix names, not the whole store: the objects whose key
 //! starts with `streams/7/seg` can only be below `objects/streams/7/`.
 //!
 //! This is the only file of the crate that touches real files, which is why it alone opts out of the
-//! workspace's I/O lints. System calls block, so each operation runs on Tokio's blocking pool and the
-//! async threads never wait on a disk.
+//! workspace's I/O lints. It also reads the system clock, to compare it with the modification times of
+//! leftovers, which the file system takes from the same clock. System calls block, so each operation
+//! runs on Tokio's blocking pool and the async threads never wait on a disk.
 //!
 //! # Invariants
 //!
 //! - A file below `objects/` is always a complete object.
 //! - Keys are validated before they become paths, so no operation leaves the root directory.
-//! - A root directory belongs to one store at a time: opening it clears `scratch/`, which would pull the
-//!   rug from under another process's writes in progress. Several *handles* (clones) of one opened store
-//!   are fine.
+//! - A root directory may be open any number of times at once, in one process and in several. A store
+//!   writes scratch files only into its own scratch directory, which no other open store uses.
+//! - A store removes from `scratch/` only what has not been touched for a day, never what a running store
+//!   is writing.
 //!
 //! # See also
 //!
@@ -57,6 +72,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -66,19 +82,29 @@ use crate::store::{ArtifactError, ArtifactStore, KEY_SEPARATOR, ObjectInfo, vali
 /// The directory, below the store's root, that holds one file per object.
 const OBJECTS_DIRECTORY_NAME: &str = "objects";
 
-/// The directory, below the store's root, where an object is built before it is renamed into place. It is
-/// outside [`OBJECTS_DIRECTORY_NAME`], so a half-written object can never be read, listed or collide with
-/// an object key.
+/// The directory, below the store's root, where objects are built before they are renamed into place. It
+/// is outside [`OBJECTS_DIRECTORY_NAME`], so a half-written object can never be read, listed or collide
+/// with an object key. Every open store has a directory of its own in it.
 const SCRATCH_DIRECTORY_NAME: &str = "scratch";
 
-/// What the name of every scratch file starts with. A number follows, unique within this process.
+/// How long something in the scratch directory may sit untouched before a store that opens the root
+/// removes it. Far longer than any write takes, so only what a crashed process left behind is ever
+/// removed, never the work of a process that is running.
+const STALE_SCRATCH_AGE: Duration = Duration::from_hours(24);
+
+/// What the name of every scratch file starts with. A number follows, unique within the store.
 const SCRATCH_FILE_PREFIX: &str = "put-";
+
+/// The number the next store opened by this process gets. Together with the process id it names the
+/// store's scratch directory, so that two stores this process opens on one root never share one.
+static NEXT_STORE_NUMBER: AtomicU64 = AtomicU64::new(0);
 
 /// An artifact store in a directory of the local file system.
 ///
 /// Use it for a development cluster on one machine, or in a test that needs objects to survive a restart.
-/// Every process that should see the same objects is given the same directory. Open it once per process
-/// with [`LocalArtifactStore::open`] and clone the handle freely: clones share the directory.
+/// Every process that should see the same objects is given the same directory, and opens it with
+/// [`LocalArtifactStore::open`] whether or not others have it open. Clone the handle freely: clones share
+/// the directory.
 ///
 /// # Examples
 ///
@@ -112,11 +138,12 @@ impl LocalArtifactStore {
     /// Opens a directory as an artifact store.
     ///
     /// Creates the directory and its `objects/` and `scratch/` subdirectories if they do not exist, and
-    /// removes whatever interrupted writes left in `scratch/`. Objects already below `objects/` are kept.
-    /// Does blocking file system work on Tokio's blocking pool.
+    /// gives the store a scratch directory of its own below `scratch/`. Objects already below `objects/`
+    /// are kept. Does blocking file system work on Tokio's blocking pool.
     ///
-    /// A root directory belongs to one store at a time: do not open a directory that another running
-    /// process has open.
+    /// The directory may be open in other processes, and in this one, at the same time. What interrupted
+    /// writes left in `scratch/` is removed once it has not been touched for a day, which nothing a
+    /// running store is writing ever is.
     ///
     /// # Arguments
     ///
@@ -128,8 +155,9 @@ impl LocalArtifactStore {
     ///
     /// # Errors
     ///
-    /// Returns [`ArtifactError::Unavailable`] if the directories cannot be created, cleared or resolved,
-    /// for example because the path lies below a regular file or permissions forbid it.
+    /// Returns [`ArtifactError::Unavailable`] if the directories cannot be created or resolved, for
+    /// example because the path lies below a regular file or permissions forbid it. A leftover that
+    /// cannot be removed is not an error: it is left for the next store that opens the directory.
     ///
     /// # Examples
     ///
@@ -157,42 +185,55 @@ impl LocalArtifactStore {
     }
 }
 
-/// The two directories of a local store and the blocking file operations on them.
+/// The two directories of one open local store and the blocking file operations on them.
 ///
 /// The methods are plain blocking functions that return `io::Result`. The [`ArtifactStore`] implementation
 /// below runs them on the blocking pool and turns their errors into [`ArtifactError`].
 #[derive(Debug)]
 struct StoreDirectories {
-    /// The resolved path of the directory that holds one file per object.
+    /// The resolved path of the directory that holds one file per object. Every store opened on the same
+    /// root has the same one.
     objects_directory: PathBuf,
-    /// The resolved path of the directory where objects are built before they are renamed into place.
+    /// The resolved path of this store's own scratch directory, `scratch/<process id>-<store number>`,
+    /// where it builds objects before they are renamed into place. No other open store, in this process
+    /// or another, writes there.
     scratch_directory: PathBuf,
-    /// The number the next scratch file gets. Counting makes scratch names unique within this process,
-    /// which is all that is needed because a root directory belongs to one process at a time.
+    /// The number the next scratch file gets. Counting makes scratch names unique within this store,
+    /// which is all that is needed because no other store writes into this store's scratch directory.
     next_scratch_number: AtomicU64,
 }
 
 impl StoreDirectories {
-    /// Creates the store's directories below `root_directory` and empties the scratch directory.
+    /// Creates the directories of a store below `root_directory`: the objects directory, which it shares
+    /// with every other store opened on that root, and a scratch directory of its own. Removes what
+    /// crashed processes left in the scratch directories of stores that no longer run.
     ///
     /// The paths are resolved (symbolic links followed, made absolute) once, here, so that a path computed
     /// later from an object key can be compared with the objects directory by prefix.
     ///
     /// # Errors
     ///
-    /// Fails with the file system's error if a directory cannot be created, cleared or resolved.
+    /// Fails with the file system's error if a directory cannot be created or resolved. Other stores may
+    /// be doing the same on the same root at the same moment; that is not an error.
     fn prepare(root_directory: &Path) -> io::Result<Self> {
         let objects_directory = root_directory.join(OBJECTS_DIRECTORY_NAME);
-        let scratch_directory = root_directory.join(SCRATCH_DIRECTORY_NAME);
+        let shared_scratch_directory = root_directory.join(SCRATCH_DIRECTORY_NAME);
         fs::create_dir_all(&objects_directory)?;
-        // What is in the scratch directory was never renamed into place: an interrupted write.
-        if scratch_directory.exists() {
-            fs::remove_dir_all(&scratch_directory)?;
-        }
-        fs::create_dir_all(&scratch_directory)?;
+        fs::create_dir_all(&shared_scratch_directory)?;
+        remove_stale_scratch(&shared_scratch_directory, STALE_SCRATCH_AGE);
+
+        let store_number = NEXT_STORE_NUMBER.fetch_add(1, Ordering::Relaxed);
+        let own_scratch_name = format!("{}-{store_number}", std::process::id());
+        let own_scratch_directory = shared_scratch_directory
+            .canonicalize()?
+            .join(own_scratch_name);
+        // A directory of this name can only be left over from an earlier process that had the same
+        // process id: no store that runs now has this name.
+        remove_if_present(&own_scratch_directory)?;
+        fs::create_dir_all(&own_scratch_directory)?;
         Ok(Self {
             objects_directory: objects_directory.canonicalize()?,
-            scratch_directory: scratch_directory.canonicalize()?,
+            scratch_directory: own_scratch_directory,
             next_scratch_number: AtomicU64::new(0),
         })
     }
@@ -205,7 +246,7 @@ impl StoreDirectories {
         self.objects_directory.join(object_key)
     }
 
-    /// A path in the scratch directory that no other write of this process uses.
+    /// A path in this store's scratch directory that no other write uses.
     fn next_scratch_path(&self) -> PathBuf {
         let scratch_number = self.next_scratch_number.fetch_add(1, Ordering::Relaxed);
         self.scratch_directory
@@ -226,6 +267,9 @@ impl StoreDirectories {
             .expect("an object path is below the objects directory");
         fs::create_dir_all(parent_directory)?;
 
+        // The scratch directory is created again if it is gone: a store that wrote nothing for a day
+        // looks like a leftover to another store that opens the root, which then removes it.
+        fs::create_dir_all(&self.scratch_directory)?;
         let scratch_path = self.next_scratch_path();
         let mut scratch_file = File::create(&scratch_path)?;
         scratch_file.write_all(contents)?;
@@ -402,6 +446,67 @@ impl StoreDirectories {
             object_key.push_str(key_component);
         }
         Ok(object_key)
+    }
+}
+
+/// Removes a file, or a directory with everything in it. Succeeds if there is nothing at `path`: another
+/// store may have removed it a moment ago.
+///
+/// # Errors
+///
+/// Fails with the file system's error for anything other than "no such file".
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    let removed = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match removed {
+        Ok(()) => Ok(()),
+        Err(io_error) if io_error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(io_error) => Err(io_error),
+    }
+}
+
+/// Removes everything in the shared scratch directory that has not been touched for `stale_age`: what
+/// crashed processes left behind.
+///
+/// An entry of the shared scratch directory is the scratch directory of one store. Its modification time
+/// changes whenever that store creates or renames a scratch file, so an entry that old belongs to a store
+/// that no longer runs, or to one that has been idle that long and creates its directory again on its
+/// next write.
+///
+/// Best effort. An entry that cannot be examined or removed is left for the next store that opens the
+/// root: a leftover costs disk space and nothing else, and must not keep a store from opening.
+///
+/// # Arguments
+///
+/// * `shared_scratch_directory` - The `scratch/` directory of the root, which holds one directory per
+///   store.
+/// * `stale_age` - How long an entry must have been untouched to be removed.
+fn remove_stale_scratch(shared_scratch_directory: &Path, stale_age: Duration) {
+    let Ok(entries) = fs::read_dir(shared_scratch_directory) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(last_touched) = metadata.modified() else {
+            continue;
+        };
+        // A modification time in the future gives an error here: such an entry is not stale.
+        let Ok(untouched_for) = now.duration_since(last_touched) else {
+            continue;
+        };
+        if untouched_for >= stale_age {
+            // Another store may be removing the same leftover right now, and may win.
+            drop(remove_if_present(&entry.path()));
+        }
     }
 }
 

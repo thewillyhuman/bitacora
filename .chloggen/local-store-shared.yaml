@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: artifact
+note: "A local-directory object store can now be opened by several processes at once. Opening it used to wipe the half-written objects of every other process, and concurrent opens could fail."
+issues: [3]
