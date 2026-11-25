@@ -16,6 +16,8 @@ struct MemoryArtifacts {
     is_unavailable: bool,
     /// While set, no operation ever answers.
     is_unresponsive: bool,
+    /// How many range reads were served.
+    served_range_reads: u64,
 }
 
 /// An in-memory artifact store. Clones share the same objects, like two
@@ -58,6 +60,13 @@ impl MemoryArtifactStore {
             *byte ^= flipped_bits;
         }
         *contents = Bytes::from(damaged_contents);
+    }
+
+    /// How many range reads the store has served so far. A test uses it
+    /// to tell whether a read went to the object store at all.
+    #[must_use]
+    pub fn served_range_reads(&self) -> u64 {
+        self.lock().served_range_reads
     }
 
     fn lock(&self) -> MutexGuard<'_, MemoryArtifacts> {
@@ -116,7 +125,9 @@ impl ArtifactStore for MemoryArtifactStore {
         byte_range: Range<u64>,
     ) -> Result<Bytes, ArtifactError> {
         let contents = self.get_object(object_key).await?;
-        slice_range(object_key, &contents, &byte_range)
+        let range_contents = slice_range(object_key, &contents, &byte_range)?;
+        self.lock().served_range_reads += 1;
+        Ok(range_contents)
     }
 
     async fn delete_object(&self, object_key: &str) -> Result<(), ArtifactError> {
@@ -207,6 +218,20 @@ mod tests {
         store.corrupt_byte("missing", 0, 0x01);
         store.corrupt_byte("a", 3, 0x01);
         assert_eq!(store.get_object("a").await, Ok(Bytes::from_static(b"abc")));
+    }
+
+    #[tokio::test]
+    async fn served_range_reads_are_counted() {
+        let store = MemoryArtifactStore::new();
+        store
+            .put_object("a", Bytes::from_static(b"abc"))
+            .await
+            .expect("put");
+        let _whole_object = store.get_object("a").await;
+        let _refused_range = store.get_range("a", 2..9).await;
+        let _first_range = store.get_range("a", 0..1).await;
+        let _second_range = store.get_range("a", 1..3).await;
+        assert_eq!(store.served_range_reads(), 2);
     }
 
     #[tokio::test]
