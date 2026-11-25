@@ -75,6 +75,33 @@ impl fmt::Display for SegmentId {
     }
 }
 
+/// Identifies one segment across the whole cluster: a stream and the
+/// segment's position within it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SegmentAddress {
+    /// The stream the segment belongs to.
+    pub stream_id: StreamId,
+    /// The segment's position within that stream.
+    pub segment_id: SegmentId,
+}
+
+impl SegmentAddress {
+    /// Addresses segment `segment_id` of stream `stream_id`.
+    #[must_use]
+    pub const fn new(stream_id: StreamId, segment_id: SegmentId) -> Self {
+        Self {
+            stream_id,
+            segment_id,
+        }
+    }
+}
+
+impl fmt::Display for SegmentAddress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.stream_id, self.segment_id)
+    }
+}
+
 /// A writer generation. The metadata store increments it on every writer
 /// change, and all fencing rests on comparing epochs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -351,6 +378,12 @@ mod tests {
             SequenceNumber::new(41)
         );
         assert_eq!(rendered, "7 3 2 41");
+    }
+
+    #[test]
+    fn segment_address_displays_as_stream_then_segment() {
+        let address = SegmentAddress::new(StreamId::new(7), SegmentId::new(3));
+        assert_eq!(address.to_string(), "7/3");
     }
 
     #[test]

@@ -9,7 +9,9 @@ mod random;
 mod records;
 mod replication;
 
-pub use identifiers::{Epoch, InvalidReplicaId, ReplicaId, SegmentId, SequenceNumber, StreamId};
+pub use identifiers::{
+    Epoch, InvalidReplicaId, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId,
+};
 pub use random::DeterministicRandom;
 pub use records::{InvalidSequenceRange, LogRecord, MAX_RECORD_PAYLOAD_BYTES, SequenceRange};
 pub use replication::{InvalidReplicationSettings, ReplicationSettings};
