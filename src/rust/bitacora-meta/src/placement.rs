@@ -72,6 +72,46 @@ pub fn choose_replica_set(
     policy: PlacementPolicy,
     excluded: &BTreeSet<ReplicaId>,
 ) -> Result<Vec<ReplicaId>, PlacementError> {
+    place(replicas, &[], replica_count, now, policy, excluded)
+}
+
+/// Chooses one more replica for a segment that keeps its copies on
+/// `kept_replicas`, as when repair replaces a lost copy.
+///
+/// The new replica is the one that spreads the segment widest together
+/// with the copies it keeps, and never shares their narrowest domain.
+///
+/// # Errors
+///
+/// Returns [`PlacementError`] if no replica outside `kept_replicas` is
+/// alive, undrained and roomy, or none is in a domain of its own.
+pub fn choose_additional_replica(
+    replicas: &[ReplicaRecord],
+    kept_replicas: &[ReplicaId],
+    now: Timestamp,
+    policy: PlacementPolicy,
+) -> Result<ReplicaId, PlacementError> {
+    let excluded: BTreeSet<ReplicaId> = kept_replicas.iter().cloned().collect();
+    let already_placed: Vec<&ReplicaRecord> = replicas
+        .iter()
+        .filter(|replica| excluded.contains(&replica.replica_id))
+        .collect();
+    let chosen = place(replicas, &already_placed, 1, now, policy, &excluded)?;
+    Ok(chosen
+        .into_iter()
+        .next()
+        .expect("placing one replica yields one replica"))
+}
+
+/// Places `replica_count` copies next to the ones `already_placed`.
+fn place(
+    replicas: &[ReplicaRecord],
+    already_placed: &[&ReplicaRecord],
+    replica_count: usize,
+    now: Timestamp,
+    policy: PlacementPolicy,
+    excluded: &BTreeSet<ReplicaId>,
+) -> Result<Vec<ReplicaId>, PlacementError> {
     let mut candidates: Vec<&ReplicaRecord> = replicas
         .iter()
         .filter(|replica| {
@@ -88,40 +128,40 @@ pub fn choose_replica_set(
         });
     }
 
-    let mut chosen: Vec<&ReplicaRecord> = Vec::with_capacity(replica_count);
-    while chosen.len() < replica_count {
+    let mut placed: Vec<&ReplicaRecord> = already_placed.to_vec();
+    while placed.len() < already_placed.len() + replica_count {
         let best_position = candidates
             .iter()
             .enumerate()
             .min_by(|(_, left), (_, right)| {
-                shared_domains(left, &chosen)
-                    .cmp(&shared_domains(right, &chosen))
+                shared_domains(left, &placed)
+                    .cmp(&shared_domains(right, &placed))
                     .then(right.free_bytes.cmp(&left.free_bytes))
                     .then(left.replica_id.cmp(&right.replica_id))
             })
             .map(|(position, _candidate)| position)
             .expect("there are at least as many candidates as copies left to place");
-        chosen.push(candidates.swap_remove(best_position));
+        placed.push(candidates.swap_remove(best_position));
     }
 
-    let separate_domains: BTreeSet<&[String]> = chosen
+    let separate_domains: BTreeSet<&[String]> = placed
         .iter()
         .filter(|replica| !replica.failure_domains.is_empty())
         .map(|replica| replica.failure_domains.as_slice())
         .collect();
-    let unlabelled_count = chosen
+    let unlabelled_count = placed
         .iter()
         .filter(|replica| replica.failure_domains.is_empty())
         .count();
     let available = separate_domains.len() + unlabelled_count;
-    if available < replica_count {
+    if available < placed.len() {
         return Err(PlacementError::NotEnoughFailureDomains {
-            needed: replica_count,
+            needed: placed.len(),
             available,
         });
     }
-    Ok(chosen
-        .into_iter()
+    Ok(placed[already_placed.len()..]
+        .iter()
         .map(|replica| replica.replica_id.clone())
         .collect())
 }
@@ -322,6 +362,69 @@ mod tests {
         assert_eq!(
             chosen,
             Ok(vec![ReplicaId::new("r2").expect("valid identifier")])
+        );
+    }
+
+    fn additional(replicas: &[ReplicaRecord], kept: &[&str]) -> Result<String, PlacementError> {
+        let kept_replicas: Vec<ReplicaId> = kept
+            .iter()
+            .map(|name| ReplicaId::new(*name).expect("valid identifier"))
+            .collect();
+        choose_additional_replica(replicas, &kept_replicas, NOW, PlacementPolicy::default())
+            .map(|chosen| chosen.to_string())
+    }
+
+    #[test]
+    fn replacement_goes_to_the_zone_that_lost_its_copy() {
+        let replicas = [
+            replica("a1", &["zone-a", "host-a1"]),
+            replica("a2", &["zone-a", "host-a2"]),
+            replica("b1", &["zone-b", "host-b1"]),
+            replica("b2", &["zone-b", "host-b2"]),
+            replica("c1", &["zone-c", "host-c1"]),
+        ];
+        assert_eq!(additional(&replicas, &["a1", "c1"]), Ok("b1".to_owned()));
+    }
+
+    #[test]
+    fn replacement_is_never_a_replica_that_keeps_a_copy() {
+        let replicas = [replica("r1", &[]), replica("r2", &[]), replica("r3", &[])];
+        assert_eq!(additional(&replicas, &["r1", "r2"]), Ok("r3".to_owned()));
+    }
+
+    #[test]
+    fn replacement_never_shares_a_host_with_a_kept_copy() {
+        let replicas = [
+            replica("disk-1", &["zone-a", "host-1"]),
+            replica("disk-2", &["zone-a", "host-1"]),
+            replica("disk-3", &["zone-a", "host-2"]),
+        ];
+        assert_eq!(
+            additional(&replicas, &["disk-1", "disk-3"]),
+            Err(PlacementError::NotEnoughFailureDomains {
+                needed: 3,
+                available: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn replacement_ignores_kept_replicas_that_left_the_registry() {
+        let replicas = [replica("r2", &[]), replica("r3", &[])];
+        assert_eq!(additional(&replicas, &["r1", "r2"]), Ok("r3".to_owned()));
+    }
+
+    #[test]
+    fn no_replacement_exists_when_every_other_replica_is_dead() {
+        let mut dead = replica("r3", &[]);
+        dead.heartbeat_at = Timestamp::from_unix_millis(1_000);
+        let replicas = [replica("r1", &[]), replica("r2", &[]), dead];
+        assert_eq!(
+            additional(&replicas, &["r1", "r2"]),
+            Err(PlacementError::NotEnoughReplicas {
+                needed: 1,
+                eligible: 0,
+            })
         );
     }
 

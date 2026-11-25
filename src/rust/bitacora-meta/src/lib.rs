@@ -21,7 +21,9 @@ pub use key_value::{
     VersionedValue,
 };
 pub use memory_store::MemoryKeyValueStore;
-pub use placement::{PlacementError, PlacementPolicy, choose_replica_set};
+pub use placement::{
+    PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set,
+};
 pub use records::{
     CheckpointRecord, CopyRecord, CopyState, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
     RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,
