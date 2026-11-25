@@ -21,6 +21,7 @@ bitacora-testkit.workspace = true
 bitacora-types.workspace = true
 bytes.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing.workspace = true
 
 [lints]
 workspace = true

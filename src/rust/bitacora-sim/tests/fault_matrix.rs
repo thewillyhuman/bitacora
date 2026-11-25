@@ -81,7 +81,8 @@ fn seeds_that_once_found_a_bug_stay_fixed() {
 }
 
 /// Replays the single seed named by `BITA_SIM_SEED`, to reproduce a failure.
-/// Add `--test_env=BITA_SIM_DUMP=1` to print the whole history.
+/// Add `--test_env=BITA_SIM_DUMP=1` to print the whole history, and
+/// `--test_env=BITA_SIM_TRACE=1` to print what the cluster itself logged.
 ///
 /// ```sh
 /// bazel test //src/rust/bitacora-sim:fault_matrix_test \
@@ -95,6 +96,9 @@ fn replays_the_seed_named_in_the_environment() {
     else {
         return;
     };
+    if std::env::var_os("BITA_SIM_TRACE").is_some() {
+        bitacora_sim::print_log_lines_to_stderr();
+    }
     let report = run(&SimulationConfig::with_seed(seed));
     println!(
         "seed {seed}: {} committed appends, {} faults, {} events, fingerprint {:016x}",

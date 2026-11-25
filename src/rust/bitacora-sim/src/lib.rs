@@ -18,9 +18,11 @@ mod history;
 mod kv_workload;
 mod linearizability;
 mod simulation;
+mod trace;
 
 pub use checker::{Violation, check, check_audit};
 pub use history::{AppendOutcome, Event, History, KvCall, KvOutcome, TimedEvent};
 pub use kv_workload::InjectedBug;
 pub use linearizability::check_linearizability;
 pub use simulation::{FaultMix, SimulationConfig, SimulationReport, run};
+pub use trace::print_log_lines_to_stderr;

@@ -273,6 +273,7 @@ dependencies = [
  "bitacora-types",
  "bytes",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
