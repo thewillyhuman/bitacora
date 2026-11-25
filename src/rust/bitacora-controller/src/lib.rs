@@ -11,4 +11,4 @@ mod controller;
 #[cfg(test)]
 mod tests;
 
-pub use controller::{Controller, ControllerSettings, PassReport};
+pub use controller::{Controller, ControllerSettings, PassReport, Round};

@@ -102,9 +102,23 @@ pub struct PassReport {
     /// How many segment copies were removed from replicas because their
     /// segment was deleted, moved by repair, or their stream was deleted.
     pub copies_removed: usize,
+    /// How many sealed segments had fewer good copies than the stream's
+    /// replication asks for when the pass was done with their stream:
+    /// durability at risk. Segments left to the object store alone and
+    /// segments awaiting deletion are not counted.
+    pub segments_missing_copies: usize,
     /// How many streams could not be fully handled; they are retried on the
     /// next pass.
     pub streams_with_errors: usize,
+}
+
+/// What one round of the controller's loop did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Round {
+    /// This instance leads, and ran a pass.
+    Led(PassReport),
+    /// Another instance leads. This one did nothing and stands by.
+    StoodBy,
 }
 
 /// What the controller learned about the replicas at the start of a pass.
@@ -170,34 +184,46 @@ impl Controller {
         self
     }
 
-    /// Runs passes forever, as long as this instance holds or can take the
-    /// leadership. Stop it by dropping the future.
+    /// Runs rounds forever, resting for the pass interval between two.
+    /// Stop it by dropping the future. Failures are logged and the next
+    /// round tries again.
+    ///
+    /// A process that wants to see what each round did, for example to
+    /// export metrics, calls [`Controller::run_round`] in a loop of its own.
+    pub async fn run(&self) {
+        loop {
+            if let Err(meta_error) = self.run_round().await {
+                tracing::warn!(%meta_error, "controller round failed");
+            }
+            sleep(self.settings.pass_interval).await;
+        }
+    }
+
+    /// Runs one round: takes or renews the leadership and, if this
+    /// instance leads, runs one pass.
     ///
     /// Leadership only avoids duplicate work: two controllers that both
     /// believe they lead cannot corrupt anything, because every write of a
     /// pass is conditional.
-    pub async fn run(&self) {
-        loop {
-            let now = self.clock.now();
-            let leads = self
-                .metadata
-                .try_lead(
-                    &self.settings.identity,
-                    now,
-                    now.plus(self.settings.leadership_duration),
-                )
-                .await;
-            match leads {
-                Ok(true) => {
-                    if let Err(meta_error) = self.run_pass().await {
-                        tracing::warn!(%meta_error, "controller pass failed");
-                    }
-                }
-                Ok(false) => {}
-                Err(meta_error) => tracing::warn!(%meta_error, "cannot check leadership"),
-            }
-            sleep(self.settings.pass_interval).await;
+    ///
+    /// # Errors
+    ///
+    /// Fails if the leadership cannot be checked or the metadata store
+    /// cannot be listed.
+    pub async fn run_round(&self) -> Result<Round, MetaError> {
+        let now = self.clock.now();
+        let leads = self
+            .metadata
+            .try_lead(
+                &self.settings.identity,
+                now,
+                now.plus(self.settings.leadership_duration),
+            )
+            .await?;
+        if !leads {
+            return Ok(Round::StoodBy);
         }
+        Ok(Round::Led(self.run_pass().await?))
     }
 
     /// Runs one pass over every stream.
@@ -235,7 +261,10 @@ impl Controller {
             .await?;
         self.truncate(&stream.name, survey.now, report).await?;
         self.delete_tiered_segments_below_the_mark(&stream.name, report)
-            .await
+            .await?;
+        let handled_stream = self.metadata.get_stream(&stream.name).await?;
+        report.segments_missing_copies += segments_missing_copies(&handled_stream);
+        Ok(())
     }
 
     /// Reads the registry and asks every live replica what it holds.
@@ -741,6 +770,35 @@ impl Controller {
             CopyState::Bad
         })
     }
+}
+
+/// How many sealed segments of `stream` have fewer good copies than its
+/// replication asks for. A segment left to the object store alone is where
+/// it belongs, and one below the low-water mark only awaits deletion.
+fn segments_missing_copies(stream: &StreamRecord) -> usize {
+    let mut missing_count = 0;
+    for segment in &stream.segments {
+        let Some(sealed_end) = segment.sealed_end() else {
+            continue;
+        };
+        let is_released = segment
+            .tiered
+            .as_ref()
+            .is_some_and(|tiered| tiered.are_local_copies_dropped);
+        if is_released || sealed_end < stream.low_water_mark {
+            continue;
+        }
+        let mut good_copies = 0;
+        for copy in &segment.copies {
+            if copy.state == CopyState::Good {
+                good_copies += 1;
+            }
+        }
+        if good_copies < stream.replication.replica_count() {
+            missing_count += 1;
+        }
+    }
+    missing_count
 }
 
 /// The mark the stream's materializers and owner allow: every record below

@@ -13,7 +13,7 @@ use bitacora_types::replica_api::ReplicaApi;
 use bitacora_types::{ReplicationSettings, SegmentAddress, SegmentId, SequenceNumber};
 use bytes::Bytes;
 
-use crate::{Controller, ControllerSettings, PassReport};
+use crate::{Controller, ControllerSettings, PassReport, Round};
 
 pub(crate) const STREAM: &str = "orders";
 
@@ -910,6 +910,85 @@ async fn second_controller_takes_over_when_the_first_one_stops() {
             Some("controller-2".to_owned())
         )
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn round_of_the_leading_controller_runs_a_pass() {
+    let cluster = Cluster::start(3).await;
+    create_stream(&cluster).await;
+
+    let round = controller(&cluster, "controller-1").run_round().await;
+
+    assert!(
+        matches!(&round, Ok(Round::Led(report)) if report.standbys_placed == 1),
+        "{round:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn round_of_a_controller_that_does_not_lead_stands_by() {
+    let cluster = Cluster::start(3).await;
+    create_stream(&cluster).await;
+    let _leading_round = controller(&cluster, "controller-1").run_round().await;
+
+    let round = controller(&cluster, "controller-2").run_round().await;
+
+    assert_eq!(round, Ok(Round::StoodBy));
+}
+
+#[tokio::test(start_paused = true)]
+async fn round_fails_while_the_metadata_store_is_down() {
+    let cluster = Cluster::start(3).await;
+    cluster.key_value_store().set_unavailable(true);
+
+    let round = controller(&cluster, "controller-1").run_round().await;
+
+    assert!(round.is_err(), "{round:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn pass_counts_no_segment_as_missing_copies_when_all_are_good() {
+    let cluster = cluster_with_a_sealed_segment(3, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+
+    let report = run_pass(&cluster).await;
+
+    assert_eq!(report.segments_missing_copies, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pass_counts_a_segment_whose_copy_is_lost_and_cannot_be_rebuilt() {
+    let cluster = cluster_with_a_sealed_segment(3, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+    run_pass(&cluster).await;
+    cluster.nodes()[2].crash();
+    tokio::time::advance(ControllerSettings::default().replica_lost_after * 2).await;
+    cluster.renew_registrations().await.expect("renewed");
+
+    let report = run_pass(&cluster).await;
+
+    assert_eq!(report.segments_missing_copies, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pass_does_not_count_a_segment_whose_copy_was_rebuilt() {
+    let cluster = cluster_with_a_sealed_segment(4, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+    run_pass(&cluster).await;
+    cluster.nodes()[2].crash();
+    tokio::time::advance(ControllerSettings::default().replica_lost_after * 2).await;
+    cluster.renew_registrations().await.expect("renewed");
+
+    let report = run_pass(&cluster).await;
+
+    assert_eq!(report.copies_repaired, 1);
+    assert_eq!(report.segments_missing_copies, 0);
 }
 
 #[tokio::test(start_paused = true)]
