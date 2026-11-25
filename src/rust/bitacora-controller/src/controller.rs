@@ -12,10 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora_meta::{
-    CopyState, MetaError, MetadataStore, PlacementPolicy, ReplicaRecord, SegmentRecord,
-    StreamRecord, choose_replica_set,
+    CopyRecord, CopyState, MetaError, MetadataStore, PlacementPolicy, ReplicaRecord, SegmentRecord,
+    StreamRecord, choose_additional_replica, choose_replica_set,
 };
-use bitacora_types::replica_api::{ReplicaConnector, ReplicaError, SealRequest, SegmentStatus};
+use bitacora_types::replica_api::{
+    RepairRequest, ReplicaConnector, ReplicaError, SealRequest, SegmentStatus,
+};
 use bitacora_types::{Clock, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, Timestamp};
 use tokio::time::{sleep, timeout};
 
@@ -36,6 +38,11 @@ pub struct ControllerSettings {
     /// re-created elsewhere. Much longer than the liveness window, so that
     /// a restart or an upgrade does not trigger re-replication.
     pub replica_lost_after: Duration,
+    /// How long rebuilding one copy of a sealed segment may take.
+    pub repair_timeout: Duration,
+    /// How many copies one pass rebuilds at most, so that a pass stays
+    /// short and placement keeps up while a failed node is re-replicated.
+    pub max_repairs_per_pass: usize,
 }
 
 impl Default for ControllerSettings {
@@ -47,6 +54,8 @@ impl Default for ControllerSettings {
             placement: PlacementPolicy::default(),
             request_timeout: Duration::from_secs(5),
             replica_lost_after: Duration::from_mins(5),
+            repair_timeout: Duration::from_mins(30),
+            max_repairs_per_pass: 8,
         }
     }
 }
@@ -61,6 +70,8 @@ pub struct PassReport {
     /// How many copies of sealed segments were found short, damaged or
     /// lost, and marked for replacement.
     pub copies_marked_bad: usize,
+    /// How many bad copies of sealed segments were rebuilt from a good one.
+    pub copies_repaired: usize,
     /// How many streams could not be fully handled; they are retried on the
     /// next pass.
     pub streams_with_errors: usize,
@@ -171,7 +182,8 @@ impl Controller {
         report: &mut PassReport,
     ) -> Result<(), MetaError> {
         self.ensure_standby(stream, survey, report).await?;
-        self.reconcile_sealed_copies(stream, survey, report).await
+        self.reconcile_sealed_copies(stream, survey, report).await?;
+        self.repair_bad_copies(&stream.name, survey, report).await
     }
 
     /// Reads the registry and asks every live replica what it holds.
@@ -330,6 +342,151 @@ impl Controller {
                 CopyState::Unverified => {}
             }
         }
+        Ok(())
+    }
+
+    /// Rebuilds bad copies of sealed segments from a good one (design,
+    /// section 10, "Repair"). A copy on a replica that still answers is
+    /// rebuilt where it is; a copy on a lost replica moves to a replica that
+    /// preserves the segment's spread across failure domains.
+    async fn repair_bad_copies(
+        &self,
+        stream_name: &str,
+        survey: &Survey,
+        report: &mut PassReport,
+    ) -> Result<(), MetaError> {
+        // Read again: the reconciliation before this may have changed
+        // which copies are good.
+        let stream = self.metadata.get_stream(stream_name).await?;
+        for segment in &stream.segments {
+            let Some(sealed_end) = segment.sealed_end() else {
+                continue;
+            };
+            let bad_copies: Vec<usize> = (0..segment.copies.len())
+                .filter(|replica_index| segment.copies[*replica_index].state == CopyState::Bad)
+                .collect();
+            if bad_copies.is_empty() {
+                continue;
+            }
+            let good_source = segment
+                .copies
+                .iter()
+                .filter(|copy| copy.state == CopyState::Good)
+                .filter(|copy| survey.copies_by_replica.contains_key(&copy.replica_id))
+                .find_map(|copy| survey.registration(&copy.replica_id));
+            let Some(source) = good_source else {
+                tracing::error!(
+                    stream = stream_name,
+                    segment = %segment.segment_id,
+                    "no reachable good copy to repair from"
+                );
+                continue;
+            };
+            for replica_index in bad_copies {
+                if report.copies_repaired >= self.settings.max_repairs_per_pass {
+                    return Ok(());
+                }
+                let Some(target) = self.repair_target(segment, replica_index, survey) else {
+                    continue;
+                };
+                let request = RepairRequest {
+                    segment: segment.descriptor(stream.stream_id),
+                    sealed_end,
+                    source_address: source.address.clone(),
+                };
+                let client = self.connector.connect(&target.address);
+                let repaired =
+                    timeout(self.settings.repair_timeout, client.repair_segment(request)).await;
+                match repaired {
+                    Ok(Ok(_complete)) => {
+                        self.record_repaired_copy(&stream, segment, replica_index, &target)
+                            .await?;
+                        tracing::info!(
+                            stream = stream_name,
+                            segment = %segment.segment_id,
+                            replica = %target.replica_id,
+                            "rebuilt a copy of a sealed segment"
+                        );
+                        report.copies_repaired += 1;
+                    }
+                    Ok(Err(replica_error)) => {
+                        tracing::warn!(replica = %target.replica_id, %replica_error, "repair failed");
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(replica = %target.replica_id, "repair timed out");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Picks the replica that rebuilds the bad copy at `replica_index`: the
+    /// one that holds it, if it still answers and takes data; otherwise a
+    /// new one that keeps the segment spread across failure domains.
+    fn repair_target(
+        &self,
+        segment: &SegmentRecord,
+        replica_index: usize,
+        survey: &Survey,
+    ) -> Option<ReplicaRecord> {
+        let bad_copy = &segment.copies[replica_index];
+        let holder = survey
+            .registration(&bad_copy.replica_id)
+            .filter(|replica| survey.copies_by_replica.contains_key(&replica.replica_id))
+            .filter(|replica| !replica.is_draining);
+        if let Some(holder) = holder {
+            return Some(holder.clone());
+        }
+        let kept_replicas: Vec<ReplicaId> = segment
+            .copies
+            .iter()
+            .enumerate()
+            .filter(|(index, _copy)| *index != replica_index)
+            .map(|(_index, copy)| copy.replica_id.clone())
+            .collect();
+        match choose_additional_replica(
+            &survey.registered_replicas,
+            &kept_replicas,
+            survey.now,
+            self.settings.placement,
+        ) {
+            Ok(replica_id) => survey.registration(&replica_id).cloned(),
+            Err(placement_error) => {
+                tracing::warn!(segment = %segment.segment_id, %placement_error, "no replica to repair onto");
+                None
+            }
+        }
+    }
+
+    /// Swaps the repaired copy into the segment's replica set (design,
+    /// section 10, "Repair", step 4), unless the set changed meanwhile.
+    async fn record_repaired_copy(
+        &self,
+        stream: &StreamRecord,
+        segment: &SegmentRecord,
+        replica_index: usize,
+        target: &ReplicaRecord,
+    ) -> Result<(), MetaError> {
+        let seen_copy = segment.copies[replica_index].clone();
+        self.metadata
+            .update_stream(&stream.name, |record| {
+                let current_copy = record
+                    .segments
+                    .iter_mut()
+                    .find(|candidate| candidate.segment_id == segment.segment_id)
+                    .and_then(|candidate| candidate.copies.get_mut(replica_index));
+                if let Some(current_copy) = current_copy
+                    && *current_copy == seen_copy
+                {
+                    *current_copy = CopyRecord {
+                        replica_id: target.replica_id.clone(),
+                        state: CopyState::Good,
+                    };
+                }
+                Ok(())
+            })
+            .await?;
         Ok(())
     }
 

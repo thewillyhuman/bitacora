@@ -33,6 +33,7 @@ version = "0.0.0"
 dependencies = [
  "bitacora-client",
  "bitacora-meta",
+ "bitacora-replica",
  "bitacora-testkit",
  "bitacora-types",
  "bytes",

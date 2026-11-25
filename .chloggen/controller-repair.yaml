@@ -1,0 +1,4 @@
+change_type: enhancement
+component: controller
+note: "Repair sealed segments that have fewer good copies than their stream asks for, in place or on a replica that preserves the failure-domain spread."
+issues: [3]

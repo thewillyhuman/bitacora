@@ -7,6 +7,7 @@ use bitacora_client::{
     BitacoraClient, ClientSettings, StreamWriter, TakeoverPolicy, WriterSettings,
 };
 use bitacora_meta::{CopyState, RetentionPolicy, StreamRecord};
+use bitacora_replica::ReplicaSettings;
 use bitacora_testkit::Cluster;
 use bitacora_types::replica_api::ReplicaApi;
 use bitacora_types::{ReplicationSettings, SegmentAddress, SegmentId, SequenceNumber};
@@ -26,6 +27,14 @@ fn controller(cluster: &Cluster, identity: &str) -> Controller {
             ..ControllerSettings::default()
         },
     )
+}
+
+/// Replica settings with small segment files, as the testkit uses.
+fn small_segment_files() -> ReplicaSettings {
+    ReplicaSettings {
+        preallocated_segment_bytes: 4 * 1024,
+        ..ReplicaSettings::default()
+    }
 }
 
 async fn run_pass(cluster: &Cluster) -> PassReport {
@@ -261,7 +270,7 @@ async fn replica_that_missed_the_seal_learns_it_from_the_controller() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn short_copy_of_a_sealed_segment_becomes_bad() {
+async fn short_copy_of_a_sealed_segment_is_found_bad() {
     let cluster = cluster_with_a_sealed_segment(3, async |cluster, writer| {
         append(writer, 1).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -271,10 +280,7 @@ async fn short_copy_of_a_sealed_segment_becomes_bad() {
     .await;
     cluster.nodes()[2].set_reachable(true);
     let report = run_pass(&cluster).await;
-    assert_eq!(
-        (report.copies_marked_bad, copy_states(&cluster).await),
-        (1, vec![CopyState::Good, CopyState::Good, CopyState::Bad])
-    );
+    assert_eq!((report.copies_confirmed, report.copies_marked_bad), (2, 1));
 }
 
 #[tokio::test(start_paused = true)]
@@ -334,7 +340,7 @@ async fn copy_on_a_replica_removed_from_the_registry_becomes_bad() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn copy_found_damaged_by_the_scrubber_becomes_bad() {
+async fn copy_found_damaged_by_the_scrubber_is_found_bad() {
     let cluster = cluster_with_a_sealed_segment(3, async |_cluster, writer| {
         append(writer, 3).await;
     })
@@ -352,8 +358,7 @@ async fn copy_found_damaged_by_the_scrubber_becomes_bad() {
         .scrub_sealed_segments()
         .await
         .expect("scrubs");
-    run_pass(&cluster).await;
-    assert_eq!(copy_states(&cluster).await[0], CopyState::Bad);
+    assert_eq!(run_pass(&cluster).await.copies_marked_bad, 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -372,6 +377,171 @@ async fn open_segment_is_not_judged() {
     append(&writer, 3).await;
     run_pass(&cluster).await;
     assert_eq!(copy_states(&cluster).await, vec![CopyState::Unverified; 3]);
+}
+
+// ---- repair ----
+
+#[tokio::test(start_paused = true)]
+async fn short_copy_is_completed_in_place() {
+    let cluster = cluster_with_a_sealed_segment(3, async |cluster, writer| {
+        append(writer, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cluster.nodes()[2].set_reachable(false);
+        append(writer, 2).await;
+    })
+    .await;
+    cluster.nodes()[2].set_reachable(true);
+    let report = run_pass(&cluster).await;
+    let segment = first_segment_address(&cluster).await;
+    assert_eq!(
+        (
+            report.copies_repaired,
+            copy_states(&cluster).await,
+            cluster.nodes()[2].local_end(segment).await
+        ),
+        (1, vec![CopyState::Good; 3], Some(SequenceNumber::new(3)))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn damaged_copy_is_rebuilt_in_place() {
+    let cluster = cluster_with_a_sealed_segment(3, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+    run_pass(&cluster).await;
+    let segment = first_segment_address(&cluster).await;
+    let node = &cluster.nodes()[0];
+    node.disk().corrupt_byte(
+        &format!("{}/{}.seg", segment.stream_id, segment.segment_id),
+        100,
+        0x20,
+    );
+    let replica = node.replica().expect("the node is running");
+    replica.scrub_sealed_segments().await.expect("scrubs");
+    run_pass(&cluster).await;
+    assert_eq!(
+        (
+            copy_states(&cluster).await,
+            replica.scrub_sealed_segments().await
+        ),
+        (vec![CopyState::Good; 3], Ok(0))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn copy_on_a_lost_replica_is_rebuilt_on_another_one() {
+    let cluster = cluster_with_a_sealed_segment(4, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+    run_pass(&cluster).await;
+    cluster.nodes()[2].crash();
+    tokio::time::advance(ControllerSettings::default().replica_lost_after * 2).await;
+    cluster.renew_registrations().await.expect("renewed");
+    let report = run_pass(&cluster).await;
+
+    let segment = first_segment_address(&cluster).await;
+    let holders: Vec<_> = stream(&cluster).await.segments[0]
+        .copies
+        .iter()
+        .map(|copy| copy.replica_id.clone())
+        .collect();
+    assert_eq!(
+        (
+            report.copies_repaired,
+            holders,
+            copy_states(&cluster).await,
+            cluster.nodes()[3].local_end(segment).await
+        ),
+        (
+            1,
+            cluster.replica_ids(&[0, 1, 3]),
+            vec![CopyState::Good; 3],
+            Some(SequenceNumber::new(3))
+        )
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn segment_without_a_good_copy_is_left_alone() {
+    let cluster = cluster_with_a_sealed_segment(3, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+    run_pass(&cluster).await;
+    let segment = first_segment_address(&cluster).await;
+    for node in cluster.nodes() {
+        node.disk().corrupt_byte(
+            &format!("{}/{}.seg", segment.stream_id, segment.segment_id),
+            100,
+            0x20,
+        );
+        node.replica()
+            .expect("the node is running")
+            .scrub_sealed_segments()
+            .await
+            .expect("scrubs");
+    }
+    let report = run_pass(&cluster).await;
+    assert_eq!(
+        (report.copies_repaired, copy_states(&cluster).await),
+        (0, vec![CopyState::Bad; 3])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lost_copy_without_a_spare_replica_stays_bad_until_one_appears() {
+    let cluster = cluster_with_a_sealed_segment(3, async |_cluster, writer| {
+        append(writer, 3).await;
+    })
+    .await;
+    run_pass(&cluster).await;
+    cluster.nodes()[2].crash();
+    tokio::time::advance(ControllerSettings::default().replica_lost_after * 2).await;
+    cluster.renew_registrations().await.expect("renewed");
+    let while_lost = run_pass(&cluster).await;
+    cluster.nodes()[2].restart().await;
+    cluster.renew_registrations().await.expect("renewed");
+    run_pass(&cluster).await;
+    assert_eq!(
+        (while_lost.copies_repaired, copy_states(&cluster).await),
+        (0, vec![CopyState::Good; 3])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
+    let zone_of = |node_number: usize| {
+        vec![
+            format!("zone-{}", node_number % 3),
+            format!("host-{node_number}"),
+        ]
+    };
+    let cluster = Cluster::start_with(6, small_segment_files(), zone_of).await;
+    create_stream(&cluster).await;
+    run_pass(&cluster).await;
+    let writer = open_writer(&cluster).await;
+    append(&writer, 3).await;
+    writer.close().await.expect("the writer closes");
+    run_pass(&cluster).await;
+    let holders_before = stream(&cluster).await.segments[0].copies.clone();
+
+    // Lose the copy in zone 1 for good.
+    let lost = holders_before
+        .iter()
+        .position(|copy| copy.replica_id == cluster.replica_ids(&[1])[0])
+        .expect("the first replica set holds one copy per zone");
+    cluster.nodes()[1].crash();
+    tokio::time::advance(ControllerSettings::default().replica_lost_after * 2).await;
+    cluster.renew_registrations().await.expect("renewed");
+    run_pass(&cluster).await;
+
+    assert_eq!(
+        stream(&cluster).await.segments[0].copies[lost].replica_id,
+        cluster.replica_ids(&[4])[0],
+        "replica-4 is the other node of zone 1"
+    );
 }
 
 // ---- leadership ----
