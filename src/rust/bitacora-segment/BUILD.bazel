@@ -1,8 +1,18 @@
-load("//src/rust:defs.bzl", "bitacora_library")
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
 
 exports_files(["Cargo.toml"])
 
 bitacora_library(
     name = "bitacora_segment",
     deps = ["//src/rust/bitacora-types:bitacora_types"],
+)
+
+# Every decoder of the crate, fed noise and damaged encodings: none may panic.
+bitacora_integration_test(
+    name = "decoder_fuzz_test",
+    srcs = ["tests/decoder_fuzz_test.rs"],
+    deps = [
+        ":bitacora_segment",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
 )
