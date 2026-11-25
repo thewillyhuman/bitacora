@@ -121,6 +121,23 @@ fn cluster_without_faults_commits_and_serves_everything() {
     );
 }
 
+/// Tiering is only tested if the run gets as far as reading a segment from
+/// the object store. A change that stops that from happening, for example
+/// truncation overtaking every upload, must not pass silently.
+#[test]
+fn simulation_reads_segments_from_the_object_store() {
+    let report = run(&SimulationConfig {
+        faults: FaultMix::NONE,
+        chaos_duration: Duration::from_secs(20),
+        ..SimulationConfig::with_seed(1)
+    });
+    assert!(
+        report.object_store_reads > 0,
+        "no read reached the object store\n{}",
+        report.failure_summary()
+    );
+}
+
 #[test]
 fn same_seed_replays_the_same_history() {
     let config = SimulationConfig {
@@ -199,6 +216,10 @@ fn each_fault_alone_holds_the_invariants() {
         },
         FaultMix {
             disk_loss: true,
+            ..none
+        },
+        FaultMix {
+            object_store_outages: true,
             ..none
         },
     ] {

@@ -10,12 +10,13 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use bitacora_artifact::ArtifactStore;
 use bitacora_client::{
     AppendError, BitacoraClient, ClientSettings, ReadError, ReaderSettings, TakeoverPolicy,
     WriterSettings,
 };
 use bitacora_controller::{Controller, ControllerSettings};
-use bitacora_meta::{CopyState, PlacementPolicy, RetentionPolicy};
+use bitacora_meta::{CopyState, PlacementPolicy, RetentionPolicy, SegmentRecord, StreamRecord};
 use bitacora_segment::Disk;
 use bitacora_testkit::{Cluster, LinkFault};
 use bitacora_types::replica_api::ReplicaApi;
@@ -75,6 +76,8 @@ pub struct FaultMix {
     pub silent_corruption: bool,
     /// One node loses its disk for good, once, and returns empty.
     pub disk_loss: bool,
+    /// The object store is unreachable for a while.
+    pub object_store_outages: bool,
 }
 
 impl FaultMix {
@@ -91,6 +94,7 @@ impl FaultMix {
         writer_switches: false,
         silent_corruption: false,
         disk_loss: false,
+        object_store_outages: false,
     };
 
     /// Every fault the simulator knows.
@@ -106,6 +110,7 @@ impl FaultMix {
         writer_switches: true,
         silent_corruption: true,
         disk_loss: true,
+        object_store_outages: true,
     };
 
     fn enabled_kinds(self) -> Vec<FaultKind> {
@@ -121,6 +126,7 @@ impl FaultMix {
             (self.writer_switches, FaultKind::WriterSwitch),
             (self.silent_corruption, FaultKind::SilentCorruption),
             (self.disk_loss, FaultKind::DiskLoss),
+            (self.object_store_outages, FaultKind::ObjectStoreOutage),
         ]
         .into_iter()
         .filter_map(|(is_enabled, kind)| is_enabled.then_some(kind))
@@ -141,6 +147,7 @@ enum FaultKind {
     WriterSwitch,
     SilentCorruption,
     DiskLoss,
+    ObjectStoreOutage,
 }
 
 /// What one simulated run looks like.
@@ -199,6 +206,9 @@ pub struct SimulationReport {
     pub committed_appends: usize,
     /// How many faults were injected.
     pub faults_injected: usize,
+    /// How many range reads the object store served: whether, and how
+    /// much, the run read tiered segments.
+    pub object_store_reads: u64,
 }
 
 impl SimulationReport {
@@ -281,6 +291,12 @@ struct World {
 }
 
 impl World {
+    /// The cluster's object store, as the clients and the controller of
+    /// the run are given it.
+    fn artifact_store(&self) -> Arc<dyn ArtifactStore> {
+        Arc::new(self.cluster.artifact_store().clone())
+    }
+
     fn client(&self, identity: &str) -> BitacoraClient {
         BitacoraClient::new(
             self.cluster.metadata().clone(),
@@ -307,6 +323,7 @@ impl World {
                 },
             },
         )
+        .with_artifact_store(self.artifact_store())
     }
 }
 
@@ -382,6 +399,7 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     clients.abort_all();
     while clients.join_next().await.is_some() {}
     world.cluster.key_value_store().set_unavailable(false);
+    world.cluster.artifact_store().set_unavailable(false);
     for node in world.cluster.nodes() {
         node.link().set_fault(LinkFault::default());
         node.crash();
@@ -398,7 +416,9 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     };
     background.abort_all();
 
-    judge(&config, &world.history.events(), settled)
+    let mut report = judge(&config, &world.history.events(), settled);
+    report.object_store_reads = world.cluster.artifact_store().served_range_reads();
+    report
 }
 
 /// Checks the history of a finished run and summarizes it.
@@ -436,6 +456,8 @@ fn judge(
             )
         }),
         faults_injected: count(|event| matches!(event, Event::Fault { .. })),
+        // Not part of the history; the caller fills it in.
+        object_store_reads: 0,
     }
 }
 
@@ -518,9 +540,16 @@ async fn run_controller(world: Arc<World>) {
             },
             request_timeout: Duration::from_secs(2),
             replica_lost_after: Duration::from_secs(30),
+            // Short enough that segments are uploaded, and their local
+            // copies released, before truncation deletes them: the run
+            // must read from the object store too.
+            tiering_delay: Duration::from_secs(1),
+            hot_read_window: Duration::from_secs(2),
+            upload_timeout: Duration::from_secs(5),
             ..ControllerSettings::default()
         },
-    );
+    )
+    .with_artifact_store(world.artifact_store());
     controller.run().await;
 }
 
@@ -848,6 +877,17 @@ async fn run_nemesis(
                     world.cluster.key_value_store().set_unavailable(false);
                 });
             }
+            FaultKind::ObjectStoreOutage => {
+                world
+                    .history
+                    .fault(format!("object store is unreachable for {lasts_for:?}"));
+                world.cluster.artifact_store().set_unavailable(true);
+                let world = Arc::clone(&world);
+                repairs.spawn(async move {
+                    sleep(lasts_for).await;
+                    world.cluster.artifact_store().set_unavailable(false);
+                });
+            }
             FaultKind::WriterCrash => {
                 let compute_node = *designated_writer.borrow();
                 world
@@ -1048,29 +1088,45 @@ async fn check_truncation(world: &World, low_water_mark: SequenceNumber) -> Resu
     Ok(())
 }
 
-/// Waits until the controller has brought every sealed segment back to a
-/// full set of good copies (design, section 18, the exit gate of M3). It
-/// returns only then; the caller bounds the wait.
+/// Waits until the controller has brought every sealed segment back to
+/// where it belongs (design, section 18, the exit gate of M3): a full set
+/// of good copies, or the object store alone once its hot-read window is
+/// over. It returns only then; the caller bounds the wait.
 async fn wait_for_full_replication(world: &World) {
     loop {
-        if let Ok(stream) = world.cluster.metadata().get_stream(STREAM).await {
-            let is_fully_replicated = stream
+        if let Ok(stream) = world.cluster.metadata().get_stream(STREAM).await
+            && stream
                 .segments
                 .iter()
-                .filter(|segment| segment.sealed.is_some())
-                .all(|segment| {
-                    segment.copies.len() == stream.replication.replica_count()
-                        && segment
-                            .copies
-                            .iter()
-                            .all(|copy| copy.state == CopyState::Good)
-                });
-            if is_fully_replicated {
-                return;
-            }
+                .all(|segment| is_where_it_belongs(&stream, segment))
+        {
+            return;
         }
         sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// Whether `segment` needs nothing more from the controller.
+fn is_where_it_belongs(stream: &StreamRecord, segment: &SegmentRecord) -> bool {
+    let Some(sealed_end) = segment.sealed_end() else {
+        // An open segment is the writer's business.
+        return true;
+    };
+    if sealed_end < stream.low_water_mark {
+        // Truncated; only its deletion is pending.
+        return true;
+    }
+    let is_released = segment.copies.is_empty()
+        && segment
+            .tiered
+            .as_ref()
+            .is_some_and(|tiered| tiered.are_local_copies_dropped);
+    let has_every_good_copy = segment.copies.len() == stream.replication.replica_count()
+        && segment
+            .copies
+            .iter()
+            .all(|copy| copy.state == CopyState::Good);
+    is_released || has_every_good_copy
 }
 
 #[cfg(test)]
@@ -1163,6 +1219,6 @@ mod tests {
 
     #[test]
     fn full_fault_mix_enables_every_kind() {
-        assert_eq!(FaultMix::ALL.enabled_kinds().len(), 11);
+        assert_eq!(FaultMix::ALL.enabled_kinds().len(), 12);
     }
 }

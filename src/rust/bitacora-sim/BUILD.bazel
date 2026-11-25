@@ -3,6 +3,7 @@ load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
 exports_files(["Cargo.toml"])
 
 SIMULATION_DEPS = [
+    "//src/rust/bitacora-artifact:bitacora_artifact",
     "//src/rust/bitacora-client:bitacora_client",
     "//src/rust/bitacora-controller:bitacora_controller",
     "//src/rust/bitacora-meta:bitacora_meta",

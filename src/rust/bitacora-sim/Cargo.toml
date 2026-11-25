@@ -10,6 +10,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+bitacora-artifact.workspace = true
 bitacora-client.workspace = true
 bitacora-controller.workspace = true
 bitacora-meta.workspace = true

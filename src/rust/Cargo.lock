@@ -187,6 +187,7 @@ dependencies = [
 name = "bitacora-sim"
 version = "0.0.0"
 dependencies = [
+ "bitacora-artifact",
  "bitacora-client",
  "bitacora-controller",
  "bitacora-meta",

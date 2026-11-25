@@ -1,0 +1,4 @@
+change_type: enhancement
+component: sim
+note: "Run tiering under the fault matrix: segments are uploaded, released and read from the object store during the chaos, and the object store itself has outages."
+issues: [3]
