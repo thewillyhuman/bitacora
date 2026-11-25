@@ -739,6 +739,21 @@ impl MetadataStore {
         Ok(outcome == TransactionOutcome::Applied)
     }
 
+    /// Reads which controller instance leads, if any ever did. The record
+    /// stays after its leadership lapsed; compare `expires_at` with the
+    /// clock to tell.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the store is unavailable or holds an undecodable record.
+    pub async fn get_leader(&self) -> Result<Option<LeaderRecord>, MetaError> {
+        self.key_value_store
+            .get(CONTROLLER_LEADER_KEY)
+            .await?
+            .map(|stored| decode(CONTROLLER_LEADER_KEY, &stored.value))
+            .transpose()
+    }
+
     // ---- helpers ----
 
     async fn read_stream(&self, name: &str) -> Result<(StreamRecord, Revision), MetaError> {
@@ -1831,6 +1846,26 @@ mod tests {
         assert_eq!(
             store.try_lead("controller-1", NOW, LEADERSHIP_EXPIRY).await,
             Ok(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn leader_can_be_read_back() {
+        let (store, _key_value_store) = new_store();
+        let before_anyone_led = store.get_leader().await;
+        store
+            .try_lead("controller-1", NOW, LEADERSHIP_EXPIRY)
+            .await
+            .expect("store is available");
+        assert_eq!(
+            (before_anyone_led, store.get_leader().await),
+            (
+                Ok(None),
+                Ok(Some(LeaderRecord {
+                    holder: "controller-1".to_owned(),
+                    expires_at: LEADERSHIP_EXPIRY,
+                }))
+            )
         );
     }
 
