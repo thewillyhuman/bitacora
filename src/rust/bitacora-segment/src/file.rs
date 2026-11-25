@@ -146,16 +146,17 @@ impl SegmentFile {
         preallocated_bytes: u64,
     ) -> Result<Self, SegmentError> {
         let allocated_bytes = preallocated_bytes.max(HEADER_END_OFFSET);
-        let mut file = disk
-            .create_file(path, allocated_bytes)
+        // The disk creates the file with its header in one atomic step, so
+        // a copy that exists always has a valid header: a crash or a failed
+        // flush during creation cannot leave a file that looks damaged.
+        let file = disk
+            .create_file(
+                path,
+                Bytes::copy_from_slice(&header.encode()),
+                allocated_bytes,
+            )
             .await
             .map_err(io_error("create", path))?;
-        file.write_at(0, Bytes::copy_from_slice(&header.encode()))
-            .await
-            .map_err(io_error("write header", path))?;
-        file.sync_data()
-            .await
-            .map_err(io_error("flush header", path))?;
         Ok(Self {
             file,
             path: path.to_owned(),
@@ -703,6 +704,20 @@ mod tests {
         let mut segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let _ = segment.append(&[batch(110, 1), batch(112, 1)]).await;
         assert_eq!(read_all(&segment).await, (100..=109).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn segment_created_while_flushes_fail_is_a_valid_empty_copy() {
+        let disk = MemoryDisk::new();
+        disk.fail_flushes(true);
+        new_segment(&disk).await;
+        disk.crash();
+        disk.fail_flushes(false);
+        let (reopened, stop) = reopen(&disk).await;
+        assert_eq!(
+            (reopened.local_end(), stop),
+            (SequenceNumber::new(FIRST_SEQUENCE - 1), ScanStop::EndOfData)
+        );
     }
 
     // ---- read ----

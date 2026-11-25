@@ -34,8 +34,12 @@ impl DiskSpace {
 /// One data directory. Paths are relative to it and use `/` as separator.
 #[async_trait]
 pub trait Disk: Send + Sync + 'static {
-    /// Creates a file of `preallocated_bytes` zero bytes and makes its
-    /// existence durable.
+    /// Creates a file that starts with `initial_content`, is zero-filled up
+    /// to `preallocated_bytes`, and makes all of it durable.
+    ///
+    /// Creation is atomic: after a crash the file either does not exist or
+    /// starts with `initial_content`. A file that exists under its name can
+    /// therefore never be mistaken for one whose creation was interrupted.
     ///
     /// # Errors
     ///
@@ -44,6 +48,7 @@ pub trait Disk: Send + Sync + 'static {
     async fn create_file(
         &self,
         path: &str,
+        initial_content: Bytes,
         preallocated_bytes: u64,
     ) -> io::Result<Box<dyn DiskFile>>;
 

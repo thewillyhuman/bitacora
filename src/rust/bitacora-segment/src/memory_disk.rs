@@ -145,9 +145,14 @@ impl Disk for MemoryDisk {
     async fn create_file(
         &self,
         path: &str,
+        initial_content: Bytes,
         preallocated_bytes: u64,
     ) -> io::Result<Box<dyn DiskFile>> {
-        let zero_fill = vec![0_u8; to_index(preallocated_bytes)?];
+        let mut content = initial_content.to_vec();
+        let preallocated_length = to_index(preallocated_bytes)?;
+        if content.len() < preallocated_length {
+            content.resize(preallocated_length, 0);
+        }
         let mut state = self.lock();
         if state.files_by_path.contains_key(path) {
             return Err(io::Error::new(
@@ -158,8 +163,8 @@ impl Disk for MemoryDisk {
         state.files_by_path.insert(
             path.to_owned(),
             MemoryFile {
-                visible: zero_fill.clone(),
-                durable: zero_fill,
+                visible: content.clone(),
+                durable: content,
             },
         );
         Ok(Box::new(MemoryDiskFile {
@@ -298,7 +303,10 @@ mod tests {
     const PATH: &str = "7/3.seg";
 
     async fn file_with(disk: &MemoryDisk, flushed: &'static [u8]) -> Box<dyn DiskFile> {
-        let mut file = disk.create_file(PATH, 0).await.expect("new file");
+        let mut file = disk
+            .create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
         file.write_at(0, Bytes::from_static(flushed))
             .await
             .expect("write");
@@ -309,7 +317,10 @@ mod tests {
     #[tokio::test]
     async fn new_file_is_zero_filled_to_its_preallocated_size() {
         let disk = MemoryDisk::new();
-        let file = disk.create_file(PATH, 4).await.expect("new file");
+        let file = disk
+            .create_file(PATH, Bytes::new(), 4)
+            .await
+            .expect("new file");
         assert_eq!(
             file.read_at(0, 16).await.expect("read"),
             Bytes::from_static(&[0; 4])
@@ -317,10 +328,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_file_starts_with_its_initial_content_even_after_a_crash() {
+        let disk = MemoryDisk::new();
+        let file = disk
+            .create_file(PATH, Bytes::from_static(b"header"), 8)
+            .await
+            .expect("new file");
+        disk.crash();
+        assert_eq!(
+            file.read_at(0, 16).await.expect("read"),
+            Bytes::from_static(b"header\0\0")
+        );
+    }
+
+    #[tokio::test]
+    async fn creation_does_not_depend_on_a_flush() {
+        let disk = MemoryDisk::new();
+        disk.fail_flushes(true);
+        let created = disk
+            .create_file(PATH, Bytes::from_static(b"header"), 0)
+            .await;
+        assert!(created.is_ok());
+    }
+
+    #[tokio::test]
     async fn creating_an_existing_file_fails() {
         let disk = MemoryDisk::new();
-        disk.create_file(PATH, 0).await.expect("new file");
-        let second_attempt = disk.create_file(PATH, 0).await;
+        disk.create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
+        let second_attempt = disk.create_file(PATH, Bytes::new(), 0).await;
         assert_eq!(
             second_attempt.err().map(|error| error.kind()),
             Some(io::ErrorKind::AlreadyExists)
@@ -340,7 +377,10 @@ mod tests {
     #[tokio::test]
     async fn written_bytes_are_visible_before_a_flush() {
         let disk = MemoryDisk::new();
-        let mut file = disk.create_file(PATH, 0).await.expect("new file");
+        let mut file = disk
+            .create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
         file.write_at(2, Bytes::from_static(b"ab"))
             .await
             .expect("write");
@@ -458,7 +498,9 @@ mod tests {
     async fn files_are_listed_sorted_by_path() {
         let disk = MemoryDisk::new();
         for path in ["7/3.seg", "2/9.seg", "7/1.seg"] {
-            disk.create_file(path, 0).await.expect("new file");
+            disk.create_file(path, Bytes::new(), 0)
+                .await
+                .expect("new file");
         }
         assert_eq!(
             disk.list_files().await.expect("list"),
@@ -469,7 +511,9 @@ mod tests {
     #[tokio::test]
     async fn free_space_shrinks_by_what_files_occupy() {
         let disk = MemoryDisk::with_capacity(1_000);
-        disk.create_file(PATH, 400).await.expect("new file");
+        disk.create_file(PATH, Bytes::new(), 400)
+            .await
+            .expect("new file");
         assert_eq!(
             disk.space().await.expect("space"),
             DiskSpace {

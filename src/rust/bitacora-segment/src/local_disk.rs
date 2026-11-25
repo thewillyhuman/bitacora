@@ -17,8 +17,8 @@ use fs4::FileExt as _;
 
 use crate::disk::{Disk, DiskFile, DiskSpace};
 
-/// Suffix of the scratch file behind [`Disk::write_file_atomically`]. A
-/// leftover one is an interrupted write and is never listed.
+/// Suffix of the scratch file a file is built under before it is renamed
+/// into place. A leftover one is an interrupted write and is never listed.
 const TEMPORARY_SUFFIX: &str = ".tmp";
 
 /// A data directory on the local file system.
@@ -78,6 +78,13 @@ fn sync_directory(directory: &Path) -> io::Result<()> {
     File::open(directory)?.sync_all()
 }
 
+/// The scratch name a file is built under before it is renamed into place.
+fn temporary_path_for(file_path: &Path) -> PathBuf {
+    let mut temporary_name = file_path.as_os_str().to_owned();
+    temporary_name.push(TEMPORARY_SUFFIX);
+    PathBuf::from(temporary_name)
+}
+
 fn parent_of(file_path: &Path) -> io::Result<&Path> {
     file_path
         .parent()
@@ -127,23 +134,37 @@ impl Disk for LocalDisk {
     async fn create_file(
         &self,
         path: &str,
+        initial_content: Bytes,
         preallocated_bytes: u64,
     ) -> io::Result<Box<dyn DiskFile>> {
         let file_path = self.resolve(path)?;
         let root_directory = Arc::clone(&self.root_directory);
         run_blocking(move || {
             create_parent_directories(&root_directory, &file_path)?;
+            if file_path.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("file exists: {}", file_path.display()),
+                ));
+            }
+            // Build the file under a scratch name and rename it into place
+            // once it is durable, so that the real name only ever points at
+            // a file that starts with its initial content.
+            let temporary_path = temporary_path_for(&file_path);
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
-                .create_new(true)
-                .open(&file_path)?;
+                .create(true)
+                .truncate(true)
+                .open(&temporary_path)?;
             if preallocated_bytes > 0 {
                 // Reserving the blocks now means a later flush only has to
                 // persist data, not a size change or a block allocation.
                 file.allocate(preallocated_bytes)?;
             }
+            file.write_all_at(&initial_content, 0)?;
             file.sync_all()?;
+            fs::rename(&temporary_path, &file_path)?;
             sync_directory(parent_of(&file_path)?)?;
             Ok(Box::new(LocalDiskFile {
                 file: Arc::new(file),
@@ -168,9 +189,7 @@ impl Disk for LocalDisk {
         let root_directory = Arc::clone(&self.root_directory);
         run_blocking(move || {
             create_parent_directories(&root_directory, &file_path)?;
-            let mut temporary_name = file_path.clone().into_os_string();
-            temporary_name.push(TEMPORARY_SUFFIX);
-            let temporary_path = PathBuf::from(temporary_name);
+            let temporary_path = temporary_path_for(&file_path);
             let temporary_file = File::create(&temporary_path)?;
             temporary_file.write_all_at(&contents, 0)?;
             // Flush before the rename: a rename is atomic, but it must never
@@ -295,7 +314,10 @@ mod tests {
     async fn written_bytes_are_read_back_after_reopening() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let mut file = disk.create_file(PATH, 0).await.expect("new file");
+        let mut file = disk
+            .create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
         file.write_at(3, Bytes::from_static(b"abc"))
             .await
             .expect("write");
@@ -313,10 +335,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_file_starts_with_its_initial_content() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let disk = disk_in(&directory).await;
+        disk.create_file(PATH, Bytes::from_static(b"header"), 8)
+            .await
+            .expect("new file");
+        let reopened = disk.open_file(PATH).await.expect("open");
+        assert_eq!(
+            reopened.read_at(0, 64).await.expect("read"),
+            Bytes::from_static(b"header\0\0")
+        );
+    }
+
+    #[tokio::test]
+    async fn creation_leaves_no_scratch_file_behind() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let disk = disk_in(&directory).await;
+        disk.create_file(PATH, Bytes::from_static(b"header"), 0)
+            .await
+            .expect("new file");
+        let scratch_path = directory.path().join("data").join("7").join("3.seg.tmp");
+        assert!(!scratch_path.exists());
+    }
+
+    #[tokio::test]
     async fn new_file_has_its_preallocated_length() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let file = disk.create_file(PATH, 4096).await.expect("new file");
+        let file = disk
+            .create_file(PATH, Bytes::new(), 4096)
+            .await
+            .expect("new file");
         assert_eq!(file.length_bytes().await.expect("length"), 4096);
     }
 
@@ -324,8 +374,10 @@ mod tests {
     async fn creating_an_existing_file_fails() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        disk.create_file(PATH, 0).await.expect("new file");
-        let second_attempt = disk.create_file(PATH, 0).await;
+        disk.create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
+        let second_attempt = disk.create_file(PATH, Bytes::new(), 0).await;
         assert_eq!(
             second_attempt.err().map(|error| error.kind()),
             Some(io::ErrorKind::AlreadyExists)
@@ -346,7 +398,10 @@ mod tests {
     async fn reading_past_the_end_returns_what_exists() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let mut file = disk.create_file(PATH, 0).await.expect("new file");
+        let mut file = disk
+            .create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
         file.write_at(0, Bytes::from_static(b"abc"))
             .await
             .expect("write");
@@ -383,7 +438,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
         for path in ["7/3.seg", "2/9.seg", "7/3.state.tmp"] {
-            disk.create_file(path, 0).await.expect("new file");
+            disk.create_file(path, Bytes::new(), 0)
+                .await
+                .expect("new file");
         }
         assert_eq!(
             disk.list_files().await.expect("list"),
@@ -395,7 +452,9 @@ mod tests {
     async fn removed_file_is_no_longer_listed() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        disk.create_file(PATH, 0).await.expect("new file");
+        disk.create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
         disk.remove_file(PATH).await.expect("remove");
         assert_eq!(disk.list_files().await.expect("list"), Vec::<String>::new());
     }
@@ -411,7 +470,10 @@ mod tests {
     async fn shrinking_a_file_cuts_its_content() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let mut file = disk.create_file(PATH, 0).await.expect("new file");
+        let mut file = disk
+            .create_file(PATH, Bytes::new(), 0)
+            .await
+            .expect("new file");
         file.write_at(0, Bytes::from_static(b"keep-drop"))
             .await
             .expect("write");
@@ -427,7 +489,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
         for escaping_path in ["../outside", "/etc/passwd", "7/../../outside", ""] {
-            let created = disk.create_file(escaping_path, 0).await;
+            let created = disk.create_file(escaping_path, Bytes::new(), 0).await;
             assert_eq!(
                 created.err().map(|error| error.kind()),
                 Some(io::ErrorKind::InvalidInput),

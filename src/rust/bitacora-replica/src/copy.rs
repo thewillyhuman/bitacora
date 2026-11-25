@@ -741,6 +741,26 @@ mod tests {
         assert!(matches!(refused, Err(ReplicaError::InvalidRequest { .. })));
     }
 
+    /// A failed flush stops the replica. What it leaves behind must be a
+    /// copy that the restarted replica can use, not one that looks damaged.
+    #[tokio::test]
+    async fn first_append_whose_flush_fails_leaves_a_valid_empty_copy() {
+        let disk = MemoryDisk::new();
+        disk.fail_flushes(true);
+        let failed = new_copy(&disk)
+            .append(&append_request(&[(100, 5)], 0), ROOMY)
+            .await;
+        disk.crash();
+        disk.fail_flushes(false);
+        let status = reload(&disk).await.status();
+        assert!(
+            matches!(failed, Err(ReplicaError::Storage { .. }))
+                && !status.is_damaged
+                && status.local_end == Some(SequenceNumber::new(FIRST_SEQUENCE - 1)),
+            "failed: {failed:?}, status: {status:?}"
+        );
+    }
+
     // ---- fencing ----
 
     #[tokio::test]

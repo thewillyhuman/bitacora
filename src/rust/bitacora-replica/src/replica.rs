@@ -689,7 +689,7 @@ mod tests {
             .append(append_to(SEGMENT, 100, 5, 0))
             .await
             .expect("append");
-        disk.create_file("ballast", used_bytes)
+        disk.create_file("ballast", Bytes::new(), used_bytes)
             .await
             .expect("ballast");
         tokio::time::advance(small_segments().space_refresh_interval).await;
