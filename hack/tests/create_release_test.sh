@@ -60,6 +60,8 @@ bazel_dep(name = "rules_rust", version = "0.75.0")
 EOF
     printf 'name: bitacora\nversion: 0.0.0\nappVersion: "0.0.0"\n' \
         >"${repository}/src/helm/bitacora/Chart.yaml"
+    # The backticks are Markdown, not a command to run.
+    # shellcheck disable=SC2016
     printf '# Changelog\n\n<!-- next version -->\n\n## v0.0.9\n\n- `segment`: Older change. (M1)\n' \
         >"${repository}/CHANGELOG.md"
     printf 'change_type: enhancement\ncomponent: replica\nnote: "Flush faster."\nissues: [2]\n' \
