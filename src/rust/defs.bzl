@@ -7,7 +7,7 @@ tell Bazel: the first-party crates a target depends on.
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//cargo:defs.bzl", "extract_cargo_lints")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc_test", "rust_library", "rust_test")
 
 _WORKSPACE_MANIFEST = "//src/rust:Cargo.toml"
 _LINTS = ":cargo_lints"
@@ -28,7 +28,10 @@ def bitacora_library(
         test_size = "small",
         test_rustc_flags = [],
         **kwargs):
-    """Declares a library crate and the test target for its unit tests.
+    """Declares a library crate and the test targets for its unit tests and its documentation.
+
+    The documentation test compiles and runs the examples in the doc comments,
+    so that an example cannot fall behind the code it shows.
 
     Args:
         name: the crate name with underscores, for example `bitacora_types`.
@@ -63,6 +66,12 @@ def bitacora_library(
         lint_config = _LINTS,
         proc_macro_deps = all_crate_deps(proc_macro_dev = True),
         rustc_flags = test_rustc_flags,
+        deps = test_deps + all_crate_deps(normal_dev = True),
+    )
+    rust_doc_test(
+        name = name + "_doc_test",
+        size = "small",
+        crate = ":" + name,
         deps = test_deps + all_crate_deps(normal_dev = True),
     )
 

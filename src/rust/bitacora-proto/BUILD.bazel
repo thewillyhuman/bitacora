@@ -1,6 +1,5 @@
 load("@crates//:defs.bzl", "all_crate_deps")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_doc_test")
 load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
 
 exports_files(["Cargo.toml"])
@@ -25,14 +24,6 @@ bitacora_library(
         ":generated_protocol",
         "//src/rust/bitacora-types:bitacora_types",
     ],
-)
-
-# Compiles and runs the examples in the documentation of the public items,
-# so that an example cannot fall behind the code it shows.
-rust_doc_test(
-    name = "bitacora_proto_doc_test",
-    size = "small",
-    crate = ":bitacora_proto",
 )
 
 # A real replica served over gRPC on the loopback interface.
