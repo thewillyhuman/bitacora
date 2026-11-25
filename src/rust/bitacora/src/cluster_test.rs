@@ -67,6 +67,68 @@ fn configuration_can_name_a_local_directory_as_object_store() {
 }
 
 #[test]
+fn configuration_can_name_an_s3_bucket_with_the_defaults_of_the_rest() {
+    let config = parse(
+        r#"{
+            "etcd_endpoints": ["http://127.0.0.1:2379"],
+            "object_store": {"kind": "s3", "bucket": "bitacora", "region": "eu-west-1"}
+        }"#,
+    )
+    .expect("valid configuration");
+
+    assert_eq!(
+        config.object_store,
+        ObjectStoreConfig::S3 {
+            bucket: "bitacora".to_owned(),
+            region: "eu-west-1".to_owned(),
+            endpoint: None,
+            key_prefix: String::new(),
+            force_path_style: true,
+            allow_http: false,
+        }
+    );
+}
+
+#[test]
+fn configuration_can_name_an_s3_compatible_service() {
+    let config = parse(
+        r#"{
+            "etcd_endpoints": ["http://127.0.0.1:2379"],
+            "object_store": {
+                "kind": "s3",
+                "bucket": "bitacora",
+                "region": "us-east-1",
+                "endpoint": "http://127.0.0.1:9000",
+                "key_prefix": "staging/",
+                "force_path_style": true,
+                "allow_http": true
+            }
+        }"#,
+    )
+    .expect("valid configuration");
+
+    assert_eq!(
+        config.object_store,
+        ObjectStoreConfig::S3 {
+            bucket: "bitacora".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint: Some("http://127.0.0.1:9000".to_owned()),
+            key_prefix: "staging/".to_owned(),
+            force_path_style: true,
+            allow_http: true,
+        }
+    );
+}
+
+#[test]
+fn s3_configuration_without_a_bucket_is_refused() {
+    let config =
+        parse(r#"{"etcd_endpoints": [], "object_store": {"kind": "s3", "region": "eu-west-1"}}"#);
+
+    assert!(config.is_err(), "{config:?}");
+}
+
+#[test]
 fn configuration_can_say_explicitly_that_there_is_no_object_store() {
     let config =
         parse(r#"{"etcd_endpoints": ["http://127.0.0.1:2379"], "object_store": {"kind": "none"}}"#)
@@ -164,6 +226,42 @@ async fn local_directory_object_store_keeps_objects_in_that_directory() {
         second_handle.get_object("streams/1/segments/1").await,
         Ok(Bytes::from_static(b"segment"))
     );
+}
+
+/// An S3 service that is down must not keep a process from starting: opening sends nothing.
+#[tokio::test]
+async fn s3_object_store_opens_without_reaching_the_service() {
+    let nobody_listens_here = ObjectStoreConfig::S3 {
+        bucket: "bitacora".to_owned(),
+        region: "us-east-1".to_owned(),
+        endpoint: Some("http://127.0.0.1:1".to_owned()),
+        key_prefix: String::new(),
+        force_path_style: true,
+        allow_http: true,
+    };
+
+    let opened = open_object_store(&nobody_listens_here).await;
+
+    assert!(matches!(opened, Ok(Some(_))));
+}
+
+#[tokio::test]
+async fn s3_endpoint_over_http_is_refused_unless_allowed() {
+    let plain_http_without_consent = ObjectStoreConfig::S3 {
+        bucket: "bitacora".to_owned(),
+        region: "us-east-1".to_owned(),
+        endpoint: Some("http://127.0.0.1:9000".to_owned()),
+        key_prefix: String::new(),
+        force_path_style: true,
+        allow_http: false,
+    };
+
+    let opened = open_object_store(&plain_http_without_consent).await;
+
+    assert!(matches!(
+        opened.err(),
+        Some(ConnectError::InvalidObjectStore(_))
+    ));
 }
 
 #[tokio::test]

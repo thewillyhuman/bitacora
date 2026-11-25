@@ -109,6 +109,7 @@ name = "bitacora"
 version = "0.0.0"
 dependencies = [
  "bitacora-artifact",
+ "bitacora-artifact-s3",
  "bitacora-client",
  "bitacora-meta",
  "bitacora-meta-etcd",

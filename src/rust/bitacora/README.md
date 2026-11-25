@@ -37,4 +37,4 @@ configuration that can never work is refused when connecting.
 ## Dependencies
 
 It may depend on `bitacora-client`, `bitacora-meta`, `bitacora-meta-etcd`, `bitacora-proto`,
-`bitacora-artifact` and `bitacora-types`. Only binaries and other applications depend on it.
+`bitacora-artifact`, `bitacora-artifact-s3` and `bitacora-types`. Only binaries and other applications depend on it.

@@ -41,11 +41,13 @@
 //! - `bitacora-meta-etcd`: the etcd backend of the metadata store.
 //! - `bitacora-proto`: the gRPC transport to replicas.
 //! - `bitacora-artifact`: the object store interface and its local backend.
+//! - `bitacora-artifact-s3`: the S3 backend.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bitacora_artifact::{ArtifactError, ArtifactStore, LocalArtifactStore};
+use bitacora_artifact_s3::{InvalidS3Settings, S3ArtifactStore, S3Settings};
 use bitacora_client::{BitacoraClient, ClientSettings};
 use bitacora_meta::MetadataStore;
 use bitacora_meta_etcd::{EtcdKeyValueStore, EtcdSettings, InvalidEtcdSettings};
@@ -105,6 +107,39 @@ pub enum ObjectStoreConfig {
         /// The directory that holds the objects. It is created if it does not exist.
         path: PathBuf,
     },
+    /// A bucket of Amazon S3 or of an S3-compatible service such as Ceph.
+    ///
+    /// Credentials are not part of the configuration: they come from the environment, in the ways the AWS
+    /// tools read them (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, a web identity token, the
+    /// instance metadata service), so that a configuration file never holds a secret.
+    S3 {
+        /// The bucket that holds the objects. It must exist.
+        bucket: String,
+        /// The region of the bucket, for example `eu-west-1`. S3-compatible services usually accept any
+        /// value, by convention `us-east-1`.
+        region: String,
+        /// The URL of the service, for an S3-compatible one, for example `https://s3.example.org`.
+        /// Leave it out for Amazon S3.
+        #[serde(default)]
+        endpoint: Option<String>,
+        /// A prefix put in front of every object key, so that several clusters can share one bucket.
+        /// Empty by default.
+        #[serde(default)]
+        key_prefix: String,
+        /// Whether the bucket is addressed in the path (`https://host/bucket/key`) instead of in the host
+        /// name. Most S3-compatible services need it. On by default.
+        #[serde(default = "default_force_path_style")]
+        force_path_style: bool,
+        /// Whether an `http://` endpoint is accepted. Off by default: traffic to an object store carries
+        /// data and credentials.
+        #[serde(default)]
+        allow_http: bool,
+    },
+}
+
+/// The default of the S3 setting `force_path_style`, as a function because that is what serde calls.
+const fn default_force_path_style() -> bool {
+    true
 }
 
 /// Why a cluster configuration cannot be used.
@@ -116,6 +151,9 @@ pub enum ConnectError {
     /// The object store could not be opened.
     #[error("cannot open the object store: {0}")]
     ObjectStore(#[from] ArtifactError),
+    /// The S3 settings can never work, for example because the endpoint is not a URL.
+    #[error("cannot use the object store configuration: {0}")]
+    InvalidObjectStore(#[from] InvalidS3Settings),
 }
 
 /// Builds a client for the cluster that `config` describes.
@@ -199,8 +237,11 @@ pub async fn connect_metadata(config: &ClusterConfig) -> Result<MetadataStore, C
 ///
 /// # Errors
 ///
-/// Returns [`ConnectError::ObjectStore`] if the store cannot be opened, for example because its directory
-/// cannot be created.
+/// * [`ConnectError::ObjectStore`] if a local directory cannot be opened, for example because it cannot be
+///   created.
+/// * [`ConnectError::InvalidObjectStore`] if the S3 settings can never work. An S3 service that is down,
+///   a missing bucket and wrong credentials are not errors here: opening sends nothing, and requests to
+///   the store fail until the problem is fixed.
 pub async fn open_object_store(
     config: &ObjectStoreConfig,
 ) -> Result<Option<Arc<dyn ArtifactStore>>, ConnectError> {
@@ -209,6 +250,22 @@ pub async fn open_object_store(
         ObjectStoreConfig::LocalDirectory { path } => {
             let local_store = LocalArtifactStore::open(path.clone()).await?;
             Ok(Some(Arc::new(local_store)))
+        }
+        ObjectStoreConfig::S3 {
+            bucket,
+            region,
+            endpoint,
+            key_prefix,
+            force_path_style,
+            allow_http,
+        } => {
+            let mut s3_settings = S3Settings::new(bucket.clone(), region.clone());
+            s3_settings.endpoint.clone_from(endpoint);
+            s3_settings.key_prefix.clone_from(key_prefix);
+            s3_settings.force_path_style = *force_path_style;
+            s3_settings.allow_http = *allow_http;
+            let s3_store = S3ArtifactStore::open(&s3_settings)?;
+            Ok(Some(Arc::new(s3_store)))
         }
     }
 }

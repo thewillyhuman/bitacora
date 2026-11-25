@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 bitacora-artifact.workspace = true
+bitacora-artifact-s3.workspace = true
 bitacora-client.workspace = true
 bitacora-meta.workspace = true
 bitacora-meta-etcd.workspace = true

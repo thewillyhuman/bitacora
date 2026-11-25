@@ -6,6 +6,7 @@ bitacora_library(
     name = "bitacora",
     deps = [
         "//src/rust/bitacora-artifact:bitacora_artifact",
+        "//src/rust/bitacora-artifact-s3:bitacora_artifact_s3",
         "//src/rust/bitacora-client:bitacora_client",
         "//src/rust/bitacora-meta:bitacora_meta",
         "//src/rust/bitacora-meta-etcd:bitacora_meta_etcd",
