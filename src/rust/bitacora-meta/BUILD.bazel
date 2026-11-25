@@ -1,8 +1,18 @@
-load("//src/rust:defs.bzl", "bitacora_library")
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
 
 exports_files(["Cargo.toml"])
 
 bitacora_library(
     name = "bitacora_meta",
     deps = ["//src/rust/bitacora-types:bitacora_types"],
+)
+
+# The metadata records, held to the JSON that schema version 1 wrote.
+bitacora_integration_test(
+    name = "records_golden_test",
+    srcs = ["tests/records_golden_test.rs"],
+    deps = [
+        ":bitacora_meta",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
 )
