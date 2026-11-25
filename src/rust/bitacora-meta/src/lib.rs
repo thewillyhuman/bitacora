@@ -12,6 +12,7 @@
 
 mod key_value;
 mod memory_store;
+mod placement;
 mod records;
 mod store;
 
@@ -20,6 +21,7 @@ pub use key_value::{
     VersionedValue,
 };
 pub use memory_store::MemoryKeyValueStore;
+pub use placement::{PlacementError, PlacementPolicy, choose_replica_set};
 pub use records::{
     CheckpointRecord, CopyRecord, CopyState, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
     RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,
