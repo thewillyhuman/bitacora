@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "bitacora-segment",
     "bitacora-types",
 ]
 
@@ -14,10 +15,12 @@ authors = ["Guillermo Facundo Colunga"]
 
 [workspace.dependencies]
 # First-party crates.
+bitacora-segment = { path = "bitacora-segment", version = "0.0.0" }
 bitacora-types = { path = "bitacora-types", version = "0.0.0" }
 
 # Third-party crates. One version for the whole workspace.
 bytes = "1"
+crc32c = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -33,3 +36,7 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Crate names already scope every item, so `segment::SegmentWriter` is fine.
 module_name_repetitions = "allow"
+# `expect` states an invariant that cannot fail, so it is not part of a
+# function's contract. Conditions a caller can trigger are documented by hand
+# under `# Panics`.
+missing_panics_doc = "allow"
