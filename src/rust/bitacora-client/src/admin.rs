@@ -3,9 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use bitacora_meta::{
-    CheckpointRecord, MetaError, PlacementPolicy, RetentionPolicy, StreamRecord, choose_replica_set,
-};
+use bitacora_meta::{CheckpointRecord, MetaError, PlacementPolicy, RetentionPolicy, StreamRecord, choose_replica_set};
 use bitacora_types::{ReplicationSettings, SequenceNumber};
 
 use crate::context::ClientContext;
@@ -49,11 +47,7 @@ impl StreamAdmin {
     ///
     /// Returns [`MetaError::StreamAlreadyExists`] or
     /// [`MetaError::InvalidName`].
-    pub async fn create_stream(
-        &self,
-        name: &str,
-        options: StreamOptions,
-    ) -> Result<StreamRecord, MetaError> {
+    pub async fn create_stream(&self, name: &str, options: StreamOptions) -> Result<StreamRecord, MetaError> {
         let registered_replicas = self.context.metadata.list_replicas().await?;
         let first_replica_set = choose_replica_set(
             &registered_replicas,
@@ -71,12 +65,7 @@ impl StreamAdmin {
         }
         self.context
             .metadata
-            .create_stream(
-                name,
-                options.replication,
-                options.retention,
-                first_replica_set.ok(),
-            )
+            .create_stream(name, options.replication, options.retention, first_replica_set.ok())
             .await
     }
 
@@ -87,15 +76,8 @@ impl StreamAdmin {
     /// Returns [`MetaError::StreamNotFound`] if no stream has this name.
     pub async fn describe_stream(&self, name: &str) -> Result<StreamDescription, MetaError> {
         let stream = self.context.metadata.get_stream(name).await?;
-        let checkpoints = self
-            .context
-            .metadata
-            .list_checkpoints(stream.stream_id)
-            .await?;
-        Ok(StreamDescription {
-            stream,
-            checkpoints,
-        })
+        let checkpoints = self.context.metadata.list_checkpoints(stream.stream_id).await?;
+        Ok(StreamDescription { stream, checkpoints })
     }
 
     /// Lists every stream, sorted by name.
@@ -115,11 +97,7 @@ impl StreamAdmin {
     /// # Errors
     ///
     /// Returns [`MetaError::StreamNotFound`] if no stream has this name.
-    pub async fn truncate_before(
-        &self,
-        name: &str,
-        sequence: SequenceNumber,
-    ) -> Result<(), MetaError> {
+    pub async fn truncate_before(&self, name: &str, sequence: SequenceNumber) -> Result<(), MetaError> {
         self.context
             .metadata
             .update_stream(name, |stream| {
@@ -167,11 +145,7 @@ impl StreamAdmin {
     /// # Errors
     ///
     /// Returns [`MetaError::StreamNotFound`] if no stream has this name.
-    pub async fn unregister_materializer(
-        &self,
-        stream_name: &str,
-        materializer: &str,
-    ) -> Result<(), MetaError> {
+    pub async fn unregister_materializer(&self, stream_name: &str, materializer: &str) -> Result<(), MetaError> {
         self.context
             .metadata
             .unregister_materializer(stream_name, materializer)

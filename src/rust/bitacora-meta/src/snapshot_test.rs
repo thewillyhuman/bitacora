@@ -119,10 +119,7 @@ fn snapshot_that_lost_its_last_byte_is_refused() {
 
     let refused = MetadataSnapshot::decode(&encoded[..encoded.len() - 1]);
 
-    assert!(matches!(
-        refused,
-        Err(SnapshotError::ChecksumMismatch { .. })
-    ));
+    assert!(matches!(refused, Err(SnapshotError::ChecksumMismatch { .. })));
 }
 
 #[test]
@@ -132,10 +129,7 @@ fn snapshot_with_a_byte_added_is_refused() {
 
     let refused = MetadataSnapshot::decode(&encoded);
 
-    assert!(matches!(
-        refused,
-        Err(SnapshotError::ChecksumMismatch { .. })
-    ));
+    assert!(matches!(refused, Err(SnapshotError::ChecksumMismatch { .. })));
 }
 
 #[test]
@@ -147,10 +141,7 @@ fn every_flipped_bit_is_detected() {
         let mut damaged = encoded.to_vec();
         damaged[damaged_offset] ^= 1 << random.index(8);
         let decoded = MetadataSnapshot::decode(&damaged);
-        assert!(
-            decoded.is_err(),
-            "damage at byte {damaged_offset} went unnoticed"
-        );
+        assert!(decoded.is_err(), "damage at byte {damaged_offset} went unnoticed");
     }
 }
 
@@ -228,10 +219,7 @@ fn key_that_is_not_text_is_refused() {
 
 #[test]
 fn object_key_names_the_time_padded_to_twenty_digits() {
-    assert_eq!(
-        snapshot_object_key(TAKEN_AT),
-        "metadata-snapshots/00000001798761599000"
-    );
+    assert_eq!(snapshot_object_key(TAKEN_AT), "metadata-snapshots/00000001798761599000");
 }
 
 #[test]
@@ -244,18 +232,12 @@ fn later_snapshot_sorts_after_an_earlier_one() {
 
 #[test]
 fn time_is_read_back_from_an_object_key() {
-    assert_eq!(
-        snapshot_time_of(&snapshot_object_key(TAKEN_AT)),
-        Some(TAKEN_AT)
-    );
+    assert_eq!(snapshot_time_of(&snapshot_object_key(TAKEN_AT)), Some(TAKEN_AT));
 }
 
 #[test]
 fn key_outside_the_snapshot_prefix_names_no_time() {
-    assert_eq!(
-        snapshot_time_of("streams/7/segments/00000000000000000003"),
-        None
-    );
+    assert_eq!(snapshot_time_of("streams/7/segments/00000000000000000003"), None);
 }
 
 #[test]

@@ -139,9 +139,7 @@ pub enum RunnerError {
     Materializer(#[from] MaterializerError),
     /// Another runner has taken the materializer over. This one must not be started again in its place:
     /// start a new runner, which takes the token back.
-    #[error(
-        "another runner took the materializer over: token {held_token} was superseded by {current_token}"
-    )]
+    #[error("another runner took the materializer over: token {held_token} was superseded by {current_token}")]
     Fenced {
         /// The token this runner held.
         held_token: u64,
@@ -225,10 +223,7 @@ impl RunnerProgress {
     ///
     /// Returns [`RunnerStopped`] if the runner stopped before it got there. The caller bounds the wait
     /// with a timeout if the record may never be committed.
-    pub async fn wait_until_applied(
-        &mut self,
-        sequence: SequenceNumber,
-    ) -> Result<Progress, RunnerStopped> {
+    pub async fn wait_until_applied(&mut self, sequence: SequenceNumber) -> Result<Progress, RunnerStopped> {
         let reached = self
             .receiver
             .wait_for(|progress| progress.applied_sequence >= sequence)
@@ -248,10 +243,7 @@ impl RunnerProgress {
     /// # Errors
     ///
     /// Returns [`RunnerStopped`] if the runner stopped before it got there.
-    pub async fn wait_until_committed(
-        &mut self,
-        sequence: SequenceNumber,
-    ) -> Result<Progress, RunnerStopped> {
+    pub async fn wait_until_committed(&mut self, sequence: SequenceNumber) -> Result<Progress, RunnerStopped> {
         let reached = self
             .receiver
             .wait_for(|progress| progress.committed_checkpoint >= sequence)
@@ -353,9 +345,7 @@ impl<M: Materializer> MaterializerRunner<M> {
             checkpoint.fencing_token,
         );
         let last_checkpoint = match &checkpoint.manifest {
-            Some(manifest_key) => {
-                Some(load_manifest(&artifacts, manifest_key, checkpoint.checkpoint).await?)
-            }
+            Some(manifest_key) => Some(load_manifest(&artifacts, manifest_key, checkpoint.checkpoint).await?),
             None => None,
         };
         let materializer = M::restore_from_checkpoint(last_checkpoint, &artifacts).await?;
@@ -480,9 +470,7 @@ impl<M: Materializer> MaterializerRunner<M> {
         }
         match self.checkpoint().await {
             Ok(()) => Ok(()),
-            Err(RunnerError::Materializer(materializer_error))
-                if materializer_error.is_transient() =>
-            {
+            Err(RunnerError::Materializer(materializer_error)) if materializer_error.is_transient() => {
                 self.put_checkpoint_off(&materializer_error.to_string());
                 Ok(())
             }
@@ -533,10 +521,7 @@ impl<M: Materializer> MaterializerRunner<M> {
         let checkpoint = self.applied_sequence;
         let manifest = self.materializer.write_checkpoint(&self.artifacts).await?;
         let stored_manifest = encode_manifest(checkpoint, &manifest);
-        let manifest_key = self
-            .artifacts
-            .put_artifact(MANIFEST_LABEL, stored_manifest)
-            .await?;
+        let manifest_key = self.artifacts.put_artifact(MANIFEST_LABEL, stored_manifest).await?;
 
         let committed = self
             .metadata
@@ -572,8 +557,7 @@ impl<M: Materializer> MaterializerRunner<M> {
             artifacts = manifest.artifact_keys.len(),
             "checkpoint committed"
         );
-        self.delete_what_the_manifest_dropped(manifest_key, manifest)
-            .await;
+        self.delete_what_the_manifest_dropped(manifest_key, manifest).await;
         Ok(())
     }
 
@@ -584,11 +568,7 @@ impl<M: Materializer> MaterializerRunner<M> {
     ///
     /// It takes the runner exclusively, although it changes nothing, because a shared borrow held
     /// across an await would require every materializer to be `Sync`.
-    async fn delete_what_the_manifest_dropped(
-        &mut self,
-        manifest_key: String,
-        manifest: CheckpointManifest,
-    ) {
+    async fn delete_what_the_manifest_dropped(&mut self, manifest_key: String, manifest: CheckpointManifest) {
         let mut referenced: BTreeSet<String> = manifest.artifact_keys.into_iter().collect();
         referenced.insert(manifest_key);
         let swept = delete_unreferenced(&self.artifacts, &referenced, self.fencing_token + 1).await;
@@ -647,9 +627,7 @@ async fn load_manifest(
     let (checkpoint, manifest) = decode_manifest(&stored_manifest)?;
     if checkpoint != expected_checkpoint {
         return Err(MaterializerError::InvalidManifest {
-            reason: format!(
-                "manifest {manifest_key:?} is of checkpoint {checkpoint}, not {expected_checkpoint}"
-            ),
+            reason: format!("manifest {manifest_key:?} is of checkpoint {checkpoint}, not {expected_checkpoint}"),
         });
     }
     Ok(manifest)

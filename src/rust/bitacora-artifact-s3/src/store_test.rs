@@ -21,8 +21,7 @@ use bitacora_artifact::contract;
 use futures_util::stream::{self, BoxStream};
 use object_store::memory::InMemory;
 use object_store::{
-    CopyOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
-    PutOptions, PutResult,
+    CopyOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions, PutOptions, PutResult,
 };
 
 use super::*;
@@ -51,10 +50,7 @@ async fn put(store: &S3ArtifactStore, object_key: &str, contents: &'static [u8])
 
 /// The keys a listing of `key_prefix` returns.
 async fn listed_keys(store: &S3ArtifactStore, key_prefix: &str) -> Vec<String> {
-    let objects = store
-        .list_prefix(key_prefix)
-        .await
-        .expect("the listing succeeds");
+    let objects = store.list_prefix(key_prefix).await.expect("the listing succeeds");
     let mut object_keys = Vec::new();
     for object in objects {
         object_keys.push(object.object_key);
@@ -88,9 +84,7 @@ impl BrokenService {
     }
 
     /// Answers one streaming request the way the fault says.
-    fn answer_stream<Item: Send + 'static>(
-        &self,
-    ) -> BoxStream<'static, object_store::Result<Item>> {
+    fn answer_stream<Item: Send + 'static>(&self) -> BoxStream<'static, object_store::Result<Item>> {
         match self.fault {
             ServiceFault::FailsEveryRequest => stream::iter([Err(server_error())]).boxed(),
             ServiceFault::NeverAnswers => stream::pending().boxed(),
@@ -131,11 +125,7 @@ impl ObjectStore for BrokenService {
         self.answer().await
     }
 
-    async fn get_opts(
-        &self,
-        _location: &Path,
-        _options: GetOptions,
-    ) -> object_store::Result<GetResult> {
+    async fn get_opts(&self, _location: &Path, _options: GetOptions) -> object_store::Result<GetResult> {
         self.answer().await
     }
 
@@ -150,19 +140,11 @@ impl ObjectStore for BrokenService {
         self.answer_stream()
     }
 
-    async fn list_with_delimiter(
-        &self,
-        _prefix: Option<&Path>,
-    ) -> object_store::Result<ListResult> {
+    async fn list_with_delimiter(&self, _prefix: Option<&Path>) -> object_store::Result<ListResult> {
         self.answer().await
     }
 
-    async fn copy_opts(
-        &self,
-        _from: &Path,
-        _to: &Path,
-        _options: CopyOptions,
-    ) -> object_store::Result<()> {
+    async fn copy_opts(&self, _from: &Path, _to: &Path, _options: CopyOptions) -> object_store::Result<()> {
         self.answer().await
     }
 }
@@ -218,9 +200,7 @@ async fn stores_with_different_key_prefixes_do_not_read_each_other() {
     let service = Arc::new(InMemory::new());
     put(&store_in(&service, "cluster-a"), "shared-name", b"from a").await;
 
-    let read_by_the_other = store_in(&service, "cluster-b")
-        .get_object("shared-name")
-        .await;
+    let read_by_the_other = store_in(&service, "cluster-b").get_object("shared-name").await;
 
     assert_eq!(
         read_by_the_other,
@@ -256,9 +236,7 @@ async fn stores_with_the_same_key_prefix_share_their_objects() {
     let service = Arc::new(InMemory::new());
     put(&store_in(&service, "cluster-a"), "shared-name", b"from a").await;
 
-    let read_by_the_other = store_in(&service, "cluster-a")
-        .get_object("shared-name")
-        .await;
+    let read_by_the_other = store_in(&service, "cluster-a").get_object("shared-name").await;
 
     assert_eq!(read_by_the_other, Ok(Bytes::from_static(b"from a")));
 }
@@ -517,9 +495,7 @@ async fn empty_range_of_a_missing_object_is_not_found() {
 
 #[tokio::test]
 async fn key_with_a_control_character_is_refused() {
-    let outcome = store()
-        .put_object("line\nbreak", Bytes::from_static(b"x"))
-        .await;
+    let outcome = store().put_object("line\nbreak", Bytes::from_static(b"x")).await;
 
     assert_eq!(
         outcome,
@@ -605,10 +581,7 @@ async fn unavailable_error_says_what_was_attempted_and_why() {
     let Err(ArtifactError::Unavailable { reason }) = outcome else {
         panic!("expected an unavailable error, got {outcome:?}");
     };
-    assert!(
-        reason.contains("cannot read \"streams/7/segments/3\""),
-        "{reason}"
-    );
+    assert!(reason.contains("cannot read \"streams/7/segments/3\""), "{reason}");
     assert!(reason.contains("the service answered 503"), "{reason}");
 }
 
@@ -683,10 +656,9 @@ async fn timeout_error_names_the_timeout() {
 fn missing_bucket_error() -> object_store::Error {
     object_store::Error::NotFound {
         path: "a".to_owned(),
-        source:
-            "Server returned non-2xx status code: 404 Not Found: <Error><Code>NoSuchBucket</Code>\
+        source: "Server returned non-2xx status code: 404 Not Found: <Error><Code>NoSuchBucket</Code>\
                  <Message>The specified bucket does not exist</Message></Error>"
-                .into(),
+            .into(),
     }
 }
 
@@ -722,8 +694,5 @@ fn read_in_a_missing_bucket_is_unavailable_and_says_so() {
     let ArtifactError::Unavailable { reason } = error else {
         panic!("expected an unavailable error, got {error:?}");
     };
-    assert!(
-        reason.contains("The specified bucket does not exist"),
-        "{reason}"
-    );
+    assert!(reason.contains("The specified bucket does not exist"), "{reason}");
 }

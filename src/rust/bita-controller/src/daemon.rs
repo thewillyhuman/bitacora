@@ -54,8 +54,8 @@ use bitacora_artifact::ArtifactStore;
 use bitacora_controller::{Controller, Round};
 use bitacora_meta::{KeyValueStore, MetaError, MetadataStore};
 use bitacora_process::{
-    InstrumentedArtifactStore, InstrumentedKeyValueStore, MetricsRegistry, Readiness,
-    ShutdownSignal, serve_observability,
+    InstrumentedArtifactStore, InstrumentedKeyValueStore, MetricsRegistry, Readiness, ShutdownSignal,
+    serve_observability,
 };
 use bitacora_types::replica_api::ReplicaConnector;
 use bitacora_types::{Clock, SystemClock};
@@ -118,25 +118,17 @@ pub(crate) struct Environment {
 ///
 /// Returns [`DaemonError::CannotStart`] if the etcd settings can never work or the object store cannot
 /// be opened. An etcd that is merely down is not an error: rounds fail until it is back.
-pub(crate) async fn open_environment(
-    settings: &ControllerDaemonSettings,
-) -> Result<Environment, DaemonError> {
+pub(crate) async fn open_environment(settings: &ControllerDaemonSettings) -> Result<Environment, DaemonError> {
     let key_value_store = match bitacora::connect_key_value_store(&settings.cluster).await {
         Ok(key_value_store) => key_value_store,
         Err(connect_error) => {
-            return Err(DaemonError::cannot_start(
-                "use the metadata store",
-                &connect_error,
-            ));
+            return Err(DaemonError::cannot_start("use the metadata store", &connect_error));
         }
     };
     let object_store = match bitacora::open_object_store(&settings.cluster.object_store).await {
         Ok(object_store) => object_store,
         Err(connect_error) => {
-            return Err(DaemonError::cannot_start(
-                "open the object store",
-                &connect_error,
-            ));
+            return Err(DaemonError::cannot_start("open the object store", &connect_error));
         }
     };
     Ok(Environment {
@@ -157,9 +149,7 @@ pub(crate) async fn open_environment(
 ///
 /// Returns [`DaemonError::CannotStart`] if the address cannot be bound, for example because another
 /// process listens on it.
-pub(crate) async fn bind_listener(
-    settings: &ControllerDaemonSettings,
-) -> Result<TcpListener, DaemonError> {
+pub(crate) async fn bind_listener(settings: &ControllerDaemonSettings) -> Result<TcpListener, DaemonError> {
     match TcpListener::bind(settings.metrics_listen_address).await {
         Ok(listener) => Ok(listener),
         Err(io_error) => Err(DaemonError::cannot_start(
@@ -207,12 +197,7 @@ pub(crate) async fn run(
     )));
     let identity = settings.controller.identity.clone();
     let pass_interval = settings.controller.pass_interval;
-    let mut controller = Controller::new(
-        metadata,
-        environment.connector,
-        environment.clock,
-        settings.controller,
-    );
+    let mut controller = Controller::new(metadata, environment.connector, environment.clock, settings.controller);
     if let Some(object_store) = environment.object_store {
         controller = controller.with_artifact_store(Arc::new(InstrumentedArtifactStore::new(
             object_store,

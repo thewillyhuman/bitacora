@@ -58,12 +58,7 @@ impl Harness {
         let cluster = Cluster::start(3).await;
         cluster
             .metadata()
-            .create_stream(
-                STREAM,
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("a fresh metadata store accepts a stream");
         KvStore::initialize(cluster.metadata(), STREAM)
@@ -145,8 +140,8 @@ impl Harness {
 
     /// How often each payload occurs in the stream, from its first record to `last_sequence`.
     async fn payload_counts(&self, last_sequence: SequenceNumber) -> BTreeMap<Bytes, usize> {
-        let whole_stream = SequenceRange::new(SequenceNumber::FIRST, last_sequence)
-            .expect("the stream holds at least one record");
+        let whole_stream =
+            SequenceRange::new(SequenceNumber::FIRST, last_sequence).expect("the stream holds at least one record");
         let records = self
             .dependencies(WriterSettings::default())
             .client
@@ -173,10 +168,7 @@ fn test_settings() -> KvSettings {
 
 /// Puts `value` under `key` and returns the sequence number of the put.
 async fn put(store: &KvStore, key: &str, value: &str) -> SequenceNumber {
-    store
-        .put(bytes(key), bytes(value))
-        .await
-        .expect("the put commits")
+    store.put(bytes(key), bytes(value)).await.expect("the put commits")
 }
 
 /// Waits until `store` has committed a checkpoint at or above `sequence`.
@@ -224,10 +216,7 @@ async fn deleted_key_does_not_exist() {
     let store = harness.open().await;
     put(&store, "apples", "12").await;
 
-    store
-        .delete(bytes("apples"))
-        .await
-        .expect("the delete commits");
+    store.delete(bytes("apples")).await.expect("the delete commits");
 
     assert_eq!(store.get(b"apples").await, Ok(None));
 }
@@ -277,18 +266,13 @@ async fn operations_of_one_write_take_effect_at_the_same_sequence() {
                 key: bytes("apples"),
                 value: bytes("12"),
             },
-            KvOperation::Delete {
-                key: bytes("pears"),
-            },
+            KvOperation::Delete { key: bytes("pears") },
         ])
         .await
         .expect("the write commits");
 
     assert_eq!(sequence, before.next());
-    assert_eq!(
-        store.get_as_of(b"apples", sequence).await,
-        Ok(Some(bytes("12")))
-    );
+    assert_eq!(store.get_as_of(b"apples", sequence).await, Ok(Some(bytes("12"))));
     assert_eq!(store.get_as_of(b"pears", sequence).await, Ok(None));
 }
 
@@ -369,12 +353,7 @@ async fn store_on_a_stream_that_was_not_prepared_does_not_open() {
         .await
         .expect("the stream exists");
 
-    let opened = KvStore::open(
-        harness.dependencies(WriterSettings::default()),
-        STREAM,
-        test_settings(),
-    )
-    .await;
+    let opened = KvStore::open(harness.dependencies(WriterSettings::default()), STREAM, test_settings()).await;
 
     assert!(matches!(
         opened.err(),
@@ -443,10 +422,7 @@ async fn reopened_store_still_reads_history_from_before_the_restart() {
 
     let reopened = harness.open().await;
 
-    assert_eq!(
-        reopened.get_as_of(b"apples", first_put).await,
-        Ok(Some(bytes("12")))
-    );
+    assert_eq!(reopened.get_as_of(b"apples", first_put).await, Ok(Some(bytes("12"))));
 }
 
 // ---- failover ----
@@ -513,9 +489,7 @@ async fn replaced_store_whose_materializer_was_stopped_says_so() {
     // replaced.
     sleep(CHECKPOINT_AFTER * 2).await;
 
-    let read = replaced
-        .get_as_of(b"apples", last_put.advanced_by(1_000))
-        .await;
+    let read = replaced.get_as_of(b"apples", last_put.advanced_by(1_000)).await;
 
     assert!(
         matches!(read, Err(KvError::Materializer(RunnerError::Fenced { .. }))),
@@ -650,10 +624,7 @@ async fn store_whose_log_was_truncated(harness: &Harness) -> (KvStore, SequenceN
     for key_number in 0..10_u8 {
         harness.run_controller_pass().await;
         last_put = store
-            .put(
-                bytes(&format!("key-{key_number}")),
-                segment_filling_value(key_number),
-            )
+            .put(bytes(&format!("key-{key_number}")), segment_filling_value(key_number))
             .await
             .expect("the put commits");
         sleep(Duration::from_secs(1)).await;
@@ -707,10 +678,7 @@ async fn store_reopens_after_its_log_was_truncated() {
 
     let reopened = harness.open().await;
 
-    assert_eq!(
-        reopened.get(b"key-0").await,
-        Ok(Some(segment_filling_value(0)))
-    );
+    assert_eq!(reopened.get(b"key-0").await, Ok(Some(segment_filling_value(0))));
 }
 
 #[tokio::test(start_paused = true)]
@@ -727,8 +695,5 @@ async fn writes_and_reads_go_on_while_the_log_is_being_truncated() {
         sleep(CHECKPOINT_AFTER).await;
     }
 
-    assert_eq!(
-        store.get(b"counter").await,
-        Ok(Some(segment_filling_value(4)))
-    );
+    assert_eq!(store.get(b"counter").await, Ok(Some(segment_filling_value(4))));
 }

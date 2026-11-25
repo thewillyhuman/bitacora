@@ -61,9 +61,7 @@ fn unreadable_answer_names_the_field_at_fault() {
     assert_eq!(
         error,
         ReplicaError::Unavailable {
-            reason:
-                "the replica's answer cannot be read: field `AppendResponse.outcome` is missing"
-                    .to_owned()
+            reason: "the replica's answer cannot be read: field `AppendResponse.outcome` is missing".to_owned()
         }
     );
 }
@@ -301,10 +299,7 @@ fn upload_response_without_an_outcome_is_read_as_unavailable() {
 
     let result = upload_segment_response_from_wire(message);
 
-    assert_eq!(
-        result,
-        Err(unreadable_without("UploadSegmentResponse.outcome"))
-    );
+    assert_eq!(result, Err(unreadable_without("UploadSegmentResponse.outcome")));
 }
 
 #[test]
@@ -313,10 +308,7 @@ fn repair_response_without_an_outcome_is_read_as_unavailable() {
 
     let result = repair_segment_response_from_wire(message);
 
-    assert_eq!(
-        result,
-        Err(unreadable_without("RepairSegmentResponse.outcome"))
-    );
+    assert_eq!(result, Err(unreadable_without("RepairSegmentResponse.outcome")));
 }
 
 #[test]
@@ -387,11 +379,7 @@ fn drain_response_without_an_outcome_is_read_as_unavailable() {
 
 #[test]
 fn listed_segments_survive_the_round_trip_in_order() {
-    let result = Ok(vec![
-        segment_status(1),
-        segment_status(2),
-        segment_status(3),
-    ]);
+    let result = Ok(vec![segment_status(1), segment_status(2), segment_status(3)]);
 
     let message = list_segments_response_to_wire(result.clone());
 
@@ -418,10 +406,7 @@ fn list_response_without_an_outcome_is_read_as_unavailable() {
 
     let result = list_segments_response_from_wire(message);
 
-    assert_eq!(
-        result,
-        Err(unreadable_without("ListSegmentsResponse.outcome"))
-    );
+    assert_eq!(result, Err(unreadable_without("ListSegmentsResponse.outcome")));
 }
 
 /// A list with a hole would look like a replica that lost a copy, so one
@@ -463,8 +448,5 @@ fn delete_response_without_an_outcome_is_read_as_unavailable() {
 
     let result = delete_segment_response_from_wire(message);
 
-    assert_eq!(
-        result,
-        Err(unreadable_without("DeleteSegmentResponse.outcome"))
-    );
+    assert_eq!(result, Err(unreadable_without("DeleteSegmentResponse.outcome")));
 }

@@ -340,9 +340,7 @@ fn parse_stream_name(text: &str) -> Result<(u64, String), String> {
         return Err("expected <stream id>=<name>, as in 7=orders".to_owned());
     };
     let Ok(stream_id) = stream_id.parse::<u64>() else {
-        return Err(format!(
-            "{stream_id:?} is not a stream id: expected a number"
-        ));
+        return Err(format!("{stream_id:?} is not a stream id: expected a number"));
     };
     if name.is_empty() {
         return Err("the name after `=` is empty".to_owned());

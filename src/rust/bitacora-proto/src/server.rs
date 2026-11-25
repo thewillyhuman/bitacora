@@ -70,10 +70,9 @@ use tonic::{Request, Response, Status};
 
 use crate::conversions::MalformedMessage;
 use crate::response_conversions::{
-    append_response_to_wire, delete_segment_response_to_wire, drain_response_to_wire,
-    fence_response_to_wire, list_segments_response_to_wire, read_response_to_wire,
-    repair_segment_response_to_wire, seal_response_to_wire, status_response_to_wire,
-    upload_segment_response_to_wire,
+    append_response_to_wire, delete_segment_response_to_wire, drain_response_to_wire, fence_response_to_wire,
+    list_segments_response_to_wire, read_response_to_wire, repair_segment_response_to_wire, seal_response_to_wire,
+    status_response_to_wire, upload_segment_response_to_wire,
 };
 use crate::v1 as wire;
 use crate::v1::replica_admin_server::{ReplicaAdmin, ReplicaAdminServer};
@@ -226,10 +225,7 @@ impl Interceptor for IdentityCheck {
 /// names another replica. The client reads any status as unavailability,
 /// which is what the caller must see: the replica it asked for is not
 /// here.
-fn check_identity(
-    own_replica_id: &ReplicaId,
-    request_metadata: &MetadataMap,
-) -> Result<(), Status> {
+fn check_identity(own_replica_id: &ReplicaId, request_metadata: &MetadataMap) -> Result<(), Status> {
     let mut names_this_replica = false;
     for requested_replica_id in request_metadata.get_all(REPLICA_ID_HEADER) {
         if requested_replica_id.as_bytes() != own_replica_id.as_str().as_bytes() {
@@ -267,10 +263,7 @@ struct ReplicaService {
 #[tonic::async_trait]
 impl ReplicaData for ReplicaService {
     /// Answers `ReplicaData.Append` with `ReplicaApi::append`.
-    async fn append(
-        &self,
-        request: Request<wire::AppendRequest>,
-    ) -> Result<Response<wire::AppendResponse>, Status> {
+    async fn append(&self, request: Request<wire::AppendRequest>) -> Result<Response<wire::AppendResponse>, Status> {
         let result = match domain::AppendRequest::try_from(request.into_inner()) {
             Ok(append_request) => self.replica.append(append_request).await,
             Err(malformed_message) => Err(invalid_request(&malformed_message)),
@@ -280,10 +273,7 @@ impl ReplicaData for ReplicaService {
 
     /// Answers `ReplicaData.Read` with `ReplicaApi::read`, after lowering
     /// the size cap to [`LARGEST_READ_CAP_BYTES`].
-    async fn read(
-        &self,
-        request: Request<wire::ReadRequest>,
-    ) -> Result<Response<wire::ReadResponse>, Status> {
+    async fn read(&self, request: Request<wire::ReadRequest>) -> Result<Response<wire::ReadResponse>, Status> {
         let result = match domain::ReadRequest::try_from(request.into_inner()) {
             Ok(read_request) => {
                 let capped_request = domain::ReadRequest {
@@ -298,10 +288,7 @@ impl ReplicaData for ReplicaService {
     }
 
     /// Answers `ReplicaData.Fence` with `ReplicaApi::fence`.
-    async fn fence(
-        &self,
-        request: Request<wire::FenceRequest>,
-    ) -> Result<Response<wire::FenceResponse>, Status> {
+    async fn fence(&self, request: Request<wire::FenceRequest>) -> Result<Response<wire::FenceResponse>, Status> {
         let result = match domain::FenceRequest::try_from(request.into_inner()) {
             Ok(fence_request) => self.replica.fence(fence_request).await,
             Err(malformed_message) => Err(invalid_request(&malformed_message)),
@@ -310,10 +297,7 @@ impl ReplicaData for ReplicaService {
     }
 
     /// Answers `ReplicaData.Seal` with `ReplicaApi::seal`.
-    async fn seal(
-        &self,
-        request: Request<wire::SealRequest>,
-    ) -> Result<Response<wire::SealResponse>, Status> {
+    async fn seal(&self, request: Request<wire::SealRequest>) -> Result<Response<wire::SealResponse>, Status> {
         let result = match domain::SealRequest::try_from(request.into_inner()) {
             Ok(seal_request) => self.replica.seal(seal_request).await,
             Err(malformed_message) => Err(invalid_request(&malformed_message)),
@@ -354,19 +338,13 @@ impl ReplicaTransfer for ReplicaService {
 #[tonic::async_trait]
 impl ReplicaAdmin for ReplicaService {
     /// Answers `ReplicaAdmin.Status` with `ReplicaApi::status`.
-    async fn status(
-        &self,
-        _request: Request<wire::StatusRequest>,
-    ) -> Result<Response<wire::StatusResponse>, Status> {
+    async fn status(&self, _request: Request<wire::StatusRequest>) -> Result<Response<wire::StatusResponse>, Status> {
         let result = self.replica.status().await;
         Ok(Response::new(status_response_to_wire(result)))
     }
 
     /// Answers `ReplicaAdmin.Drain` with `ReplicaApi::drain`.
-    async fn drain(
-        &self,
-        _request: Request<wire::DrainRequest>,
-    ) -> Result<Response<wire::DrainResponse>, Status> {
+    async fn drain(&self, _request: Request<wire::DrainRequest>) -> Result<Response<wire::DrainResponse>, Status> {
         let result = self.replica.drain().await;
         Ok(Response::new(drain_response_to_wire(result)))
     }

@@ -35,21 +35,16 @@ use bitacora_proto::v1;
 use bitacora_proto::v1::fence_response::Outcome as FenceOutcome;
 use bitacora_proto::v1::replica_admin_client::ReplicaAdminClient;
 use bitacora_proto::v1::replica_data_client::ReplicaDataClient;
-use bitacora_proto::{
-    GrpcConnectorSettings, GrpcReplicaConnector, REPLICA_ID_HEADER, serve_replica,
-};
+use bitacora_proto::{GrpcConnectorSettings, GrpcReplicaConnector, REPLICA_ID_HEADER, serve_replica};
 use bitacora_replica::{Replica, ReplicaSettings};
 use bitacora_segment::format::{Batch, decode_frames};
 use bitacora_segment::{Disk, MemoryDisk};
 use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadLimit, ReadRequest,
-    ReadResponse, RepairRequest, RepairResponse, ReplicaApi, ReplicaConnector, ReplicaError,
-    ReplicaStatus, SealRequest, SealResponse, SegmentDescriptor, SegmentStatus, UploadRequest,
-    UploadResponse,
+    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadLimit, ReadRequest, ReadResponse, RepairRequest,
+    RepairResponse, ReplicaApi, ReplicaConnector, ReplicaError, ReplicaStatus, SealRequest, SealResponse,
+    SegmentDescriptor, SegmentStatus, UploadRequest, UploadResponse,
 };
-use bitacora_types::{
-    Epoch, MAX_RECORD_PAYLOAD_BYTES, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId,
-};
+use bitacora_types::{Epoch, MAX_RECORD_PAYLOAD_BYTES, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId};
 use bytes::Bytes;
 use support::serve_on_loopback;
 use tokio::net::TcpListener;
@@ -108,11 +103,7 @@ impl ServedReplica {
         .expect("the replica opens on a working disk");
         let objects = MemoryArtifactStore::new();
         let replica = Arc::new(replica.with_artifact_store(Arc::new(objects.clone())));
-        let address = serve_on_loopback(
-            Arc::clone(&replica) as Arc<dyn ReplicaApi>,
-            replica_id(name),
-        )
-        .await;
+        let address = serve_on_loopback(Arc::clone(&replica) as Arc<dyn ReplicaApi>, replica_id(name)).await;
         let remote = connector.connect(&replica_id(name), &address);
         Self {
             replica,
@@ -149,14 +140,9 @@ fn descriptor_of(segment: SegmentAddress) -> SegmentDescriptor {
 
 /// An append to `segment` of one batch holding `payloads`, the first of
 /// which gets `first_sequence`, declaring `durable_sequence` durable.
-fn append_of(
-    segment: SegmentAddress,
-    first_sequence: u64,
-    payloads: &[Bytes],
-    durable_sequence: u64,
-) -> AppendRequest {
-    let batch = Batch::encode(segment, SequenceNumber::new(first_sequence), payloads)
-        .expect("the payloads fit in a batch");
+fn append_of(segment: SegmentAddress, first_sequence: u64, payloads: &[Bytes], durable_sequence: u64) -> AppendRequest {
+    let batch =
+        Batch::encode(segment, SequenceNumber::new(first_sequence), payloads).expect("the payloads fit in a batch");
     AppendRequest {
         segment: descriptor_of(segment),
         writer_epoch: WRITER_EPOCH,
@@ -233,11 +219,7 @@ async fn appended_records_are_read_back_intact() {
         .await
         .expect("the append is acknowledged");
 
-    let response = served
-        .remote
-        .read(read_from(1))
-        .await
-        .expect("the read is served");
+    let response = served.remote.read(read_from(1)).await.expect("the read is served");
 
     assert_eq!(payloads_in(&response), ["record-1", "record-2", "record-3"]);
 }
@@ -528,11 +510,7 @@ async fn largest_record_is_appended_and_read_back() {
         .append(append_of(SEGMENT, 1, &payloads, 1))
         .await
         .expect("the append is acknowledged");
-    let response = served
-        .remote
-        .read(read_from(1))
-        .await
-        .expect("the read is served");
+    let response = served.remote.read(read_from(1)).await.expect("the read is served");
 
     assert_eq!(payloads_in(&response), [largest_payload]);
 }
@@ -649,10 +627,7 @@ async fn read_of_a_segment_the_replica_does_not_hold_finds_nothing() {
 
     let refused = served.remote.read(read_from(1)).await;
 
-    assert_eq!(
-        refused,
-        Err(ReplicaError::SegmentNotFound { segment: SEGMENT })
-    );
+    assert_eq!(refused, Err(ReplicaError::SegmentNotFound { segment: SEGMENT }));
 }
 
 #[tokio::test]
@@ -766,9 +741,7 @@ fn every_replica_error() -> Vec<ReplicaError> {
             existing_sealed_end: SequenceNumber::new(60),
             requested_sealed_end: SequenceNumber::new(58),
         },
-        ReplicaError::SegmentNotFound {
-            segment: OTHER_SEGMENT,
-        },
+        ReplicaError::SegmentNotFound { segment: OTHER_SEGMENT },
         ReplicaError::InvalidRequest {
             reason: "a batch failed its checksum".to_owned(),
         },
@@ -807,17 +780,11 @@ impl ReplicaApi for RefusingReplica {
         Err(self.refusal.clone())
     }
 
-    async fn repair_segment(
-        &self,
-        _request: RepairRequest,
-    ) -> Result<RepairResponse, ReplicaError> {
+    async fn repair_segment(&self, _request: RepairRequest) -> Result<RepairResponse, ReplicaError> {
         Err(self.refusal.clone())
     }
 
-    async fn upload_segment(
-        &self,
-        _request: UploadRequest,
-    ) -> Result<UploadResponse, ReplicaError> {
+    async fn upload_segment(&self, _request: UploadRequest) -> Result<UploadResponse, ReplicaError> {
         Err(self.refusal.clone())
     }
 
@@ -840,13 +807,8 @@ impl ReplicaApi for RefusingReplica {
 
 /// Serves a [`RefusingReplica`] and connects to it.
 async fn connect_to_a_replica_that_answers(refusal: ReplicaError) -> Arc<dyn ReplicaApi> {
-    let address = serve_on_loopback(
-        Arc::new(RefusingReplica { refusal }),
-        replica_id("replica-a"),
-    )
-    .await;
-    GrpcReplicaConnector::new(GrpcConnectorSettings::default())
-        .connect(&replica_id("replica-a"), &address)
+    let address = serve_on_loopback(Arc::new(RefusingReplica { refusal }), replica_id("replica-a")).await;
+    GrpcReplicaConnector::new(GrpcConnectorSettings::default()).connect(&replica_id("replica-a"), &address)
 }
 
 /// A repair request whose source is never contacted, for calls that are
@@ -969,10 +931,7 @@ async fn request_without_an_identity_is_refused_as_a_failed_precondition() {
     let served = ServedReplica::start("replica-a").await;
     let mut admin_client = ReplicaAdminClient::new(plain_channel_to(&served.address).await);
 
-    let refusal = admin_client
-        .drain(v1::DrainRequest {})
-        .await
-        .expect_err("refused");
+    let refusal = admin_client.drain(v1::DrainRequest {}).await.expect_err("refused");
 
     assert_eq!(refusal.code(), Code::FailedPrecondition);
 }
@@ -1001,10 +960,7 @@ async fn request_without_a_required_field_is_refused_as_invalid() {
     let invalid_request = ReplicaError::InvalidRequest {
         reason: "field `FenceRequest.segment` is missing".to_owned(),
     };
-    assert_eq!(
-        response.outcome,
-        Some(FenceOutcome::Error(invalid_request.into()))
-    );
+    assert_eq!(response.outcome, Some(FenceOutcome::Error(invalid_request.into())));
 }
 
 // ---- when nothing answers ----
@@ -1079,8 +1035,8 @@ impl StoppableServer {
             listener,
             shutdown,
         ));
-        let remote = GrpcReplicaConnector::new(GrpcConnectorSettings::default())
-            .connect(&replica_id("replica-a"), &address);
+        let remote =
+            GrpcReplicaConnector::new(GrpcConnectorSettings::default()).connect(&replica_id("replica-a"), &address);
         Self {
             remote,
             stop_sender,

@@ -30,9 +30,7 @@ fn command_of(command_line: &str) -> Command {
 
 /// The kind of usage error a command line is refused with.
 fn refusal_of(command_line: &str) -> ErrorKind {
-    parse(command_line)
-        .expect_err("an invalid command line")
-        .kind()
+    parse(command_line).expect_err("an invalid command line").kind()
 }
 
 #[test]
@@ -56,8 +54,7 @@ fn request_timeout_defaults_to_five_seconds() {
 
 #[test]
 fn global_options_are_accepted_after_the_command() {
-    let arguments =
-        parse("bita stream list --output json --request-timeout 250ms").expect("a valid line");
+    let arguments = parse("bita stream list --output json --request-timeout 250ms").expect("a valid line");
 
     assert_eq!(arguments.output, OutputFormat::Json);
     assert_eq!(arguments.request_timeout, Duration::from_millis(250));
@@ -72,29 +69,19 @@ fn global_options_are_accepted_before_the_command() {
 
 #[test]
 fn etcd_endpoint_can_be_repeated() {
-    let arguments =
-        parse("bita --etcd-endpoint http://a:2379 --etcd-endpoint http://b:2379 stream list")
-            .expect("a valid command line");
+    let arguments = parse("bita --etcd-endpoint http://a:2379 --etcd-endpoint http://b:2379 stream list")
+        .expect("a valid command line");
 
-    assert_eq!(
-        arguments.cluster.etcd_endpoints,
-        ["http://a:2379", "http://b:2379"]
-    );
+    assert_eq!(arguments.cluster.etcd_endpoints, ["http://a:2379", "http://b:2379"]);
 }
 
 #[test]
 fn config_file_and_key_prefix_are_read() {
-    let arguments = parse("bita --config /etc/bita.toml --etcd-key-prefix /staging/ stream list")
-        .expect("a valid command line");
+    let arguments =
+        parse("bita --config /etc/bita.toml --etcd-key-prefix /staging/ stream list").expect("a valid command line");
 
-    assert_eq!(
-        arguments.cluster.config,
-        Some(PathBuf::from("/etc/bita.toml"))
-    );
-    assert_eq!(
-        arguments.cluster.etcd_key_prefix,
-        Some("/staging/".to_owned())
-    );
+    assert_eq!(arguments.cluster.config, Some(PathBuf::from("/etc/bita.toml")));
+    assert_eq!(arguments.cluster.etcd_key_prefix, Some("/staging/".to_owned()));
 }
 
 #[test]
@@ -255,9 +242,7 @@ fn metadata_restore_writes_and_is_not_forced_by_default() {
 #[test]
 fn metadata_restore_takes_force_and_dry_run() {
     assert_eq!(
-        command_of(
-            "bita metadata restore metadata-snapshots/00000001798761599000 --force --dry-run"
-        ),
+        command_of("bita metadata restore metadata-snapshots/00000001798761599000 --force --dry-run"),
         Command::Metadata(MetadataCommand::Restore {
             snapshot: "metadata-snapshots/00000001798761599000".to_owned(),
             force: true,
@@ -281,9 +266,8 @@ fn metadata_rebuild_only_plans_by_default() {
 
 #[test]
 fn metadata_rebuild_takes_names_and_replicas() {
-    let command = command_of(
-        "bita metadata rebuild --name 7=orders --name 9=audit --replica replica-a=10.0.0.1:7000 --apply",
-    );
+    let command =
+        command_of("bita metadata rebuild --name 7=orders --name 9=audit --replica replica-a=10.0.0.1:7000 --apply");
 
     assert_eq!(
         command,
@@ -341,18 +325,12 @@ fn replica_address_with_an_invalid_identifier_is_a_usage_error() {
 
 #[test]
 fn unknown_command_is_a_usage_error() {
-    assert_eq!(
-        refusal_of("bita stream explode"),
-        ErrorKind::InvalidSubcommand
-    );
+    assert_eq!(refusal_of("bita stream explode"), ErrorKind::InvalidSubcommand);
 }
 
 #[test]
 fn missing_argument_is_a_usage_error() {
-    assert_eq!(
-        refusal_of("bita stream describe"),
-        ErrorKind::MissingRequiredArgument
-    );
+    assert_eq!(refusal_of("bita stream describe"), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -381,10 +359,7 @@ fn sequence_that_is_no_number_is_a_usage_error() {
 
 #[test]
 fn unknown_output_format_is_a_usage_error() {
-    assert_eq!(
-        refusal_of("bita stream list --output yaml"),
-        ErrorKind::InvalidValue
-    );
+    assert_eq!(refusal_of("bita stream list --output yaml"), ErrorKind::InvalidValue);
 }
 
 #[test]

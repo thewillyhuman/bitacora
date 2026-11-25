@@ -6,9 +6,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bitacora_replica::Replica;
 use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadRequest, ReadResponse,
-    RepairRequest, RepairResponse, ReplicaApi, ReplicaError, ReplicaStatus, SealRequest,
-    SealResponse, SegmentStatus, UploadRequest, UploadResponse,
+    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadRequest, ReadResponse, RepairRequest,
+    RepairResponse, ReplicaApi, ReplicaError, ReplicaStatus, SealRequest, SealResponse, SegmentStatus, UploadRequest,
+    UploadResponse,
 };
 use bitacora_types::{ReplicaId, SegmentAddress};
 
@@ -146,24 +146,18 @@ impl ReplicaApi for Link {
     }
 
     async fn repair_segment(&self, request: RepairRequest) -> Result<RepairResponse, ReplicaError> {
-        self.carry(None, |replica| async move {
-            replica.repair_segment(request).await
-        })
-        .await
+        self.carry(None, |replica| async move { replica.repair_segment(request).await })
+            .await
     }
 
     async fn upload_segment(&self, request: UploadRequest) -> Result<UploadResponse, ReplicaError> {
-        self.carry(None, |replica| async move {
-            replica.upload_segment(request).await
-        })
-        .await
+        self.carry(None, |replica| async move { replica.upload_segment(request).await })
+            .await
     }
 
     async fn delete_segment(&self, segment: SegmentAddress) -> Result<(), ReplicaError> {
-        self.carry(None, |replica| async move {
-            replica.delete_segment(segment).await
-        })
-        .await
+        self.carry(None, |replica| async move { replica.delete_segment(segment).await })
+            .await
     }
 
     async fn list_segments(&self) -> Result<Vec<SegmentStatus>, ReplicaError> {
@@ -172,13 +166,11 @@ impl ReplicaApi for Link {
     }
 
     async fn status(&self) -> Result<ReplicaStatus, ReplicaError> {
-        self.carry(None, |replica| async move { replica.status().await })
-            .await
+        self.carry(None, |replica| async move { replica.status().await }).await
     }
 
     async fn drain(&self) -> Result<(), ReplicaError> {
-        self.carry(None, |replica| async move { replica.drain().await })
-            .await
+        self.carry(None, |replica| async move { replica.drain().await }).await
     }
 }
 

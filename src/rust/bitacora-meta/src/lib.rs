@@ -18,20 +18,16 @@ mod snapshot;
 mod store;
 
 pub use key_value::{
-    Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome,
-    VersionedValue,
+    Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome, VersionedValue,
 };
 pub use memory_store::MemoryKeyValueStore;
-pub use placement::{
-    PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set,
-};
+pub use placement::{PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set};
 pub use records::{
-    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord,
-    RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
-    TieredRecord, WriterLease,
+    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
+    RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,
 };
 pub use snapshot::{
-    MetadataSnapshot, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_KEY_PREFIX, SNAPSHOT_MAGIC, SnapshotEntry,
-    SnapshotError, snapshot_object_key, snapshot_time_of,
+    MetadataSnapshot, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_KEY_PREFIX, SNAPSHOT_MAGIC, SnapshotEntry, SnapshotError,
+    snapshot_object_key, snapshot_time_of,
 };
 pub use store::{MAX_NAME_LENGTH_BYTES, MetaError, MetadataStore, RestoreMode, RestoreOutcome};

@@ -21,10 +21,7 @@ async fn created_stream_can_be_written_at_once() {
         .open_writer(NEW_STREAM, TakeoverPolicy::Force)
         .await
         .expect("the first segment was placed at creation");
-    assert_eq!(
-        writer.append("first".into()).await,
-        Ok(SequenceNumber::FIRST)
-    );
+    assert_eq!(writer.append("first".into()).await, Ok(SequenceNumber::FIRST));
 }
 
 #[tokio::test(start_paused = true)]
@@ -53,9 +50,7 @@ async fn creating_a_stream_twice_fails() {
         .await
         .expect("the stream is created");
     assert_eq!(
-        admin
-            .create_stream(NEW_STREAM, StreamOptions::default())
-            .await,
+        admin.create_stream(NEW_STREAM, StreamOptions::default()).await,
         Err(MetaError::StreamAlreadyExists {
             name: NEW_STREAM.to_owned()
         })
@@ -74,10 +69,7 @@ async fn description_includes_the_registered_materializers() {
         .register_materializer(NEW_STREAM, "pages")
         .await
         .expect("registered");
-    let description = admin
-        .describe_stream(NEW_STREAM)
-        .await
-        .expect("the stream exists");
+    let description = admin.describe_stream(NEW_STREAM).await.expect("the stream exists");
     let materializers: Vec<&str> = description
         .checkpoints
         .iter()
@@ -105,10 +97,7 @@ async fn unregistered_materializer_is_no_longer_described() {
         .unregister_materializer(NEW_STREAM, "pages")
         .await
         .expect("unregistered");
-    let description = admin
-        .describe_stream(NEW_STREAM)
-        .await
-        .expect("the stream exists");
+    let description = admin.describe_stream(NEW_STREAM).await.expect("the stream exists");
     assert_eq!(description.checkpoints, Vec::new());
 }
 
@@ -126,14 +115,8 @@ async fn truncation_position_only_moves_forward() {
             .await
             .expect("the position is recorded");
     }
-    let description = admin
-        .describe_stream(NEW_STREAM)
-        .await
-        .expect("the stream exists");
-    assert_eq!(
-        description.stream.truncate_before,
-        Some(SequenceNumber::new(50))
-    );
+    let description = admin.describe_stream(NEW_STREAM).await.expect("the stream exists");
+    assert_eq!(description.stream.truncate_before, Some(SequenceNumber::new(50)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -144,10 +127,7 @@ async fn deleted_stream_is_no_longer_listed() {
         .create_stream(NEW_STREAM, StreamOptions::default())
         .await
         .expect("the stream is created");
-    admin
-        .delete_stream(NEW_STREAM)
-        .await
-        .expect("the stream is deleted");
+    admin.delete_stream(NEW_STREAM).await.expect("the stream is deleted");
     let names: Vec<String> = admin
         .list_streams()
         .await
@@ -162,11 +142,7 @@ async fn deleted_stream_is_no_longer_listed() {
 async fn describing_a_missing_stream_fails() {
     let cluster = Cluster::start(3).await;
     assert_eq!(
-        cluster
-            .client("compute-1")
-            .admin()
-            .describe_stream(NEW_STREAM)
-            .await,
+        cluster.client("compute-1").admin().describe_stream(NEW_STREAM).await,
         Err(MetaError::StreamNotFound {
             name: NEW_STREAM.to_owned()
         })

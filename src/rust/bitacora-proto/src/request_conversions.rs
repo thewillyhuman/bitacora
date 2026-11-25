@@ -120,9 +120,7 @@ impl TryFrom<wire::ReadRequest> for domain::ReadRequest {
             segment: segment.into(),
             from_sequence,
             max_bytes: usize::try_from(request.max_bytes).unwrap_or(usize::MAX),
-            wait_for_records: request
-                .wait_for_records_nanoseconds
-                .map(Duration::from_nanos),
+            wait_for_records: request.wait_for_records_nanoseconds.map(Duration::from_nanos),
             limit: read_limit_of(request.recovery_epoch),
         })
     }
@@ -237,10 +235,8 @@ impl TryFrom<wire::RepairSegmentRequest> for domain::RepairRequest {
     /// replica identifier.
     fn try_from(request: wire::RepairSegmentRequest) -> Result<Self, Self::Error> {
         let segment = required_field(request.segment, "RepairSegmentRequest.segment")?;
-        let source_replica_id = replica_id_from_wire(
-            request.source_replica_id,
-            "RepairSegmentRequest.source_replica_id",
-        )?;
+        let source_replica_id =
+            replica_id_from_wire(request.source_replica_id, "RepairSegmentRequest.source_replica_id")?;
         Ok(Self {
             segment: segment.try_into()?,
             sealed_end: SequenceNumber::new(request.sealed_end),

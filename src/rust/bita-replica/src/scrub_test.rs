@@ -141,10 +141,7 @@ async fn completed_scrub_is_counted() {
     let_pass(INTERVAL + Duration::from_secs(1)).await;
     fixture.schedule.abort();
 
-    assert_eq!(
-        fixture.metric("bitacora_replica_scrubs_total "),
-        Some("1".to_owned())
-    );
+    assert_eq!(fixture.metric("bitacora_replica_scrubs_total "), Some("1".to_owned()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -154,10 +151,7 @@ async fn scrubs_repeat_every_interval() {
     let_pass(INTERVAL * 3 + Duration::from_secs(1)).await;
     fixture.schedule.abort();
 
-    assert_eq!(
-        fixture.metric("bitacora_replica_scrubs_total "),
-        Some("3".to_owned())
-    );
+    assert_eq!(fixture.metric("bitacora_replica_scrubs_total "), Some("3".to_owned()));
 }
 
 /// Rot that sets in after one scrub is found by the next one.

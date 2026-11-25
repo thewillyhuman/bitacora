@@ -84,13 +84,9 @@ pub(crate) fn parse_duration(text: &str) -> Result<Duration, InvalidDuration> {
     let Ok(number) = digits.parse::<u64>() else {
         // Empty digits, or more digits than fit in 64 bits: the second case is reported as too long.
         if digits.is_empty() {
-            return Err(InvalidDuration::MissingNumber {
-                text: text.to_owned(),
-            });
+            return Err(InvalidDuration::MissingNumber { text: text.to_owned() });
         }
-        return Err(InvalidDuration::TooLong {
-            text: text.to_owned(),
-        });
+        return Err(InvalidDuration::TooLong { text: text.to_owned() });
     };
     let milliseconds_per_unit = match unit {
         "ms" => 1,
@@ -99,16 +95,12 @@ pub(crate) fn parse_duration(text: &str) -> Result<Duration, InvalidDuration> {
         "h" => MILLISECONDS_PER_HOUR,
         "d" => MILLISECONDS_PER_DAY,
         _unknown_unit => {
-            return Err(InvalidDuration::UnknownUnit {
-                text: text.to_owned(),
-            });
+            return Err(InvalidDuration::UnknownUnit { text: text.to_owned() });
         }
     };
     match number.checked_mul(milliseconds_per_unit) {
         Some(milliseconds) => Ok(Duration::from_millis(milliseconds)),
-        None => Err(InvalidDuration::TooLong {
-            text: text.to_owned(),
-        }),
+        None => Err(InvalidDuration::TooLong { text: text.to_owned() }),
     }
 }
 

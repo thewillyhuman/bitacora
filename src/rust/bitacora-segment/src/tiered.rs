@@ -154,11 +154,12 @@ impl TieredFooter {
     /// Returns [`TieredError`] if the bytes are too short, are not a footer,
     /// come from a newer format, or fail their checksum.
     pub fn decode(object_end: &[u8]) -> Result<Self, TieredError> {
-        let footer_start = object_end.len().checked_sub(TIERED_FOOTER_BYTES).ok_or(
-            TieredError::IncompleteFooter {
+        let footer_start = object_end
+            .len()
+            .checked_sub(TIERED_FOOTER_BYTES)
+            .ok_or(TieredError::IncompleteFooter {
                 available_bytes: object_end.len(),
-            },
-        )?;
+            })?;
         let encoded = &object_end[footer_start..];
         let mut unread = encoded;
         let mut magic = [0_u8; TIERED_MAGIC.len()];
@@ -264,20 +265,17 @@ impl TieredIndex {
                 offset_bytes: unread.get_u64_le(),
             });
         }
-        let is_ordered = blocks.windows(2).all(|pair| {
-            pair[0].first_sequence < pair[1].first_sequence
-                && pair[0].offset_bytes < pair[1].offset_bytes
-        });
+        let is_ordered = blocks
+            .windows(2)
+            .all(|pair| pair[0].first_sequence < pair[1].first_sequence && pair[0].offset_bytes < pair[1].offset_bytes);
         let starts_at_the_first_frame = blocks.first().is_none_or(|first_block| {
-            first_block.offset_bytes == 0
-                && first_block.first_sequence == footer.segment.first_sequence
+            first_block.offset_bytes == 0 && first_block.first_sequence == footer.segment.first_sequence
         });
         let ends_inside_the_frames = blocks
             .last()
             .is_none_or(|last_block| last_block.offset_bytes < footer.frames_bytes);
         let covers_the_frames = blocks.is_empty() == (footer.frames_bytes == 0);
-        if !(is_ordered && starts_at_the_first_frame && ends_inside_the_frames && covers_the_frames)
-        {
+        if !(is_ordered && starts_at_the_first_frame && ends_inside_the_frames && covers_the_frames) {
             return Err(damaged("its entries do not describe the frames"));
         }
         Ok(Self {
@@ -292,17 +290,13 @@ impl TieredIndex {
     /// and ends between two frames. Empty only if the segment is empty.
     #[must_use]
     pub fn blocks_from(&self, sequence: SequenceNumber, max_bytes: u64) -> Range<u64> {
-        let blocks_at_or_before = self
-            .blocks
-            .partition_point(|block| block.first_sequence <= sequence);
+        let blocks_at_or_before = self.blocks.partition_point(|block| block.first_sequence <= sequence);
         // A sequence below the segment's first is read from the start.
         let first_block = blocks_at_or_before.saturating_sub(1);
         let Some(start) = self.blocks.get(first_block).map(|block| block.offset_bytes) else {
             return 0..0;
         };
-        let later_block_starts = self.blocks[first_block + 1..]
-            .iter()
-            .map(|block| block.offset_bytes);
+        let later_block_starts = self.blocks[first_block + 1..].iter().map(|block| block.offset_bytes);
         let mut end = None;
         for block_end in later_block_starts.chain([self.frames_bytes]) {
             if end.is_some() && block_end - start > max_bytes {
@@ -363,8 +357,7 @@ pub fn encode_tiered_segment(
         index_checksum: crc32c::crc32c(&encoded_index),
     };
 
-    let mut object =
-        BytesMut::with_capacity(frames.len() + encoded_index.len() + TIERED_FOOTER_BYTES);
+    let mut object = BytesMut::with_capacity(frames.len() + encoded_index.len() + TIERED_FOOTER_BYTES);
     object.put_slice(frames);
     object.put_slice(&encoded_index);
     object.put_slice(&footer.encode());

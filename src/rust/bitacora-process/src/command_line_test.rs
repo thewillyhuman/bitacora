@@ -126,18 +126,12 @@ fn path_without_the_option_is_refused() {
 fn usage_names_the_daemon() {
     let text = usage("bita-replica");
 
-    assert!(
-        text.starts_with("Usage: bita-replica --config <path>\n"),
-        "{text}"
-    );
+    assert!(text.starts_with("Usage: bita-replica --config <path>\n"), "{text}");
 }
 
 #[test]
 fn usage_lists_the_config_option() {
     let text = usage("bita-replica");
 
-    assert!(
-        text.contains("--config <path>  The configuration file"),
-        "{text}"
-    );
+    assert!(text.contains("--config <path>  The configuration file"), "{text}");
 }

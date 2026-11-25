@@ -52,10 +52,7 @@ async fn created_file_exists_on_the_wrapped_disk() {
 
     create_file(&instrumented_disk).await;
 
-    assert_eq!(
-        memory_disk.list_files().await.expect("lists"),
-        [FILE_PATH.to_owned()]
-    );
+    assert_eq!(memory_disk.list_files().await.expect("lists"), [FILE_PATH.to_owned()]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -102,10 +99,7 @@ async fn written_bytes_can_be_read_back_through_the_instrumented_file() {
 async fn file_opened_through_the_instrumented_disk_is_instrumented_too() {
     let (_memory_disk, instrumented_disk, registry) = instrumented_memory_disk();
     drop(create_file(&instrumented_disk).await);
-    let mut reopened_file = instrumented_disk
-        .open_file(FILE_PATH)
-        .await
-        .expect("the file opens");
+    let mut reopened_file = instrumented_disk.open_file(FILE_PATH).await.expect("the file opens");
 
     reopened_file.sync_data().await.expect("the flush succeeds");
 
@@ -179,9 +173,7 @@ async fn successful_calls_count_no_failure() {
     file.sync_data().await.expect("the flush succeeds");
 
     assert!(
-        !registry
-            .encode()
-            .contains("bitacora_disk_operation_failures_total{"),
+        !registry.encode().contains("bitacora_disk_operation_failures_total{"),
         "{}",
         registry.encode()
     );
@@ -214,9 +206,7 @@ async fn opening_an_absent_file_is_not_a_failure_of_the_disk() {
 
     assert!(opened.is_err());
     assert!(
-        !registry
-            .encode()
-            .contains("bitacora_disk_operation_failures_total{"),
+        !registry.encode().contains("bitacora_disk_operation_failures_total{"),
         "{}",
         registry.encode()
     );
@@ -264,10 +254,7 @@ async fn removed_file_is_gone_from_the_wrapped_disk() {
         .await
         .expect("the file is removed");
 
-    assert_eq!(
-        memory_disk.list_files().await.expect("lists"),
-        Vec::<String>::new()
-    );
+    assert_eq!(memory_disk.list_files().await.expect("lists"), Vec::<String>::new());
 }
 
 #[tokio::test(start_paused = true)]

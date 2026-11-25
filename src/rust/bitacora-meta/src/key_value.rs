@@ -100,10 +100,7 @@ pub trait KeyValueStore: Send + Sync + 'static {
 
     /// Reads every key that starts with `key_prefix`, sorted by key, as of
     /// one moment.
-    async fn list(
-        &self,
-        key_prefix: &str,
-    ) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable>;
+    async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable>;
 
     /// Applies every mutation atomically, but only if every condition holds.
     async fn transact(

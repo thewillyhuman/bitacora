@@ -31,8 +31,7 @@ const BATCH_COUNT: u64 = 40;
 /// How many records each batch holds.
 const RECORDS_PER_BATCH: u64 = 5;
 /// The segment's last sequence number.
-const SEALED_END: SequenceNumber =
-    SequenceNumber::new(FIRST_SEQUENCE + BATCH_COUNT * RECORDS_PER_BATCH - 1);
+const SEALED_END: SequenceNumber = SequenceNumber::new(FIRST_SEQUENCE + BATCH_COUNT * RECORDS_PER_BATCH - 1);
 /// The key the object is stored under.
 const OBJECT_KEY: &str = "streams/7/segments/3";
 /// The request timeout the tests open segments with.
@@ -51,8 +50,7 @@ fn segment_frames() -> Bytes {
             payload.resize(2_000, b'.');
             payloads.push(Bytes::from(payload));
         }
-        let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads)
-            .expect("valid batch");
+        let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads).expect("valid batch");
         frames.put_slice(batch.frame());
     }
     frames.freeze()
@@ -65,8 +63,7 @@ async fn store_with_segment() -> (MemoryArtifactStore, TieredRecord) {
         epoch: Epoch::new(5),
         first_sequence: SequenceNumber::new(FIRST_SEQUENCE),
     };
-    let object = encode_tiered_segment(segment_header, SEALED_END, &segment_frames())
-        .expect("valid segment");
+    let object = encode_tiered_segment(segment_header, SEALED_END, &segment_frames()).expect("valid segment");
     let tiered = TieredRecord {
         object_key: OBJECT_KEY.to_owned(),
         size_bytes: object.len() as u64,
@@ -74,10 +71,7 @@ async fn store_with_segment() -> (MemoryArtifactStore, TieredRecord) {
         are_local_copies_dropped: true,
     };
     let artifact_store = MemoryArtifactStore::new();
-    artifact_store
-        .put_object(OBJECT_KEY, object)
-        .await
-        .expect("put");
+    artifact_store.put_object(OBJECT_KEY, object).await.expect("put");
     (artifact_store, tiered)
 }
 
@@ -118,11 +112,7 @@ async fn read_returns_the_payloads_that_were_written() {
     let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
 
     let records = segment
-        .read_from(
-            &artifact_store,
-            SequenceNumber::new(FIRST_SEQUENCE),
-            ONE_BLOCK,
-        )
+        .read_from(&artifact_store, SequenceNumber::new(FIRST_SEQUENCE), ONE_BLOCK)
         .await
         .expect("read");
 
@@ -149,10 +139,7 @@ async fn reads_block_by_block_reach_every_record_once() {
 
     let every_sequence: Vec<u64> = (FIRST_SEQUENCE..=SEALED_END.get()).collect();
     assert_eq!(read_sequences, every_sequence);
-    assert!(
-        read_count >= 5,
-        "only {read_count} reads: the segment is one block"
-    );
+    assert!(read_count >= 5, "only {read_count} reads: the segment is one block");
 }
 
 #[tokio::test]
@@ -161,11 +148,7 @@ async fn byte_limit_larger_than_the_segment_reads_it_in_one_request() {
     let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
 
     let records = segment
-        .read_from(
-            &artifact_store,
-            SequenceNumber::new(FIRST_SEQUENCE),
-            usize::MAX,
-        )
+        .read_from(&artifact_store, SequenceNumber::new(FIRST_SEQUENCE), usize::MAX)
         .await
         .expect("read");
 
@@ -189,14 +172,7 @@ async fn read_past_the_sealed_end_returns_nothing() {
 async fn object_of_another_segment_is_refused() {
     let (artifact_store, tiered) = store_with_segment().await;
 
-    let refused = TieredSegment::open(
-        &artifact_store,
-        OTHER_SEGMENT,
-        SEALED_END,
-        &tiered,
-        REQUEST_TIMEOUT,
-    )
-    .await;
+    let refused = TieredSegment::open(&artifact_store, OTHER_SEGMENT, SEALED_END, &tiered, REQUEST_TIMEOUT).await;
 
     assert!(matches!(refused, Err(TieredReadError::WrongSegment { .. })));
 }
@@ -205,14 +181,7 @@ async fn object_of_another_segment_is_refused() {
 async fn object_sealed_elsewhere_than_the_metadata_says_is_refused() {
     let (artifact_store, tiered) = store_with_segment().await;
 
-    let refused = TieredSegment::open(
-        &artifact_store,
-        SEGMENT,
-        SEALED_END.next(),
-        &tiered,
-        REQUEST_TIMEOUT,
-    )
-    .await;
+    let refused = TieredSegment::open(&artifact_store, SEGMENT, SEALED_END.next(), &tiered, REQUEST_TIMEOUT).await;
 
     assert!(matches!(refused, Err(TieredReadError::WrongSegment { .. })));
 }
@@ -267,17 +236,10 @@ async fn damaged_batch_is_refused_when_it_is_read() {
     artifact_store.corrupt_byte(OBJECT_KEY, offset_inside_the_first_batch, 0x01);
 
     let refused = segment
-        .read_from(
-            &artifact_store,
-            SequenceNumber::new(FIRST_SEQUENCE),
-            ONE_BLOCK,
-        )
+        .read_from(&artifact_store, SequenceNumber::new(FIRST_SEQUENCE), ONE_BLOCK)
         .await;
 
-    assert!(matches!(
-        refused,
-        Err(TieredReadError::InvalidBatches { .. })
-    ));
+    assert!(matches!(refused, Err(TieredReadError::InvalidBatches { .. })));
 }
 
 #[tokio::test]
@@ -298,10 +260,7 @@ async fn damage_in_one_block_leaves_the_other_blocks_readable() {
 #[tokio::test]
 async fn missing_object_is_reported_as_a_store_failure() {
     let (artifact_store, tiered) = store_with_segment().await;
-    artifact_store
-        .delete_object(OBJECT_KEY)
-        .await
-        .expect("delete");
+    artifact_store.delete_object(OBJECT_KEY).await.expect("delete");
 
     let failed = open_segment(&artifact_store, &tiered).await;
 
@@ -321,11 +280,7 @@ async fn object_store_outage_is_reported_as_a_store_failure() {
     artifact_store.set_unavailable(true);
 
     let failed = segment
-        .read_from(
-            &artifact_store,
-            SequenceNumber::new(FIRST_SEQUENCE),
-            ONE_BLOCK,
-        )
+        .read_from(&artifact_store, SequenceNumber::new(FIRST_SEQUENCE), ONE_BLOCK)
         .await;
 
     assert!(matches!(failed, Err(TieredReadError::StoreFailed { .. })));

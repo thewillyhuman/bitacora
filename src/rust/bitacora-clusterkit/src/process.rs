@@ -83,9 +83,7 @@ impl ChildProcess {
             Ok(log_file) => log_file,
             Err(io_error) => panic!("cannot create {}: {io_error}", log_path.display()),
         };
-        let log_file_for_errors = log_file
-            .try_clone()
-            .expect("an open file can be duplicated");
+        let log_file_for_errors = log_file.try_clone().expect("an open file can be duplicated");
         command
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
@@ -229,18 +227,11 @@ impl Drop for ChildProcess {
 pub fn free_local_ports(count: usize) -> Vec<u16> {
     let mut listeners = Vec::with_capacity(count);
     for _port_number in 0..count {
-        listeners.push(
-            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port can be bound"),
-        );
+        listeners.push(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port can be bound"));
     }
     let mut ports = Vec::with_capacity(count);
     for listener in &listeners {
-        ports.push(
-            listener
-                .local_addr()
-                .expect("a bound listener has an address")
-                .port(),
-        );
+        ports.push(listener.local_addr().expect("a bound listener has an address").port());
     }
     ports
 }

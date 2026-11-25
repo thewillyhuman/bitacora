@@ -120,22 +120,15 @@ impl RestoreReport {
             ("snapshot", self.snapshot.clone()),
             ("taken at", self.taken_at.clone()),
             ("outcome", outcome.to_owned()),
-            (
-                "keys in the store before",
-                self.keys_in_store_before.to_string(),
-            ),
+            ("keys in the store before", self.keys_in_store_before.to_string()),
             ("keys written", self.keys_written.to_string()),
             ("keys deleted", self.keys_deleted.to_string()),
         ]);
         if self.is_dry_run && self.keys_in_store_before > 0 {
-            rendered.push_str(
-                "the metadata store is not empty: the restore needs --force and replaces it\n",
-            );
+            rendered.push_str("the metadata store is not empty: the restore needs --force and replaces it\n");
         }
         if !self.is_dry_run {
-            rendered.push_str(
-                "next: run `bita metadata rebuild` to pick up what changed after the snapshot\n",
-            );
+            rendered.push_str("next: run `bita metadata rebuild` to pick up what changed after the snapshot\n");
         }
         rendered
     }
@@ -162,11 +155,7 @@ fn object_store_of(cluster: &Cluster) -> Result<Arc<dyn ArtifactStore>, CommandE
 /// * [`CommandError::ObjectStore`] or [`CommandError::ObjectStoreTimedOut`] if it cannot be listed.
 pub(crate) async fn list_snapshots(cluster: &Cluster) -> Result<SnapshotList, CommandError> {
     let artifact_store = object_store_of(cluster)?;
-    let listing = timeout(
-        cluster.request_timeout,
-        artifact_store.list_prefix(SNAPSHOT_KEY_PREFIX),
-    )
-    .await;
+    let listing = timeout(cluster.request_timeout, artifact_store.list_prefix(SNAPSHOT_KEY_PREFIX)).await;
     let objects = match listing {
         Ok(Ok(objects)) => objects,
         Ok(Err(reason)) => return Err(CommandError::ObjectStore { reason }),
@@ -286,11 +275,7 @@ async fn fetch_object(
     artifact_store: &dyn ArtifactStore,
     object_key: &str,
 ) -> Result<Bytes, CommandError> {
-    let fetched = timeout(
-        cluster.request_timeout,
-        artifact_store.get_object(object_key),
-    )
-    .await;
+    let fetched = timeout(cluster.request_timeout, artifact_store.get_object(object_key)).await;
     match fetched {
         Ok(Ok(stored_object)) => Ok(stored_object),
         Ok(Err(reason)) => Err(CommandError::ObjectStore { reason }),

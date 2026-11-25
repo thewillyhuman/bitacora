@@ -59,23 +59,15 @@ use bitacora_types::replica_api::ReplicaError;
 use crate::conversions::{MalformedMessage, optional_sequence, replica_id_from_wire};
 use crate::v1 as wire;
 use crate::v1::append_response::{Outcome as AppendOutcome, Success as AppendSuccess};
-use crate::v1::delete_segment_response::{
-    Outcome as DeleteSegmentOutcome, Success as DeleteSegmentSuccess,
-};
+use crate::v1::delete_segment_response::{Outcome as DeleteSegmentOutcome, Success as DeleteSegmentSuccess};
 use crate::v1::drain_response::{Outcome as DrainOutcome, Success as DrainSuccess};
 use crate::v1::fence_response::{Outcome as FenceOutcome, Success as FenceSuccess};
-use crate::v1::list_segments_response::{
-    Outcome as ListSegmentsOutcome, Success as ListSegmentsSuccess,
-};
+use crate::v1::list_segments_response::{Outcome as ListSegmentsOutcome, Success as ListSegmentsSuccess};
 use crate::v1::read_response::{Outcome as ReadOutcome, Success as ReadSuccess};
-use crate::v1::repair_segment_response::{
-    Outcome as RepairSegmentOutcome, Success as RepairSegmentSuccess,
-};
+use crate::v1::repair_segment_response::{Outcome as RepairSegmentOutcome, Success as RepairSegmentSuccess};
 use crate::v1::seal_response::{Outcome as SealOutcome, Success as SealSuccess};
 use crate::v1::status_response::{Outcome as StatusOutcome, Success as StatusSuccess};
-use crate::v1::upload_segment_response::{
-    Outcome as UploadSegmentOutcome, Success as UploadSegmentSuccess,
-};
+use crate::v1::upload_segment_response::{Outcome as UploadSegmentOutcome, Success as UploadSegmentSuccess};
 
 /// The error a client reports for an answer it cannot read.
 ///
@@ -130,18 +122,14 @@ fn replica_error_from_wire(error: wire::ReplicaError) -> ReplicaError {
 /// # Arguments
 ///
 /// * `result` - What `ReplicaApi::append` returned.
-pub(crate) fn append_response_to_wire(
-    result: Result<domain::AppendResponse, ReplicaError>,
-) -> wire::AppendResponse {
+pub(crate) fn append_response_to_wire(result: Result<domain::AppendResponse, ReplicaError>) -> wire::AppendResponse {
     let outcome = match result {
         Ok(response) => AppendOutcome::Success(AppendSuccess {
             local_end: response.local_end.get(),
         }),
         Err(error) => AppendOutcome::Error(error.into()),
     };
-    wire::AppendResponse {
-        outcome: Some(outcome),
-    }
+    wire::AppendResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to an append.
@@ -168,9 +156,7 @@ pub(crate) fn append_response_from_wire(
 /// # Arguments
 ///
 /// * `result` - What `ReplicaApi::read` returned.
-pub(crate) fn read_response_to_wire(
-    result: Result<domain::ReadResponse, ReplicaError>,
-) -> wire::ReadResponse {
+pub(crate) fn read_response_to_wire(result: Result<domain::ReadResponse, ReplicaError>) -> wire::ReadResponse {
     let outcome = match result {
         Ok(response) => ReadOutcome::Success(ReadSuccess {
             batch_frames: response.batch_frames,
@@ -179,9 +165,7 @@ pub(crate) fn read_response_to_wire(
         }),
         Err(error) => ReadOutcome::Error(error.into()),
     };
-    wire::ReadResponse {
-        outcome: Some(outcome),
-    }
+    wire::ReadResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to a read. The batch frames are not looked at:
@@ -191,9 +175,7 @@ pub(crate) fn read_response_to_wire(
 ///
 /// Returns the replica's own error if it refused the read, and
 /// `ReplicaError::Unavailable` if the answer cannot be read.
-pub(crate) fn read_response_from_wire(
-    response: wire::ReadResponse,
-) -> Result<domain::ReadResponse, ReplicaError> {
+pub(crate) fn read_response_from_wire(response: wire::ReadResponse) -> Result<domain::ReadResponse, ReplicaError> {
     match response.outcome {
         Some(ReadOutcome::Success(success)) => Ok(domain::ReadResponse {
             batch_frames: success.batch_frames,
@@ -210,9 +192,7 @@ pub(crate) fn read_response_from_wire(
 /// # Arguments
 ///
 /// * `result` - What `ReplicaApi::fence` returned.
-pub(crate) fn fence_response_to_wire(
-    result: Result<domain::FenceResponse, ReplicaError>,
-) -> wire::FenceResponse {
+pub(crate) fn fence_response_to_wire(result: Result<domain::FenceResponse, ReplicaError>) -> wire::FenceResponse {
     let outcome = match result {
         Ok(response) => FenceOutcome::Success(FenceSuccess {
             local_end: response.local_end.map(SequenceNumber::get),
@@ -220,9 +200,7 @@ pub(crate) fn fence_response_to_wire(
         }),
         Err(error) => FenceOutcome::Error(error.into()),
     };
-    wire::FenceResponse {
-        outcome: Some(outcome),
-    }
+    wire::FenceResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to a fence.
@@ -231,9 +209,7 @@ pub(crate) fn fence_response_to_wire(
 ///
 /// Returns the replica's own error if it refused the fence, and
 /// `ReplicaError::Unavailable` if the answer cannot be read.
-pub(crate) fn fence_response_from_wire(
-    response: wire::FenceResponse,
-) -> Result<domain::FenceResponse, ReplicaError> {
+pub(crate) fn fence_response_from_wire(response: wire::FenceResponse) -> Result<domain::FenceResponse, ReplicaError> {
     match response.outcome {
         Some(FenceOutcome::Success(success)) => Ok(domain::FenceResponse {
             local_end: optional_sequence(success.local_end),
@@ -249,18 +225,14 @@ pub(crate) fn fence_response_from_wire(
 /// # Arguments
 ///
 /// * `result` - What `ReplicaApi::seal` returned.
-pub(crate) fn seal_response_to_wire(
-    result: Result<domain::SealResponse, ReplicaError>,
-) -> wire::SealResponse {
+pub(crate) fn seal_response_to_wire(result: Result<domain::SealResponse, ReplicaError>) -> wire::SealResponse {
     let outcome = match result {
         Ok(response) => SealOutcome::Success(SealSuccess {
             local_end: response.local_end.map(SequenceNumber::get),
         }),
         Err(error) => SealOutcome::Error(error.into()),
     };
-    wire::SealResponse {
-        outcome: Some(outcome),
-    }
+    wire::SealResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to a seal.
@@ -269,9 +241,7 @@ pub(crate) fn seal_response_to_wire(
 ///
 /// Returns the replica's own error if it refused the seal, and
 /// `ReplicaError::Unavailable` if the answer cannot be read.
-pub(crate) fn seal_response_from_wire(
-    response: wire::SealResponse,
-) -> Result<domain::SealResponse, ReplicaError> {
+pub(crate) fn seal_response_from_wire(response: wire::SealResponse) -> Result<domain::SealResponse, ReplicaError> {
     match response.outcome {
         Some(SealOutcome::Success(success)) => Ok(domain::SealResponse {
             local_end: optional_sequence(success.local_end),
@@ -295,9 +265,7 @@ pub(crate) fn repair_segment_response_to_wire(
         }),
         Err(error) => RepairSegmentOutcome::Error(error.into()),
     };
-    wire::RepairSegmentResponse {
-        outcome: Some(outcome),
-    }
+    wire::RepairSegmentResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to a repair.
@@ -332,9 +300,7 @@ pub(crate) fn upload_segment_response_to_wire(
         }),
         Err(error) => UploadSegmentOutcome::Error(error.into()),
     };
-    wire::UploadSegmentResponse {
-        outcome: Some(outcome),
-    }
+    wire::UploadSegmentResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to an upload.
@@ -360,9 +326,7 @@ pub(crate) fn upload_segment_response_from_wire(
 /// # Arguments
 ///
 /// * `result` - What `ReplicaApi::status` returned.
-pub(crate) fn status_response_to_wire(
-    result: Result<domain::ReplicaStatus, ReplicaError>,
-) -> wire::StatusResponse {
+pub(crate) fn status_response_to_wire(result: Result<domain::ReplicaStatus, ReplicaError>) -> wire::StatusResponse {
     let outcome = match result {
         Ok(status) => StatusOutcome::Success(StatusSuccess {
             replica_id: status.replica_id.into(),
@@ -373,9 +337,7 @@ pub(crate) fn status_response_to_wire(
         }),
         Err(error) => StatusOutcome::Error(error.into()),
     };
-    wire::StatusResponse {
-        outcome: Some(outcome),
-    }
+    wire::StatusResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's report about itself.
@@ -385,9 +347,7 @@ pub(crate) fn status_response_to_wire(
 /// Returns the replica's own error if it could not report, and
 /// `ReplicaError::Unavailable` if the answer cannot be read, which includes
 /// a report under something that is not a replica identifier.
-pub(crate) fn status_response_from_wire(
-    response: wire::StatusResponse,
-) -> Result<domain::ReplicaStatus, ReplicaError> {
+pub(crate) fn status_response_from_wire(response: wire::StatusResponse) -> Result<domain::ReplicaStatus, ReplicaError> {
     match response.outcome {
         Some(StatusOutcome::Success(success)) => {
             replica_status_from_wire(success).map_err(|malformed| unreadable_answer(&malformed))
@@ -403,9 +363,7 @@ pub(crate) fn status_response_from_wire(
 ///
 /// Returns [`MalformedMessage::InvalidReplicaId`] if the report's identity
 /// is not a replica identifier.
-fn replica_status_from_wire(
-    success: StatusSuccess,
-) -> Result<domain::ReplicaStatus, MalformedMessage> {
+fn replica_status_from_wire(success: StatusSuccess) -> Result<domain::ReplicaStatus, MalformedMessage> {
     let replica_id = replica_id_from_wire(success.replica_id, "StatusResponse.Success.replica_id")?;
     Ok(domain::ReplicaStatus {
         replica_id,
@@ -426,9 +384,7 @@ pub(crate) fn drain_response_to_wire(result: Result<(), ReplicaError>) -> wire::
         Ok(()) => DrainOutcome::Success(DrainSuccess {}),
         Err(error) => DrainOutcome::Error(error.into()),
     };
-    wire::DrainResponse {
-        outcome: Some(outcome),
-    }
+    wire::DrainResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to a drain.
@@ -459,9 +415,7 @@ pub(crate) fn list_segments_response_to_wire(
         }),
         Err(error) => ListSegmentsOutcome::Error(error.into()),
     };
-    wire::ListSegmentsResponse {
-        outcome: Some(outcome),
-    }
+    wire::ListSegmentsResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's list of segment copies, in the order it sent them.
@@ -476,8 +430,9 @@ pub(crate) fn list_segments_response_from_wire(
     response: wire::ListSegmentsResponse,
 ) -> Result<Vec<domain::SegmentStatus>, ReplicaError> {
     match response.outcome {
-        Some(ListSegmentsOutcome::Success(success)) => segment_statuses_from_wire(success.segments)
-            .map_err(|malformed| unreadable_answer(&malformed)),
+        Some(ListSegmentsOutcome::Success(success)) => {
+            segment_statuses_from_wire(success.segments).map_err(|malformed| unreadable_answer(&malformed))
+        }
         Some(ListSegmentsOutcome::Error(error)) => Err(replica_error_from_wire(error)),
         None => Err(missing_outcome("ListSegmentsResponse.outcome")),
     }
@@ -504,16 +459,12 @@ fn segment_statuses_from_wire(
 /// # Arguments
 ///
 /// * `result` - What `ReplicaApi::delete_segment` returned.
-pub(crate) fn delete_segment_response_to_wire(
-    result: Result<(), ReplicaError>,
-) -> wire::DeleteSegmentResponse {
+pub(crate) fn delete_segment_response_to_wire(result: Result<(), ReplicaError>) -> wire::DeleteSegmentResponse {
     let outcome = match result {
         Ok(()) => DeleteSegmentOutcome::Success(DeleteSegmentSuccess {}),
         Err(error) => DeleteSegmentOutcome::Error(error.into()),
     };
-    wire::DeleteSegmentResponse {
-        outcome: Some(outcome),
-    }
+    wire::DeleteSegmentResponse { outcome: Some(outcome) }
 }
 
 /// Reads a replica's answer to the deletion of a segment copy.
@@ -522,9 +473,7 @@ pub(crate) fn delete_segment_response_to_wire(
 ///
 /// Returns the replica's own error if it could not delete the copy, and
 /// `ReplicaError::Unavailable` if the answer cannot be read.
-pub(crate) fn delete_segment_response_from_wire(
-    response: wire::DeleteSegmentResponse,
-) -> Result<(), ReplicaError> {
+pub(crate) fn delete_segment_response_from_wire(response: wire::DeleteSegmentResponse) -> Result<(), ReplicaError> {
     match response.outcome {
         Some(DeleteSegmentOutcome::Success(DeleteSegmentSuccess {})) => Ok(()),
         Some(DeleteSegmentOutcome::Error(error)) => Err(replica_error_from_wire(error)),

@@ -29,9 +29,7 @@
 //! uploaded to the object store, so a checksum computed once by the writer
 //! is verified at every hop.
 
-use bitacora_types::{
-    Epoch, LogRecord, MAX_RECORD_PAYLOAD_BYTES, SegmentAddress, SegmentId, SequenceNumber, StreamId,
-};
+use bitacora_types::{Epoch, LogRecord, MAX_RECORD_PAYLOAD_BYTES, SegmentAddress, SegmentId, SequenceNumber, StreamId};
 use bytes::{BufMut, Bytes, BytesMut};
 use thiserror::Error;
 
@@ -119,8 +117,7 @@ impl SegmentHeader {
         unwritten.put_u64_le(self.epoch.get());
         unwritten.put_u64_le(self.first_sequence.get());
         let checksum = crc32c::crc32c(&encoded[..HEADER_CHECKSUM_OFFSET]);
-        encoded[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + U32_BYTES]
-            .copy_from_slice(&checksum.to_le_bytes());
+        encoded[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + U32_BYTES].copy_from_slice(&checksum.to_le_bytes());
         encoded
     }
 
@@ -325,23 +322,16 @@ impl Batch {
         if first_sequence == SequenceNumber::ZERO {
             return Err(EncodeError::StartsAtEmptyPosition);
         }
-        if let Some(oversized) = payloads
-            .iter()
-            .find(|payload| payload.len() > MAX_RECORD_PAYLOAD_BYTES)
-        {
+        if let Some(oversized) = payloads.iter().find(|payload| payload.len() > MAX_RECORD_PAYLOAD_BYTES) {
             return Err(EncodeError::RecordTooLarge {
                 payload_bytes: oversized.len(),
             });
         }
-        let body_bytes: usize = payloads
-            .iter()
-            .map(|payload| RECORD_HEADER_BYTES + payload.len())
-            .sum();
+        let body_bytes: usize = payloads.iter().map(|payload| RECORD_HEADER_BYTES + payload.len()).sum();
         if body_bytes > MAX_BATCH_BODY_BYTES {
             return Err(EncodeError::BatchTooLarge { body_bytes });
         }
-        let record_count =
-            u32::try_from(payloads.len()).expect("a body within the limit holds fewer than 2^32");
+        let record_count = u32::try_from(payloads.len()).expect("a body within the limit holds fewer than 2^32");
 
         let mut frame = BytesMut::with_capacity(BATCH_HEADER_BYTES + body_bytes);
         frame.put_u32_le(u32::try_from(body_bytes).expect("the body limit fits in 32 bits"));
@@ -349,9 +339,7 @@ impl Batch {
         frame.put_u32_le(record_count);
         frame.put_u32_le(0); // Placeholder, patched once the body is in place.
         for payload in payloads {
-            frame.put_u32_le(
-                u32::try_from(payload.len()).expect("the payload limit fits in 32 bits"),
-            );
+            frame.put_u32_le(u32::try_from(payload.len()).expect("the payload limit fits in 32 bits"));
             frame.put_slice(payload);
         }
         let checksum = frame_checksum(segment, &frame);
@@ -415,11 +403,7 @@ impl Batch {
         }
         let record_count = read_u32(&frame, RECORD_COUNT_OFFSET);
         validate_body(&frame[BATCH_HEADER_BYTES..], record_count)?;
-        if first_sequence
-            .get()
-            .checked_add(u64::from(record_count))
-            .is_none()
-        {
+        if first_sequence.get().checked_add(u64::from(record_count)).is_none() {
             return Err(FrameError::Malformed {
                 reason: "batch runs past the end of the sequence space",
             });
@@ -440,8 +424,7 @@ impl Batch {
     /// The sequence number of the batch's last record.
     #[must_use]
     pub const fn last_sequence(&self) -> SequenceNumber {
-        self.first_sequence
-            .advanced_by(self.record_count as u64 - 1)
+        self.first_sequence.advanced_by(self.record_count as u64 - 1)
     }
 
     /// How many records the batch holds. Never zero.
@@ -483,11 +466,8 @@ impl Iterator for BatchRecords {
         }
         // `Batch::decode` and `Batch::encode` validated the body, so every
         // length prefix is in bounds.
-        let payload_bytes =
-            usize::try_from(read_u32(&self.unread_body, 0)).expect("32 bits fit in usize");
-        let mut record_bytes = self
-            .unread_body
-            .split_to(RECORD_HEADER_BYTES + payload_bytes);
+        let payload_bytes = usize::try_from(read_u32(&self.unread_body, 0)).expect("32 bits fit in usize");
+        let mut record_bytes = self.unread_body.split_to(RECORD_HEADER_BYTES + payload_bytes);
         let payload = record_bytes.split_off(RECORD_HEADER_BYTES);
         let sequence = self.next_sequence;
         self.next_sequence = sequence.next();
@@ -527,12 +507,8 @@ pub fn decode_frames(segment: SegmentAddress, frames: &Bytes) -> Result<Vec<Batc
     let mut batches: Vec<Batch> = Vec::new();
     let mut offset_bytes = 0;
     while offset_bytes < frames.len() {
-        let batch = Batch::decode(segment, &frames.slice(offset_bytes..)).map_err(|reason| {
-            FramesError::InvalidFrame {
-                offset_bytes,
-                reason,
-            }
-        })?;
+        let batch = Batch::decode(segment, &frames.slice(offset_bytes..))
+            .map_err(|reason| FramesError::InvalidFrame { offset_bytes, reason })?;
         if let Some(previous_batch) = batches.last() {
             let expected = previous_batch.last_sequence().next();
             if batch.first_sequence() != expected {
@@ -590,11 +566,7 @@ pub struct ValidPrefix {
 /// never acknowledged, because a replica acknowledges only after the whole
 /// frame is flushed. It never fails; invalid bytes only end the prefix.
 #[must_use]
-pub fn scan_valid_prefix(
-    segment: SegmentAddress,
-    next_sequence: SequenceNumber,
-    content: &Bytes,
-) -> ValidPrefix {
+pub fn scan_valid_prefix(segment: SegmentAddress, next_sequence: SequenceNumber, content: &Bytes) -> ValidPrefix {
     let mut batches = Vec::new();
     let mut valid_bytes = 0;
     let mut expected = next_sequence;
@@ -707,12 +679,7 @@ mod tests {
     }
 
     fn batch(first_sequence: u64, texts: &[&'static str]) -> Batch {
-        Batch::encode(
-            SEGMENT,
-            SequenceNumber::new(first_sequence),
-            &payloads(texts),
-        )
-        .expect("valid batch")
+        Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads(texts)).expect("valid batch")
     }
 
     fn concatenated(batches: &[Batch]) -> Bytes {
@@ -736,8 +703,7 @@ mod tests {
                     Bytes::from(random.bytes(payload_bytes))
                 })
                 .collect();
-            let batch =
-                Batch::encode(SEGMENT, next_sequence, &record_payloads).expect("valid batch");
+            let batch = Batch::encode(SEGMENT, next_sequence, &record_payloads).expect("valid batch");
             next_sequence = batch.last_sequence().next();
             batches.push(batch);
         }
@@ -766,10 +732,7 @@ mod tests {
     fn header_with_wrong_magic_is_not_a_segment_file() {
         let mut encoded = header().encode();
         encoded[0] ^= 0xFF;
-        assert_eq!(
-            SegmentHeader::decode(&encoded),
-            Err(HeaderError::WrongMagic)
-        );
+        assert_eq!(SegmentHeader::decode(&encoded), Err(HeaderError::WrongMagic));
     }
 
     #[test]
@@ -792,8 +755,7 @@ mod tests {
         let mut encoded = header().encode();
         encoded[8..12].copy_from_slice(&(SEGMENT_FORMAT_VERSION + 1).to_le_bytes());
         let checksum = crc32c::crc32c(&encoded[..HEADER_CHECKSUM_OFFSET]);
-        encoded[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + U32_BYTES]
-            .copy_from_slice(&checksum.to_le_bytes());
+        encoded[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + U32_BYTES].copy_from_slice(&checksum.to_le_bytes());
         assert_eq!(
             SegmentHeader::decode(&encoded),
             Err(HeaderError::UnsupportedVersion {
@@ -820,8 +782,7 @@ mod tests {
         let mut header_bytes = header().encode().to_vec();
         for mark in marks {
             let slot_offset = mark.slot_offset();
-            header_bytes[slot_offset..slot_offset + FLUSHED_MARK_BYTES]
-                .copy_from_slice(&mark.encode(SEGMENT));
+            header_bytes[slot_offset..slot_offset + FLUSHED_MARK_BYTES].copy_from_slice(&mark.encode(SEGMENT));
         }
         header_bytes
     }
@@ -841,19 +802,13 @@ mod tests {
     #[test]
     fn stored_mark_is_read_back() {
         let header_bytes = header_with_marks(&[mark(4_096, 1)]);
-        assert_eq!(
-            FlushedMark::latest_in(SEGMENT, &header_bytes),
-            Some(mark(4_096, 1))
-        );
+        assert_eq!(FlushedMark::latest_in(SEGMENT, &header_bytes), Some(mark(4_096, 1)));
     }
 
     #[test]
     fn mark_with_the_highest_generation_is_the_current_one() {
         let header_bytes = header_with_marks(&[mark(4_096, 4), mark(8_192, 5)]);
-        assert_eq!(
-            FlushedMark::latest_in(SEGMENT, &header_bytes),
-            Some(mark(8_192, 5))
-        );
+        assert_eq!(FlushedMark::latest_in(SEGMENT, &header_bytes), Some(mark(8_192, 5)));
     }
 
     #[test]
@@ -865,10 +820,7 @@ mod tests {
     fn torn_mark_leaves_the_previous_one_current() {
         let mut header_bytes = header_with_marks(&[mark(4_096, 4), mark(8_192, 5)]);
         header_bytes[mark(0, 5).slot_offset() + 3] ^= 0xFF;
-        assert_eq!(
-            FlushedMark::latest_in(SEGMENT, &header_bytes),
-            Some(mark(4_096, 4))
-        );
+        assert_eq!(FlushedMark::latest_in(SEGMENT, &header_bytes), Some(mark(4_096, 4)));
     }
 
     #[test]
@@ -905,10 +857,7 @@ mod tests {
 
     #[test]
     fn batch_last_sequence_is_its_final_record() {
-        assert_eq!(
-            batch(100, &["a", "b", "c"]).last_sequence(),
-            SequenceNumber::new(102)
-        );
+        assert_eq!(batch(100, &["a", "b", "c"]).last_sequence(), SequenceNumber::new(102));
     }
 
     #[test]
@@ -930,16 +879,9 @@ mod tests {
     #[test]
     fn batch_accepts_a_record_of_exactly_the_maximum_size() {
         let largest_payload = Bytes::from(vec![0xAB; MAX_RECORD_PAYLOAD_BYTES]);
-        let encoded = Batch::encode(
-            SEGMENT,
-            SequenceNumber::FIRST,
-            std::slice::from_ref(&largest_payload),
-        )
-        .expect("the maximum size is allowed");
-        assert_eq!(
-            encoded.records().next().expect("one record").payload,
-            largest_payload
-        );
+        let encoded = Batch::encode(SEGMENT, SequenceNumber::FIRST, std::slice::from_ref(&largest_payload))
+            .expect("the maximum size is allowed");
+        assert_eq!(encoded.records().next().expect("one record").payload, largest_payload);
     }
 
     #[test]
@@ -1018,10 +960,7 @@ mod tests {
     #[test]
     fn zero_filled_space_is_the_end_of_data() {
         let unwritten_space = Bytes::from(vec![0_u8; 256]);
-        assert_eq!(
-            Batch::decode(SEGMENT, &unwritten_space),
-            Err(FrameError::EndOfData)
-        );
+        assert_eq!(Batch::decode(SEGMENT, &unwritten_space), Err(FrameError::EndOfData));
     }
 
     /// A body length such as 65536 starts with zero bytes, so a header cut
@@ -1040,10 +979,7 @@ mod tests {
 
     #[test]
     fn no_bytes_at_all_are_the_end_of_data() {
-        assert_eq!(
-            Batch::decode(SEGMENT, &Bytes::new()),
-            Err(FrameError::EndOfData)
-        );
+        assert_eq!(Batch::decode(SEGMENT, &Bytes::new()), Err(FrameError::EndOfData));
     }
 
     #[test]
@@ -1171,15 +1107,8 @@ mod tests {
     #[test]
     fn scan_of_intact_content_finds_every_batch() {
         let batches = random_batches(1, 8);
-        let scanned = scan_valid_prefix(
-            SEGMENT,
-            batches[0].first_sequence(),
-            &concatenated(&batches),
-        );
-        assert_eq!(
-            (scanned.batches, scanned.stop),
-            (batches, ScanStop::EndOfData)
-        );
+        let scanned = scan_valid_prefix(SEGMENT, batches[0].first_sequence(), &concatenated(&batches));
+        assert_eq!((scanned.batches, scanned.stop), (batches, ScanStop::EndOfData));
     }
 
     #[test]
@@ -1188,8 +1117,7 @@ mod tests {
         let mut content = concatenated(&batches).to_vec();
         let written_bytes = content.len();
         content.extend_from_slice(&[0_u8; 512]);
-        let scanned =
-            scan_valid_prefix(SEGMENT, batches[0].first_sequence(), &Bytes::from(content));
+        let scanned = scan_valid_prefix(SEGMENT, batches[0].first_sequence(), &Bytes::from(content));
         assert_eq!(
             (scanned.valid_bytes, scanned.stop),
             (written_bytes, ScanStop::EndOfData)
@@ -1227,11 +1155,7 @@ mod tests {
             let batches = random_batches(seed, 6);
             let content = concatenated(&batches);
             for prefix_bytes in 0..=content.len() {
-                let scanned = scan_valid_prefix(
-                    SEGMENT,
-                    batches[0].first_sequence(),
-                    &content.slice(..prefix_bytes),
-                );
+                let scanned = scan_valid_prefix(SEGMENT, batches[0].first_sequence(), &content.slice(..prefix_bytes));
                 let whole_batches = batches
                     .iter()
                     .scan(0, |end_offset, batch| {
@@ -1261,8 +1185,7 @@ mod tests {
             let damaged_byte = random.index(content.len());
             content[damaged_byte] ^= u8::try_from(random.between(1, 255)).expect("one byte");
 
-            let scanned =
-                scan_valid_prefix(SEGMENT, batches[0].first_sequence(), &Bytes::from(content));
+            let scanned = scan_valid_prefix(SEGMENT, batches[0].first_sequence(), &Bytes::from(content));
 
             let batches_before_damage = batches
                 .iter()

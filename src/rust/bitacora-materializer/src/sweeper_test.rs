@@ -45,12 +45,7 @@ impl Fixture {
     async fn new() -> Self {
         let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
         let stream = metadata
-            .create_stream(
-                STREAM,
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("a fresh metadata store accepts a stream");
         metadata
@@ -81,12 +76,7 @@ impl Fixture {
 
     /// Does the first half of a checkpoint: stores the manifest that names `artifact_keys`. Returns the
     /// manifest's key.
-    async fn write_manifest(
-        &self,
-        runner: &ArtifactNamespace,
-        checkpoint: u64,
-        artifact_keys: &[String],
-    ) -> String {
+    async fn write_manifest(&self, runner: &ArtifactNamespace, checkpoint: u64, artifact_keys: &[String]) -> String {
         let manifest = CheckpointManifest {
             artifact_keys: artifact_keys.to_vec(),
             details: Bytes::new(),
@@ -113,12 +103,7 @@ impl Fixture {
     }
 
     /// Writes and commits a checkpoint that names `artifact_keys`. Returns the manifest's key.
-    async fn checkpoint(
-        &self,
-        runner: &ArtifactNamespace,
-        checkpoint: u64,
-        artifact_keys: &[String],
-    ) -> String {
+    async fn checkpoint(&self, runner: &ArtifactNamespace, checkpoint: u64, artifact_keys: &[String]) -> String {
         let manifest_key = self.write_manifest(runner, checkpoint, artifact_keys).await;
         self.commit(runner, checkpoint, &manifest_key).await;
         manifest_key
@@ -237,21 +222,14 @@ async fn checkpoint_committed_while_a_sweep_is_under_way_keeps_its_artifacts() {
     let replaced_runner = fixture.take_over().await;
     let old_snapshot_key = put(&replaced_runner, "snapshot").await;
     let old_manifest_key = fixture
-        .checkpoint(
-            &replaced_runner,
-            10,
-            std::slice::from_ref(&old_snapshot_key),
-        )
+        .checkpoint(&replaced_runner, 10, std::slice::from_ref(&old_snapshot_key))
         .await;
     let live_runner = fixture.take_over().await;
-    let current_token = live_runner
-        .fencing_token()
-        .expect("a runner's view can write");
+    let current_token = live_runner.fencing_token().expect("a runner's view can write");
     // The sweep reads the checkpoint record and the manifest ...
-    let referenced_as_the_sweep_saw_it =
-        referenced_artifacts(&live_runner, Some(&old_manifest_key))
-            .await
-            .expect("the manifest is readable");
+    let referenced_as_the_sweep_saw_it = referenced_artifacts(&live_runner, Some(&old_manifest_key))
+        .await
+        .expect("the manifest is readable");
     // ... the live runner commits a checkpoint with a new snapshot meanwhile ...
     let new_snapshot_key = put(&live_runner, "snapshot").await;
     let new_manifest_key = fixture
@@ -275,21 +253,15 @@ async fn takeover_while_a_sweep_is_under_way_loses_nothing_the_successor_restore
     let manifest_key = fixture
         .checkpoint(&first_runner, 10, std::slice::from_ref(&snapshot_key))
         .await;
-    let token_as_the_sweep_saw_it = first_runner
-        .fencing_token()
-        .expect("a runner's view can write");
+    let token_as_the_sweep_saw_it = first_runner.fencing_token().expect("a runner's view can write");
     let referenced_as_the_sweep_saw_it = referenced_artifacts(&first_runner, Some(&manifest_key))
         .await
         .expect("the manifest is readable");
 
     let successor = fixture.take_over().await;
-    delete_unreferenced(
-        &successor,
-        &referenced_as_the_sweep_saw_it,
-        token_as_the_sweep_saw_it,
-    )
-    .await
-    .expect("the deletion runs");
+    delete_unreferenced(&successor, &referenced_as_the_sweep_saw_it, token_as_the_sweep_saw_it)
+        .await
+        .expect("the deletion runs");
 
     assert!(fixture.holds(&successor, &snapshot_key).await);
     assert!(fixture.holds(&successor, &manifest_key).await);
@@ -299,9 +271,7 @@ async fn takeover_while_a_sweep_is_under_way_loses_nothing_the_successor_restore
 async fn runner_that_has_just_committed_deletes_its_own_leftovers() {
     let fixture = Fixture::new().await;
     let live_runner = fixture.take_over().await;
-    let own_token = live_runner
-        .fencing_token()
-        .expect("a runner's view can write");
+    let own_token = live_runner.fencing_token().expect("a runner's view can write");
     let leftover_key = put(&live_runner, "from-a-failed-attempt").await;
     let manifest_key = fixture.checkpoint(&live_runner, 10, &[]).await;
     let referenced = referenced_artifacts(&live_runner, Some(&manifest_key))
@@ -327,23 +297,14 @@ async fn object_the_namespace_did_not_write_is_kept() {
     );
     fixture
         .artifact_store
-        .put_object(
-            &foreign_object_key,
-            Bytes::from_static(b"left by an operator"),
-        )
+        .put_object(&foreign_object_key, Bytes::from_static(b"left by an operator"))
         .await
         .expect("the object is stored");
 
     let report = fixture.sweep().await.expect("the sweep runs");
 
     assert_eq!(report.artifacts_deleted, 0);
-    assert!(
-        fixture
-            .artifact_store
-            .get_object(&foreign_object_key)
-            .await
-            .is_ok()
-    );
+    assert!(fixture.artifact_store.get_object(&foreign_object_key).await.is_ok());
 }
 
 #[tokio::test]
@@ -370,11 +331,7 @@ async fn nothing_is_deleted_when_the_committed_manifest_cannot_be_read() {
     let replaced_runner = fixture.take_over().await;
     let orphan_key = put(&replaced_runner, "never-committed").await;
     fixture
-        .commit(
-            &replaced_runner,
-            10,
-            "00000000000000000001/0000000099-manifest",
-        )
+        .commit(&replaced_runner, 10, "00000000000000000001/0000000099-manifest")
         .await;
     let current_runner = fixture.take_over().await;
 
@@ -398,9 +355,7 @@ async fn sweep_of_a_materializer_that_is_not_registered_fails() {
 
     assert!(matches!(
         swept,
-        Err(SweepError::Metadata(
-            MetaError::MaterializerNotRegistered { .. }
-        ))
+        Err(SweepError::Metadata(MetaError::MaterializerNotRegistered { .. }))
     ));
 }
 

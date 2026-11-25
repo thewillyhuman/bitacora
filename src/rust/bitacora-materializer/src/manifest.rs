@@ -106,9 +106,7 @@ pub fn encode_manifest(checkpoint: SequenceNumber, manifest: &CheckpointManifest
 ///
 /// Returns [`MaterializerError::InvalidManifest`] if the bytes are not a manifest, come from a newer
 /// format, fail their checksum, or do not end where their lengths say.
-pub fn decode_manifest(
-    stored: &Bytes,
-) -> Result<(SequenceNumber, CheckpointManifest), MaterializerError> {
+pub fn decode_manifest(stored: &Bytes) -> Result<(SequenceNumber, CheckpointManifest), MaterializerError> {
     let Some(checksummed_bytes) = stored.len().checked_sub(CHECKSUM_BYTES) else {
         return Err(invalid("it is shorter than its checksum"));
     };
@@ -118,9 +116,7 @@ pub fn decode_manifest(
     }
 
     let mut unread = stored.slice(..checksummed_bytes);
-    if unread.remaining() < MANIFEST_MAGIC.len()
-        || unread.split_to(MANIFEST_MAGIC.len()) != MANIFEST_MAGIC[..]
-    {
+    if unread.remaining() < MANIFEST_MAGIC.len() || unread.split_to(MANIFEST_MAGIC.len()) != MANIFEST_MAGIC[..] {
         return Err(invalid("it does not start like a manifest"));
     }
     let version = read_u32(&mut unread)?;
@@ -141,13 +137,7 @@ pub fn decode_manifest(
     if unread.has_remaining() {
         return Err(invalid("it holds more than its lengths say"));
     }
-    Ok((
-        checkpoint,
-        CheckpointManifest {
-            artifact_keys,
-            details,
-        },
-    ))
+    Ok((checkpoint, CheckpointManifest { artifact_keys, details }))
 }
 
 /// The error for a stored manifest that cannot be used.
@@ -164,16 +154,12 @@ fn length_as_u32(length: usize) -> u32 {
 
 /// Reads the next four bytes as an integer, or fails if the manifest ends first.
 fn read_u32(unread: &mut Bytes) -> Result<u32, MaterializerError> {
-    unread
-        .try_get_u32_le()
-        .map_err(|_cut_short| invalid("it is cut short"))
+    unread.try_get_u32_le().map_err(|_cut_short| invalid("it is cut short"))
 }
 
 /// Reads the next eight bytes as an integer, or fails if the manifest ends first.
 fn read_u64(unread: &mut Bytes) -> Result<u64, MaterializerError> {
-    unread
-        .try_get_u64_le()
-        .map_err(|_cut_short| invalid("it is cut short"))
+    unread.try_get_u64_le().map_err(|_cut_short| invalid("it is cut short"))
 }
 
 /// Reads a length and then that many bytes, or fails if the manifest ends first.

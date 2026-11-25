@@ -79,12 +79,7 @@ mod server;
 /// generated items.
 // Generated code is not written to this workspace's lints, and it is not
 // ours to fix.
-#[allow(
-    missing_docs,
-    clippy::all,
-    clippy::pedantic,
-    clippy::missing_docs_in_private_items
-)]
+#[allow(missing_docs, clippy::all, clippy::pedantic, clippy::missing_docs_in_private_items)]
 pub mod v1 {
     tonic::include_proto!("bitacora.v1");
 }

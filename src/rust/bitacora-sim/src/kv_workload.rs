@@ -161,12 +161,7 @@ impl ComputeNode {
             } else {
                 TakeoverPolicy::WaitForLeaseExpiry
             };
-            let opened = KvStore::open(
-                self.dependencies.clone(),
-                self.stream,
-                store_settings(takeover),
-            )
-            .await;
+            let opened = KvStore::open(self.dependencies.clone(), self.stream, store_settings(takeover)).await;
             let Ok(store) = opened else {
                 sleep(Duration::from_millis(self.random.between(100, 1_000))).await;
                 continue;
@@ -189,11 +184,7 @@ impl ComputeNode {
     /// # Returns
     ///
     /// Whether the node was told to crash.
-    async fn serve_clients(
-        &mut self,
-        store: Arc<KvStore>,
-        crashes: &mut watch::Receiver<u64>,
-    ) -> bool {
+    async fn serve_clients(&mut self, store: Arc<KvStore>, crashes: &mut watch::Receiver<u64>) -> bool {
         let mut calls: JoinSet<bool> = JoinSet::new();
         let was_crashed = loop {
             while calls.len() < CALLS_IN_FLIGHT {
@@ -231,10 +222,7 @@ impl ComputeNode {
         let kind = self.random.between(0, 99);
         if kind < 45 {
             self.puts_made += 1;
-            let value = Bytes::from(format!(
-                "compute-{}-value-{}",
-                self.node_number, self.puts_made
-            ));
+            let value = Bytes::from(format!("compute-{}-value-{}", self.node_number, self.puts_made));
             return KvCall::Put { key, value };
         }
         if kind < 55 {
@@ -256,12 +244,7 @@ async fn next_crash(crashes: &mut watch::Receiver<u64>) {
 /// # Returns
 ///
 /// Whether the store can still be used: `false` once a call shows that it was replaced or stopped.
-async fn make_call(
-    store: Arc<KvStore>,
-    history: History,
-    call: KvCall,
-    injected_bug: InjectedBug,
-) -> bool {
+async fn make_call(store: Arc<KvStore>, history: History, call: KvCall, injected_bug: InjectedBug) -> bool {
     match &call {
         KvCall::Put { key, value } => {
             let payload = KvRecord::put(key.clone(), value.clone()).encode();
@@ -319,16 +302,11 @@ async fn make_call(
 }
 
 /// What the history is told about a write, given what the store returned.
-fn outcome_of_a_write(
-    written: &Result<SequenceNumber, KvError>,
-    injected_bug: InjectedBug,
-) -> KvOutcome {
+fn outcome_of_a_write(written: &Result<SequenceNumber, KvError>, injected_bug: InjectedBug) -> KvOutcome {
     match written {
         Ok(_sequence) => KvOutcome::Written,
         Err(KvError::NotWritten { .. }) => KvOutcome::NotWritten,
-        Err(_outcome_unknown) if injected_bug == InjectedBug::UnknownWritesReportedDone => {
-            KvOutcome::Written
-        }
+        Err(_outcome_unknown) if injected_bug == InjectedBug::UnknownWritesReportedDone => KvOutcome::Written,
         Err(_outcome_unknown) => KvOutcome::WriteUnknown,
     }
 }
@@ -345,11 +323,7 @@ fn outcome_of_a_write(
 ///
 /// The sequence number of the final record, or `None` if it could not be committed in time; the audit
 /// then tries again with a new store.
-pub(crate) async fn commit_final_record(
-    store: &KvStore,
-    history: &History,
-    attempt: u64,
-) -> Option<SequenceNumber> {
+pub(crate) async fn commit_final_record(store: &KvStore, history: &History, attempt: u64) -> Option<SequenceNumber> {
     let key = Bytes::from_static(AUDIT_KEY);
     let value = Bytes::from(format!("final-record-{attempt}"));
     let append = history.append_invoked(KvRecord::put(key.clone(), value.clone()).encode());

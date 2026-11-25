@@ -47,9 +47,7 @@ use clap::Parser;
 use crate::arguments::{Arguments, WorkloadCommand, workload_limit};
 use crate::cluster::resolve_cluster_config;
 use crate::report::{AppendReport, OutputFormat, ReadReport};
-use crate::workload::{
-    AppendWorkload, ReadWorkload, create_missing_streams, run_append_workloads, run_read_workload,
-};
+use crate::workload::{AppendWorkload, ReadWorkload, create_missing_streams, run_append_workloads, run_read_workload};
 
 mod arguments;
 mod cluster;
@@ -91,10 +89,7 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(io_error) => {
             eprintln!("bita-bench: cannot start: {io_error}");
@@ -215,9 +210,7 @@ async fn run_append(
     creates_missing_streams: bool,
     format: OutputFormat,
 ) -> Result<(String, bool), String> {
-    if creates_missing_streams
-        && let Err(workload_error) = create_missing_streams(client, workload).await
-    {
+    if creates_missing_streams && let Err(workload_error) = create_missing_streams(client, workload).await {
         return Err(workload_error.to_string());
     }
     let measured = match run_append_workloads(client, workload).await {
@@ -234,8 +227,8 @@ async fn run_append(
 
 /// Renders a report as indented JSON, ended by a newline.
 fn to_json<Report: serde::Serialize>(report: &Report) -> String {
-    let mut rendered = serde_json::to_string_pretty(report)
-        .expect("reports hold only text, numbers and maps with text keys");
+    let mut rendered =
+        serde_json::to_string_pretty(report).expect("reports hold only text, numbers and maps with text keys");
     rendered.push('\n');
     rendered
 }

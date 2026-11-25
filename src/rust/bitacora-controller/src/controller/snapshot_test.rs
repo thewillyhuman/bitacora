@@ -31,12 +31,7 @@ async fn cluster_with_a_stream() -> Cluster {
     let cluster = Cluster::start(3).await;
     cluster
         .metadata()
-        .create_stream(
-            "orders",
-            ReplicationSettings::DEFAULT,
-            RetentionPolicy::default(),
-            None,
-        )
+        .create_stream("orders", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
         .await
         .expect("the stream is created");
     cluster
@@ -59,11 +54,7 @@ fn controller_with(
 
 /// A controller with the default settings that snapshots to the cluster's object store.
 fn controller(cluster: &Cluster) -> Controller {
-    controller_with(
-        cluster,
-        ControllerSettings::default(),
-        cluster.artifact_store(),
-    )
+    controller_with(cluster, ControllerSettings::default(), cluster.artifact_store())
 }
 
 /// Runs one pass and returns how many snapshots it wrote.
@@ -78,10 +69,7 @@ async fn snapshots_written_by_a_pass(controller: &Controller) -> usize {
 /// Lets `duration` pass for the cluster.
 async fn let_pass(cluster: &Cluster, duration: Duration) {
     tokio::time::advance(duration).await;
-    cluster
-        .renew_registrations()
-        .await
-        .expect("registrations are renewed");
+    cluster.renew_registrations().await.expect("registrations are renewed");
 }
 
 /// The keys of the snapshot objects in the cluster's object store, oldest first.
@@ -115,10 +103,7 @@ async fn snapshot_is_named_after_the_time_of_its_pass() {
 
     snapshots_written_by_a_pass(&controller(&cluster)).await;
 
-    assert_eq!(
-        snapshot_keys(&cluster).await,
-        [snapshot_object_key(time_of_the_pass)]
-    );
+    assert_eq!(snapshot_keys(&cluster).await, [snapshot_object_key(time_of_the_pass)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -176,11 +161,7 @@ async fn another_snapshot_is_taken_once_the_interval_has_passed() {
     let cluster = cluster_with_a_stream().await;
     let controller = controller(&cluster);
     snapshots_written_by_a_pass(&controller).await;
-    let_pass(
-        &cluster,
-        ControllerSettings::default().metadata_snapshot_interval,
-    )
-    .await;
+    let_pass(&cluster, ControllerSettings::default().metadata_snapshot_interval).await;
 
     let written = snapshots_written_by_a_pass(&controller).await;
 
@@ -285,10 +266,7 @@ async fn pass_succeeds_without_a_snapshot_while_the_object_store_is_down() {
 
     let report = controller(&cluster).run_pass().await;
 
-    assert_eq!(
-        report.map(|report| report.metadata_snapshots_written),
-        Ok(0)
-    );
+    assert_eq!(report.map(|report| report.metadata_snapshots_written), Ok(0));
 }
 
 #[tokio::test(start_paused = true)]
@@ -310,11 +288,7 @@ async fn snapshot_whose_write_timed_out_is_taken_on_the_next_pass() {
     let cluster = cluster_with_a_stream().await;
     let controller = controller(&cluster);
     snapshots_written_by_a_pass(&controller).await;
-    let_pass(
-        &cluster,
-        ControllerSettings::default().metadata_snapshot_interval,
-    )
-    .await;
+    let_pass(&cluster, ControllerSettings::default().metadata_snapshot_interval).await;
     cluster.artifact_store().set_unresponsive(true);
     let written_during_the_outage = snapshots_written_by_a_pass(&controller).await;
     cluster.artifact_store().set_unresponsive(false);

@@ -107,18 +107,13 @@ impl ControllerMetrics {
                 "controller_leading",
                 "Whether the last round of this instance led (1) or not (0)",
             ),
-            pass_duration: registry.duration_histogram(
-                "controller_pass_duration",
-                "How long one pass over every stream took",
-            ),
+            pass_duration: registry
+                .duration_histogram("controller_pass_duration", "How long one pass over every stream took"),
             segments_missing_copies: registry.gauge(
                 "controller_segments_missing_copies",
                 "Sealed segments with fewer good copies than their stream asks for, as of the last pass",
             ),
-            standbys_placed: registry.counter(
-                "controller_standbys_placed",
-                "Standby segments placed",
-            ),
+            standbys_placed: registry.counter("controller_standbys_placed", "Standby segments placed"),
             copies_confirmed: registry.counter(
                 "controller_copies_confirmed",
                 "Copies of sealed segments confirmed complete",

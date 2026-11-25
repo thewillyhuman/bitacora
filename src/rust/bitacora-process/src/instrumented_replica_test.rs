@@ -14,9 +14,7 @@
 
 use bitacora_replica::{Replica, ReplicaSettings};
 use bitacora_segment::MemoryDisk;
-use bitacora_types::replica_api::{
-    ReadLimit, SegmentDescriptor, StaticReplicaConnector, UnreachableReplica,
-};
+use bitacora_types::replica_api::{ReadLimit, SegmentDescriptor, StaticReplicaConnector, UnreachableReplica};
 use bitacora_types::{Epoch, ReplicaId, SegmentId, SequenceNumber, StreamId};
 use bytes::Bytes;
 
@@ -78,8 +76,7 @@ async fn instrumented_real_replica() -> (Arc<Replica>, InstrumentedReplica, Metr
     .expect("a replica opens on an empty disk");
     let replica = Arc::new(replica);
     let registry = MetricsRegistry::new();
-    let instrumented =
-        InstrumentedReplica::new(Arc::clone(&replica) as Arc<dyn ReplicaApi>, &registry);
+    let instrumented = InstrumentedReplica::new(Arc::clone(&replica) as Arc<dyn ReplicaApi>, &registry);
     (replica, instrumented, registry)
 }
 
@@ -163,9 +160,7 @@ async fn every_failed_operation_is_counted_under_its_name_and_kind() {
         assert_eq!(
             exposition_value(
                 &registry,
-                &format!(
-                    "bitacora_replica_request_failures_total{{operation=\"{operation}\",error=\"unavailable\"}} "
-                )
+                &format!("bitacora_replica_request_failures_total{{operation=\"{operation}\",error=\"unavailable\"}} ")
             ),
             Some("1".to_owned()),
             "operation {operation}"
@@ -183,9 +178,7 @@ async fn every_operation_has_its_duration_observed() {
         assert_eq!(
             exposition_value(
                 &registry,
-                &format!(
-                    "bitacora_replica_request_duration_seconds_count{{operation=\"{operation}\"}} "
-                )
+                &format!("bitacora_replica_request_duration_seconds_count{{operation=\"{operation}\"}} ")
             ),
             Some("1".to_owned()),
             "operation {operation}"
@@ -233,9 +226,7 @@ async fn successful_request_counts_no_failure() {
     instrumented.status().await.expect("the replica reports");
 
     assert!(
-        !registry
-            .encode()
-            .contains("bitacora_replica_request_failures_total{"),
+        !registry.encode().contains("bitacora_replica_request_failures_total{"),
         "{}",
         registry.encode()
     );
@@ -280,12 +271,7 @@ fn every_kind_of_error_has_its_own_label_value() {
             },
             "fenced",
         ),
-        (
-            ReplicaError::Sealed {
-                sealed_end: sequence,
-            },
-            "sealed",
-        ),
+        (ReplicaError::Sealed { sealed_end: sequence }, "sealed"),
         (
             ReplicaError::OutOfOrder {
                 first_sequence: sequence,
@@ -300,24 +286,14 @@ fn every_kind_of_error_has_its_own_label_value() {
             },
             "conflicting_seal",
         ),
+        (ReplicaError::SegmentNotFound { segment: SEGMENT }, "segment_not_found"),
         (
-            ReplicaError::SegmentNotFound { segment: SEGMENT },
-            "segment_not_found",
-        ),
-        (
-            ReplicaError::InvalidRequest {
-                reason: reason.clone(),
-            },
+            ReplicaError::InvalidRequest { reason: reason.clone() },
             "invalid_request",
         ),
         (ReplicaError::NoCapacity { used_percent: 96 }, "no_capacity"),
         (ReplicaError::Draining, "draining"),
-        (
-            ReplicaError::Storage {
-                reason: reason.clone(),
-            },
-            "storage",
-        ),
+        (ReplicaError::Storage { reason: reason.clone() }, "storage"),
         (ReplicaError::Unavailable { reason }, "unavailable"),
     ];
 

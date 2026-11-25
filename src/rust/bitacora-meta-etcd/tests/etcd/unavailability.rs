@@ -66,9 +66,7 @@ async fn store_for_port(port: u16) -> EtcdKeyValueStore {
 ///
 /// Panics when the request is still waiting after
 /// [`LONGEST_ACCEPTABLE_WAIT`]: the store did not bound it.
-async fn fails_in_bounded_time<Response, Failure>(
-    request: impl Future<Output = Result<Response, Failure>>,
-) -> bool {
+async fn fails_in_bounded_time<Response, Failure>(request: impl Future<Output = Result<Response, Failure>>) -> bool {
     let answer = tokio::time::timeout(LONGEST_ACCEPTABLE_WAIT, request).await;
     answer.expect("the store bounds every request").is_err()
 }
@@ -137,9 +135,7 @@ async fn read_fails_once_etcd_is_killed() {
     };
     let etcd = EtcdProcess::start(&binary).await;
     let store = etcd.store_in("/bitacora/").await;
-    put(&store, "streams/orders", b"v1")
-        .await
-        .expect("etcd is up");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is up");
 
     drop(etcd);
 
@@ -154,9 +150,7 @@ async fn write_fails_once_etcd_is_killed() {
     };
     let etcd = EtcdProcess::start(&binary).await;
     let store = etcd.store_in("/bitacora/").await;
-    put(&store, "streams/orders", b"v1")
-        .await
-        .expect("etcd is up");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is up");
 
     drop(etcd);
 

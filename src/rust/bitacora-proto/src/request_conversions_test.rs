@@ -68,10 +68,7 @@ fn upload_request() -> domain::UploadRequest {
 fn append_request_survives_the_round_trip() {
     let message = wire::AppendRequest::from(append_request());
 
-    assert_eq!(
-        domain::AppendRequest::try_from(message),
-        Ok(append_request())
-    );
+    assert_eq!(domain::AppendRequest::try_from(message), Ok(append_request()));
 }
 
 /// The heartbeat of an idle stream is an append without batches.
@@ -105,11 +102,7 @@ fn append_request_without_a_segment_is_malformed() {
 #[test]
 fn append_request_to_a_segment_starting_at_sequence_zero_is_malformed() {
     let mut message = wire::AppendRequest::from(append_request());
-    message
-        .segment
-        .as_mut()
-        .expect("the descriptor is set")
-        .first_sequence = 0;
+    message.segment.as_mut().expect("the descriptor is set").first_sequence = 0;
 
     assert_eq!(
         domain::AppendRequest::try_from(message),
@@ -318,10 +311,7 @@ fn seal_request_without_a_segment_is_malformed() {
 fn repair_request_survives_the_round_trip() {
     let message = wire::RepairSegmentRequest::from(repair_request());
 
-    assert_eq!(
-        domain::RepairRequest::try_from(message),
-        Ok(repair_request())
-    );
+    assert_eq!(domain::RepairRequest::try_from(message), Ok(repair_request()));
 }
 
 #[test]
@@ -343,10 +333,7 @@ fn repair_request_without_a_segment_is_malformed() {
 fn upload_request_survives_the_round_trip() {
     let message = wire::UploadSegmentRequest::from(upload_request());
 
-    assert_eq!(
-        domain::UploadRequest::try_from(message),
-        Ok(upload_request())
-    );
+    assert_eq!(domain::UploadRequest::try_from(message), Ok(upload_request()));
 }
 
 #[test]

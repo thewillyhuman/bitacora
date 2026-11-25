@@ -21,9 +21,7 @@ use bitacora_artifact::{MemoryArtifactStore, ObjectInfo};
 use bitacora_segment::MemoryDisk;
 use bitacora_segment::format::{Batch, SEGMENT_HEADER_BYTES};
 use bitacora_segment::tiered::{TieredFooter, TieredIndex};
-use bitacora_types::replica_api::{
-    AppendRequest, ReplicaApi, SealRequest, SegmentDescriptor, StaticReplicaConnector,
-};
+use bitacora_types::replica_api::{AppendRequest, ReplicaApi, SealRequest, SegmentDescriptor, StaticReplicaConnector};
 use bitacora_types::{Epoch, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId};
 
 use super::*;
@@ -69,9 +67,7 @@ impl ArtifactStore for FaultyStore {
                 let mut damaged_contents = contents.to_vec();
                 let middle = damaged_contents.len() / 2;
                 damaged_contents[middle] ^= 0x01;
-                self.objects
-                    .put_object(object_key, Bytes::from(damaged_contents))
-                    .await
+                self.objects.put_object(object_key, Bytes::from(damaged_contents)).await
             }
             StoreFault::NeverAnswers => std::future::pending().await,
         }
@@ -81,11 +77,7 @@ impl ArtifactStore for FaultyStore {
         self.objects.get_object(object_key).await
     }
 
-    async fn get_range(
-        &self,
-        object_key: &str,
-        byte_range: Range<u64>,
-    ) -> Result<Bytes, ArtifactError> {
+    async fn get_range(&self, object_key: &str, byte_range: Range<u64>) -> Result<Bytes, ArtifactError> {
         self.objects.get_range(object_key, byte_range).await
     }
 
@@ -137,8 +129,7 @@ async fn append_batches(replica: &Replica) {
         for sequence in first_sequence..first_sequence + RECORDS_PER_BATCH {
             payloads.push(Bytes::from(format!("record-{sequence}")));
         }
-        let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads)
-            .expect("valid batch");
+        let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads).expect("valid batch");
         replica
             .append(AppendRequest {
                 segment: descriptor(),
@@ -188,10 +179,7 @@ fn upload_request(sealed_end: u64) -> UploadRequest {
 /// The sequence numbers of the records in the stored object, read the way a reader does: footer, index,
 /// then the blocks.
 async fn stored_sequences(artifact_store: &MemoryArtifactStore) -> Vec<u64> {
-    let object = artifact_store
-        .get_object(OBJECT_KEY)
-        .await
-        .expect("object is stored");
+    let object = artifact_store.get_object(OBJECT_KEY).await.expect("object is stored");
     let footer = TieredFooter::decode(&object).expect("valid footer");
     let index_range = footer.index_range();
     let index_bytes = artifact_store
@@ -217,8 +205,7 @@ async fn stored_sequences(artifact_store: &MemoryArtifactStore) -> Vec<u64> {
 #[tokio::test]
 async fn uploaded_object_holds_every_record_of_the_sealed_segment() {
     let artifact_store = MemoryArtifactStore::new();
-    let replica =
-        replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
+    let replica = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
 
     replica
         .upload_segment(upload_request(SEALED_END))
@@ -232,8 +219,7 @@ async fn uploaded_object_holds_every_record_of_the_sealed_segment() {
 #[tokio::test]
 async fn upload_reports_the_size_of_the_stored_object() {
     let artifact_store = MemoryArtifactStore::new();
-    let replica =
-        replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
+    let replica = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
 
     let uploaded = replica
         .upload_segment(upload_request(SEALED_END))
@@ -249,18 +235,8 @@ async fn copy_read_one_batch_at_a_time_uploads_the_same_object_as_in_one_read() 
     let store_of_small_reads = MemoryArtifactStore::new();
     let store_of_one_read = MemoryArtifactStore::new();
     // One byte per read still returns a whole batch: a read never splits one.
-    let small_reads = replica_with_sealed_copy(
-        &MemoryDisk::new(),
-        Arc::new(store_of_small_reads.clone()),
-        1,
-    )
-    .await;
-    let one_read = replica_with_sealed_copy(
-        &MemoryDisk::new(),
-        Arc::new(store_of_one_read.clone()),
-        1024 * 1024,
-    )
-    .await;
+    let small_reads = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(store_of_small_reads.clone()), 1).await;
+    let one_read = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(store_of_one_read.clone()), 1024 * 1024).await;
 
     small_reads
         .upload_segment(upload_request(SEALED_END))
@@ -280,8 +256,7 @@ async fn copy_read_one_batch_at_a_time_uploads_the_same_object_as_in_one_read() 
 #[tokio::test]
 async fn upload_can_be_repeated() {
     let artifact_store = MemoryArtifactStore::new();
-    let replica =
-        replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
+    let replica = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
     let first_upload = replica.upload_segment(upload_request(SEALED_END)).await;
 
     let second_upload = replica.upload_segment(upload_request(SEALED_END)).await;
@@ -292,8 +267,7 @@ async fn upload_can_be_repeated() {
 #[tokio::test]
 async fn upload_leaves_the_local_copy_readable() {
     let artifact_store = MemoryArtifactStore::new();
-    let replica =
-        replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
+    let replica = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
 
     replica
         .upload_segment(upload_request(SEALED_END))
@@ -324,10 +298,7 @@ async fn segment_the_replica_does_not_hold_is_not_found() {
 
     let refused = replica.upload_segment(upload_request(SEALED_END)).await;
 
-    assert_eq!(
-        refused,
-        Err(ReplicaError::SegmentNotFound { segment: SEGMENT })
-    );
+    assert_eq!(refused, Err(ReplicaError::SegmentNotFound { segment: SEGMENT }));
 }
 
 #[tokio::test]
@@ -347,8 +318,7 @@ async fn open_segment_is_not_uploaded() {
 #[tokio::test]
 async fn copy_sealed_at_another_end_than_requested_is_not_uploaded() {
     let artifact_store = MemoryArtifactStore::new();
-    let replica =
-        replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
+    let replica = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
 
     let refused = replica.upload_segment(upload_request(SEALED_END - 1)).await;
 
@@ -367,9 +337,7 @@ async fn copy_that_stops_short_of_its_sealed_end_is_not_uploaded() {
     let end_beyond_the_copy = SEALED_END + RECORDS_PER_BATCH;
     seal_at(&replica, end_beyond_the_copy).await;
 
-    let refused = replica
-        .upload_segment(upload_request(end_beyond_the_copy))
-        .await;
+    let refused = replica.upload_segment(upload_request(end_beyond_the_copy)).await;
 
     assert!(matches!(refused, Err(ReplicaError::Storage { .. })));
     assert_eq!(artifact_store.list_prefix("").await, Ok(Vec::new()));
@@ -392,8 +360,7 @@ async fn damaged_copy_is_not_uploaded() {
 #[tokio::test]
 async fn object_store_outage_fails_the_upload_as_unavailable() {
     let artifact_store = MemoryArtifactStore::new();
-    let replica =
-        replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
+    let replica = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
     artifact_store.set_unavailable(true);
 
     let failed = replica.upload_segment(upload_request(SEALED_END)).await;
@@ -404,8 +371,7 @@ async fn object_store_outage_fails_the_upload_as_unavailable() {
 #[tokio::test]
 async fn upload_succeeds_once_the_object_store_is_back() {
     let artifact_store = MemoryArtifactStore::new();
-    let replica =
-        replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
+    let replica = replica_with_sealed_copy(&MemoryDisk::new(), Arc::new(artifact_store.clone()), 1024).await;
     artifact_store.set_unavailable(true);
     let _failed = replica.upload_segment(upload_request(SEALED_END)).await;
     artifact_store.set_unavailable(false);
@@ -440,8 +406,5 @@ async fn object_store_that_never_answers_fails_the_upload_after_its_timeout() {
     let failed = replica.upload_segment(upload_request(SEALED_END)).await;
 
     assert!(matches!(failed, Err(ReplicaError::Unavailable { .. })));
-    assert_eq!(
-        asked_at.elapsed(),
-        ReplicaSettings::default().object_store_timeout
-    );
+    assert_eq!(asked_at.elapsed(), ReplicaSettings::default().object_store_timeout);
 }

@@ -247,10 +247,7 @@ async fn damaged_snapshot_is_not_restored() {
 
     let failed = restore(&started.cluster, &object_key, false, false).await;
 
-    assert!(matches!(
-        failed,
-        Err(CommandError::UnreadableSnapshot { .. })
-    ));
+    assert!(matches!(failed, Err(CommandError::UnreadableSnapshot { .. })));
     assert_eq!(started.metadata_key_count().await, 0);
 }
 

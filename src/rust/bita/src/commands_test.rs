@@ -18,10 +18,7 @@ use super::*;
 use crate::commands::testing::{STREAM, TestCluster};
 
 /// Runs a command that takes nothing from standard input.
-async fn run_command(
-    started: &TestCluster,
-    command: Command,
-) -> Result<CommandOutput, CommandError> {
+async fn run_command(started: &TestCluster, command: Command) -> Result<CommandOutput, CommandError> {
     run(&command, &started.cluster, Vec::new()).await
 }
 
@@ -91,9 +88,7 @@ async fn stream_append_command_appends_standard_input_before_its_arguments() {
         .await
         .expect("runs");
 
-    let found = stream::read(&started.cluster, STREAM, None, 10)
-        .await
-        .expect("reads");
+    let found = stream::read(&started.cluster, STREAM, None, 10).await.expect("reads");
     assert_eq!(found.records[0].payload_text, "from-input");
     assert_eq!(found.records[1].payload_text, "from-argument");
 }
@@ -165,10 +160,7 @@ fn acknowledgement_is_one_line() {
         message: "stream orders deleted".to_owned(),
     });
 
-    assert_eq!(
-        output.render(OutputFormat::Table),
-        "stream orders deleted\n"
-    );
+    assert_eq!(output.render(OutputFormat::Table), "stream orders deleted\n");
 }
 
 #[test]
@@ -187,8 +179,7 @@ fn json_is_the_result_itself_without_a_wrapper() {
 fn json_of_a_stream_uses_the_field_names_of_the_summary() {
     let output = CommandOutput::StreamSummary(orders_summary());
 
-    let rendered: serde_json::Value =
-        serde_json::from_str(&output.render(OutputFormat::Json)).expect("valid JSON");
+    let rendered: serde_json::Value = serde_json::from_str(&output.render(OutputFormat::Json)).expect("valid JSON");
 
     assert_eq!(
         rendered,
@@ -644,15 +635,11 @@ fn rebuild_plan_without_problems_says_how_to_apply_it() {
 
 #[test]
 fn rebuild_plan_with_problems_lists_them_and_asks_for_force() {
-    let output =
-        CommandOutput::RebuildReport(rebuild_report(false, vec!["a segment is lost".to_owned()]));
+    let output = CommandOutput::RebuildReport(rebuild_report(false, vec!["a segment is lost".to_owned()]));
 
     let rendered = output.render(OutputFormat::Table);
 
-    assert!(
-        rendered.contains("problems:\n  - a segment is lost\n"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("problems:\n  - a segment is lost\n"), "{rendered}");
     assert!(
         rendered.ends_with(
             "dry run: nothing was written. The plan has problems; fix them, or pass --apply \
@@ -668,14 +655,9 @@ fn applied_rebuild_says_what_happens_next() {
 
     let rendered = output.render(OutputFormat::Table);
 
+    assert!(rendered.contains("stream 7 \"orders\": written\n"), "{rendered}");
     assert!(
-        rendered.contains("stream 7 \"orders\": written\n"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.ends_with(
-            "applied. Start the controllers: they verify every copy and rebuild missing ones.\n"
-        ),
+        rendered.ends_with("applied. Start the controllers: they verify every copy and rebuild missing ones.\n"),
         "{rendered}"
     );
 }

@@ -224,9 +224,7 @@ impl StoreDirectories {
 
         let store_number = NEXT_STORE_NUMBER.fetch_add(1, Ordering::Relaxed);
         let own_scratch_name = format!("{}-{store_number}", std::process::id());
-        let own_scratch_directory = shared_scratch_directory
-            .canonicalize()?
-            .join(own_scratch_name);
+        let own_scratch_directory = shared_scratch_directory.canonicalize()?.join(own_scratch_name);
         // A directory of this name can only be left over from an earlier process that had the same
         // process id: no store that runs now has this name.
         remove_if_present(&own_scratch_directory)?;
@@ -300,22 +298,15 @@ impl StoreDirectories {
     ///   it starts.
     /// * [`RangeReadError::Io`] with the file system's error otherwise; its kind is `NotFound` if no
     ///   object has this key.
-    fn read_object_range(
-        &self,
-        object_key: &str,
-        byte_range: &Range<u64>,
-    ) -> Result<Bytes, RangeReadError> {
+    fn read_object_range(&self, object_key: &str, byte_range: &Range<u64>) -> Result<Bytes, RangeReadError> {
         let mut object_file = File::open(self.object_path(object_key))?;
         let size_bytes = object_file.metadata()?.len();
-        let is_inside_the_object =
-            byte_range.start <= byte_range.end && byte_range.end <= size_bytes;
+        let is_inside_the_object = byte_range.start <= byte_range.end && byte_range.end <= size_bytes;
         if !is_inside_the_object {
             return Err(RangeReadError::OutOfBounds { size_bytes });
         }
         let Ok(range_bytes) = usize::try_from(byte_range.end - byte_range.start) else {
-            return Err(RangeReadError::Io(io::Error::other(
-                "range does not fit in memory",
-            )));
+            return Err(RangeReadError::Io(io::Error::other("range does not fit in memory")));
         };
         let mut range_contents = vec![0; range_bytes];
         object_file.seek(SeekFrom::Start(byte_range.start))?;
@@ -352,12 +343,7 @@ impl StoreDirectories {
         let mut listed = Vec::new();
         let mut directories_to_walk = vec![first_directory];
         while let Some(directory) = directories_to_walk.pop() {
-            self.list_directory(
-                &directory,
-                key_prefix,
-                &mut listed,
-                &mut directories_to_walk,
-            )?;
+            self.list_directory(&directory, key_prefix, &mut listed, &mut directories_to_walk)?;
         }
         listed.sort_by(|left, right| left.object_key.cmp(&right.object_key));
         Ok(listed)
@@ -512,10 +498,7 @@ fn remove_stale_scratch(shared_scratch_directory: &Path, stale_age: Duration) {
 
 /// The error for a file below the objects directory whose path cannot be turned into an object key.
 fn not_an_object_key(object_path: &Path) -> io::Error {
-    io::Error::other(format!(
-        "{} is not a valid object key",
-        object_path.display()
-    ))
+    io::Error::other(format!("{} is not a valid object key", object_path.display()))
 }
 
 /// Why a range could not be read from an object's file.
@@ -586,11 +569,7 @@ fn not_found_or_unavailable(object_key: &str, io_error: &io::Error) -> ArtifactE
 }
 
 /// The error for a failed range read of `object_key`, with the range that was asked for.
-fn range_read_failed(
-    object_key: &str,
-    byte_range: &Range<u64>,
-    range_read_error: &RangeReadError,
-) -> ArtifactError {
+fn range_read_failed(object_key: &str, byte_range: &Range<u64>, range_read_error: &RangeReadError) -> ArtifactError {
     match range_read_error {
         RangeReadError::OutOfBounds { size_bytes } => ArtifactError::RangeOutOfBounds {
             object_key: object_key.to_owned(),
@@ -624,20 +603,13 @@ impl ArtifactStore for LocalArtifactStore {
     }
 
     /// Seeks into the object's file and reads only the range, so a large object is never read whole.
-    async fn get_range(
-        &self,
-        object_key: &str,
-        byte_range: Range<u64>,
-    ) -> Result<Bytes, ArtifactError> {
+    async fn get_range(&self, object_key: &str, byte_range: Range<u64>) -> Result<Bytes, ArtifactError> {
         validate_key(object_key)?;
         let directories = Arc::clone(&self.directories);
         let owned_key = object_key.to_owned();
         let requested_range = byte_range.clone();
-        let read =
-            run_blocking(move || directories.read_object_range(&owned_key, &requested_range)).await;
-        read.map_err(|range_read_error| {
-            range_read_failed(object_key, &byte_range, &range_read_error)
-        })
+        let read = run_blocking(move || directories.read_object_range(&owned_key, &requested_range)).await;
+        read.map_err(|range_read_error| range_read_failed(object_key, &byte_range, &range_read_error))
     }
 
     /// Removes the object's file. Directories that become empty are left in place.

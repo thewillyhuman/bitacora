@@ -194,10 +194,7 @@ mod tests {
             schema_version: RECORD_SCHEMA_VERSION,
             replica_id: ReplicaId::new(name).expect("valid identifier"),
             address: format!("{name}:7000"),
-            failure_domains: failure_domains
-                .iter()
-                .map(|domain| (*domain).to_owned())
-                .collect(),
+            failure_domains: failure_domains.iter().map(|domain| (*domain).to_owned()).collect(),
             capacity_bytes: 1_000,
             free_bytes: 900,
             is_draining: false,
@@ -205,10 +202,7 @@ mod tests {
         }
     }
 
-    fn choose(
-        replicas: &[ReplicaRecord],
-        replica_count: usize,
-    ) -> Result<Vec<String>, PlacementError> {
+    fn choose(replicas: &[ReplicaRecord], replica_count: usize) -> Result<Vec<String>, PlacementError> {
         choose_replica_set(
             replicas,
             replica_count,
@@ -231,10 +225,7 @@ mod tests {
             replica("b1", &["zone-b", "host-b1"]),
             replica("c1", &["zone-c", "host-c1"]),
         ];
-        assert_eq!(
-            choose(&replicas, 3),
-            Ok(vec!["a1".into(), "b1".into(), "c1".into()])
-        );
+        assert_eq!(choose(&replicas, 3), Ok(vec!["a1".into(), "b1".into(), "c1".into()]));
     }
 
     #[test]
@@ -301,10 +292,7 @@ mod tests {
     #[test]
     fn unlabelled_replicas_each_count_as_their_own_domain() {
         let replicas = [replica("r1", &[]), replica("r2", &[]), replica("r3", &[])];
-        assert_eq!(
-            choose(&replicas, 3),
-            Ok(vec!["r1".into(), "r2".into(), "r3".into()])
-        );
+        assert_eq!(choose(&replicas, 3), Ok(vec!["r1".into(), "r2".into(), "r3".into()]));
     }
 
     #[test]
@@ -331,10 +319,7 @@ mod tests {
         let replicas = [dead, replica("r2", &[])];
         assert_eq!(
             choose(&replicas, 2),
-            Err(PlacementError::NotEnoughReplicas {
-                needed: 2,
-                eligible: 1,
-            })
+            Err(PlacementError::NotEnoughReplicas { needed: 2, eligible: 1 })
         );
     }
 
@@ -359,10 +344,7 @@ mod tests {
         let replicas = [replica("r1", &[]), replica("r2", &[])];
         let excluded = BTreeSet::from([ReplicaId::new("r1").expect("valid identifier")]);
         let chosen = choose_replica_set(&replicas, 1, NOW, PlacementPolicy::default(), &excluded);
-        assert_eq!(
-            chosen,
-            Ok(vec![ReplicaId::new("r2").expect("valid identifier")])
-        );
+        assert_eq!(chosen, Ok(vec![ReplicaId::new("r2").expect("valid identifier")]));
     }
 
     fn additional(replicas: &[ReplicaRecord], kept: &[&str]) -> Result<String, PlacementError> {
@@ -421,10 +403,7 @@ mod tests {
         let replicas = [replica("r1", &[]), replica("r2", &[]), dead];
         assert_eq!(
             additional(&replicas, &["r1", "r2"]),
-            Err(PlacementError::NotEnoughReplicas {
-                needed: 1,
-                eligible: 0,
-            })
+            Err(PlacementError::NotEnoughReplicas { needed: 1, eligible: 0 })
         );
     }
 
@@ -432,10 +411,7 @@ mod tests {
     fn empty_registry_cannot_place_anything() {
         assert_eq!(
             choose(&[], 3),
-            Err(PlacementError::NotEnoughReplicas {
-                needed: 3,
-                eligible: 0,
-            })
+            Err(PlacementError::NotEnoughReplicas { needed: 3, eligible: 0 })
         );
     }
 }

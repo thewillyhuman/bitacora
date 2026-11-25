@@ -15,10 +15,7 @@ const PROTOCOL_FILES: [&str; 1] = ["bitacora/v1/replica.proto"];
 fn main() -> Result<(), Box<dyn Error>> {
     let protocol_root = protocol_root()?;
     for protocol_file in PROTOCOL_FILES {
-        println!(
-            "cargo:rerun-if-changed={}",
-            protocol_root.join(protocol_file).display()
-        );
+        println!("cargo:rerun-if-changed={}", protocol_root.join(protocol_file).display());
     }
     let file_descriptors = protox::compile(PROTOCOL_FILES, [&protocol_root])?;
     tonic_prost_build::configure()

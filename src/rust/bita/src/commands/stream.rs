@@ -44,9 +44,7 @@ use serde::Serialize;
 
 use super::{Acknowledgement, CommandError};
 use crate::cluster::Cluster;
-use crate::output::{
-    OutputFormat, Table, format_payload, format_timestamp, hex_of, key_value_lines,
-};
+use crate::output::{OutputFormat, Table, format_payload, format_timestamp, hex_of, key_value_lines};
 
 /// The name the tool's writers record with their lease.
 const WRITER_IDENTITY: &str = "bita";
@@ -79,10 +77,7 @@ impl StreamSummary {
             name: stream.name.clone(),
             stream_id: stream.stream_id.get(),
             epoch: stream.epoch.get(),
-            writer: stream
-                .writer
-                .as_ref()
-                .map(|lease| lease.writer_identity.clone()),
+            writer: stream.writer.as_ref().map(|lease| lease.writer_identity.clone()),
             replicas: stream.replication.replica_count(),
             write_quorum: stream.replication.write_quorum(),
             segments: stream.segments.len(),
@@ -113,15 +108,7 @@ impl StreamSummary {
 
 /// An empty table with the columns of a stream summary.
 fn stream_table() -> Table {
-    Table::new(&[
-        "NAME",
-        "ID",
-        "EPOCH",
-        "WRITER",
-        "REPLICATION",
-        "SEGMENTS",
-        "LOW-WATER",
-    ])
+    Table::new(&["NAME", "ID", "EPOCH", "WRITER", "REPLICATION", "SEGMENTS", "LOW-WATER"])
 }
 
 /// Every stream, in brief.
@@ -236,15 +223,9 @@ impl StreamDetails {
     pub(crate) fn render_text(&self) -> String {
         let writer = match &self.writer {
             Some(writer) if writer.is_lease_current => {
-                format!(
-                    "{} (lease until {})",
-                    writer.identity, writer.lease_expires_at
-                )
+                format!("{} (lease until {})", writer.identity, writer.lease_expires_at)
             }
-            Some(writer) => format!(
-                "{} (lease lapsed at {})",
-                writer.identity, writer.lease_expires_at
-            ),
+            Some(writer) => format!("{} (lease lapsed at {})", writer.identity, writer.lease_expires_at),
             None => "-".to_owned(),
         };
         let retention = match self.keep_sealed_for_seconds {
@@ -266,10 +247,7 @@ impl StreamDetails {
             ("writer", writer),
             (
                 "replication",
-                format!(
-                    "{} replicas, write quorum {}",
-                    self.replicas, self.write_quorum
-                ),
+                format!("{} replicas, write quorum {}", self.replicas, self.write_quorum),
             ),
             ("retention", retention),
             ("low-water mark", self.low_water_mark.to_string()),
@@ -350,10 +328,7 @@ impl ReadRecords {
     pub(crate) fn render_text(&self) -> String {
         let mut table = Table::new(&["SEQUENCE", "PAYLOAD"]);
         for record in &self.records {
-            table.push_row(vec![
-                record.sequence.to_string(),
-                record.payload_text.clone(),
-            ]);
+            table.push_row(vec![record.sequence.to_string(), record.payload_text.clone()]);
         }
         table.render()
     }
@@ -386,10 +361,7 @@ pub(crate) async fn create(
         Some(duration) => RetentionPolicy::keep_for(duration),
         None => RetentionPolicy::default(),
     };
-    let options = StreamOptions {
-        replication,
-        retention,
-    };
+    let options = StreamOptions { replication, retention };
     let admin = cluster.client(WRITER_IDENTITY).admin();
     let created = admin.create_stream(name, options).await?;
     Ok(StreamSummary::of(&created))
@@ -443,10 +415,7 @@ pub(crate) async fn describe(cluster: &Cluster, name: &str) -> Result<StreamDeta
         writer,
         replicas: stream.replication.replica_count(),
         write_quorum: stream.replication.write_quorum(),
-        keep_sealed_for_seconds: stream
-            .retention
-            .keep_sealed_for()
-            .map(|duration| duration.as_secs()),
+        keep_sealed_for_seconds: stream.retention.keep_sealed_for().map(|duration| duration.as_secs()),
         low_water_mark: stream.low_water_mark.get(),
         truncate_before: stream.truncate_before.map(SequenceNumber::get),
         segments: stream.segments.len(),
@@ -468,11 +437,7 @@ pub(crate) async fn describe(cluster: &Cluster, name: &str) -> Result<StreamDeta
 ///
 /// * [`CommandError::Refused`] without the confirmation.
 /// * [`CommandError::Metadata`] if no stream has this name or the metadata store is unavailable.
-pub(crate) async fn delete(
-    cluster: &Cluster,
-    name: &str,
-    is_confirmed: bool,
-) -> Result<Acknowledgement, CommandError> {
+pub(crate) async fn delete(cluster: &Cluster, name: &str, is_confirmed: bool) -> Result<Acknowledgement, CommandError> {
     if !is_confirmed {
         return Err(CommandError::Refused {
             reason: format!(
@@ -499,9 +464,7 @@ pub(crate) async fn truncate_before(
     sequence: u64,
 ) -> Result<Acknowledgement, CommandError> {
     let admin = cluster.client(WRITER_IDENTITY).admin();
-    admin
-        .truncate_before(name, SequenceNumber::new(sequence))
-        .await?;
+    admin.truncate_before(name, SequenceNumber::new(sequence)).await?;
     Ok(Acknowledgement {
         message: format!(
             "stream {name} may be truncated before sequence {sequence}; \
@@ -574,10 +537,7 @@ pub(crate) async fn append(
             reason: "no records to append: give them as arguments or on standard input".to_owned(),
         });
     }
-    let writer = cluster
-        .client(WRITER_IDENTITY)
-        .open_writer(name, policy)
-        .await?;
+    let writer = cluster.client(WRITER_IDENTITY).open_writer(name, policy).await?;
     let epoch = writer.epoch().get();
     let appended = writer.append_batch(payloads).await;
     // Step down whatever happened, so that the next writer does not have to wait for this lease.
@@ -622,9 +582,7 @@ pub(crate) async fn read(
         None => reader.low_water_mark().await?,
     };
     if count == 0 {
-        return Ok(ReadRecords {
-            records: Vec::new(),
-        });
+        return Ok(ReadRecords { records: Vec::new() });
     }
     let last = SequenceNumber::new(first.get().saturating_add(count - 1));
     let found = reader.read_range(SequenceRange::new(first, last)?).await?;
@@ -680,9 +638,7 @@ pub(crate) async fn tail(
         let record = RecordLine::of(&next?);
         let line = match format {
             OutputFormat::Table => format!("{}  {}", record.sequence, record.payload_text),
-            OutputFormat::Json => {
-                serde_json::to_string(&record).expect("a record line holds a number and two texts")
-            }
+            OutputFormat::Json => serde_json::to_string(&record).expect("a record line holds a number and two texts"),
         };
         let written = writeln!(output, "{line}").and_then(|()| output.flush());
         if let Err(io_error) = written {

@@ -12,8 +12,8 @@ use bitacora_segment::format::{Batch, SegmentHeader, decode_frames};
 use bitacora_segment::{Disk, SegmentError, SegmentFile, SegmentState};
 use bitacora_types::replica_api::SegmentDescriptor;
 use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceResponse, ReadLimit, ReadRequest, ReadResponse,
-    RepairRequest, RepairResponse, ReplicaApi, ReplicaError, SealResponse, SegmentStatus,
+    AppendRequest, AppendResponse, FenceResponse, ReadLimit, ReadRequest, ReadResponse, RepairRequest, RepairResponse,
+    ReplicaApi, ReplicaError, SealResponse, SegmentStatus,
 };
 use bitacora_types::{Epoch, SegmentAddress, SequenceNumber};
 use bytes::Bytes;
@@ -156,11 +156,7 @@ pub(crate) struct SegmentCopy {
 
 impl SegmentCopy {
     /// A copy the replica has nothing on disk for yet.
-    pub(crate) fn absent(
-        address: SegmentAddress,
-        disk: Arc<dyn Disk>,
-        preallocated_bytes: u64,
-    ) -> Self {
+    pub(crate) fn absent(address: SegmentAddress, disk: Arc<dyn Disk>, preallocated_bytes: u64) -> Self {
         Self {
             address,
             disk,
@@ -177,11 +173,7 @@ impl SegmentCopy {
     /// Loads a copy from disk, as after a restart. A copy whose files cannot
     /// be read or verified is loaded as damaged, so that it is reported and
     /// replaced instead of silently forgotten.
-    pub(crate) async fn load(
-        address: SegmentAddress,
-        disk: Arc<dyn Disk>,
-        preallocated_bytes: u64,
-    ) -> Self {
+    pub(crate) async fn load(address: SegmentAddress, disk: Arc<dyn Disk>, preallocated_bytes: u64) -> Self {
         let mut copy = Self::absent(address, Arc::clone(&disk), preallocated_bytes);
 
         match disk.read_file(&segment_state_path(address)).await {
@@ -196,22 +188,14 @@ impl SegmentCopy {
             Err(io_error) => copy.damage = Some(io_error.to_string()),
         }
 
-        match SegmentFile::open(
-            disk.as_ref(),
-            &segment_file_path(address),
-            address,
-            preallocated_bytes,
-        )
-        .await
-        {
+        match SegmentFile::open(disk.as_ref(), &segment_file_path(address), address, preallocated_bytes).await {
             Ok((file, _scan_stop)) => {
                 // Without a sidecar the copy was never fenced or sealed, so
                 // the lowest epoch it accepts is the one that created it.
                 copy.state.fenced_epoch = copy.state.fenced_epoch.max(file.header().epoch);
                 copy.file = Some(file);
             }
-            Err(SegmentError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(SegmentError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(segment_error) => copy.damage = Some(segment_error.to_string()),
         }
         copy
@@ -241,9 +225,7 @@ impl SegmentCopy {
     ) -> Result<AppendResponse, ReplicaError> {
         self.fail_if_damaged()?;
         if request.writer_epoch < request.segment.epoch {
-            return Err(invalid_request(
-                "writer epoch is older than the segment's own epoch",
-            ));
+            return Err(invalid_request("writer epoch is older than the segment's own epoch"));
         }
         let fenced_epoch = self.state.fenced_epoch.max(self.file_epoch());
         if request.writer_epoch < fenced_epoch {
@@ -257,12 +239,8 @@ impl SegmentCopy {
         }
         if let Some(file) = &self.file {
             let header = file.header();
-            if header.epoch != request.segment.epoch
-                || header.first_sequence != request.segment.first_sequence
-            {
-                return Err(invalid_request(
-                    "segment descriptor does not match the replica's copy",
-                ));
+            if header.epoch != request.segment.epoch || header.first_sequence != request.segment.first_sequence {
+                return Err(invalid_request("segment descriptor does not match the replica's copy"));
             }
         }
         let batches = decode_frames(self.address, &request.batch_frames)
@@ -277,8 +255,7 @@ impl SegmentCopy {
                     local_end,
                 });
             }
-            self.store_batches(request.segment, new_batches, admission)
-                .await?;
+            self.store_batches(request.segment, new_batches, admission).await?;
         }
 
         if new_batches.is_empty() {
@@ -315,10 +292,7 @@ impl SegmentCopy {
     }
 
     /// Records the sealed end and discards every record above it.
-    pub(crate) async fn seal(
-        &mut self,
-        sealed_end: SequenceNumber,
-    ) -> Result<SealResponse, ReplicaError> {
+    pub(crate) async fn seal(&mut self, sealed_end: SequenceNumber) -> Result<SealResponse, ReplicaError> {
         self.fail_if_damaged()?;
         match self.state.sealed_end {
             Some(existing_sealed_end) if existing_sealed_end != sealed_end => {
@@ -366,15 +340,10 @@ impl SegmentCopy {
     }
 
     /// Reads batches for a reader or a recovering writer.
-    pub(crate) async fn read(
-        &mut self,
-        request: &ReadRequest,
-    ) -> Result<ReadResponse, ReplicaError> {
+    pub(crate) async fn read(&mut self, request: &ReadRequest) -> Result<ReadResponse, ReplicaError> {
         self.fail_if_damaged()?;
         let Some(file) = &self.file else {
-            return Err(ReplicaError::SegmentNotFound {
-                segment: self.address,
-            });
+            return Err(ReplicaError::SegmentNotFound { segment: self.address });
         };
         let readable_end = match (self.state.sealed_end, request.limit) {
             (Some(sealed_end), _) => file.local_end().min(sealed_end),
@@ -438,11 +407,9 @@ impl SegmentCopy {
             });
         }
         if self.can_be_completed_to(request) {
-            self.complete_in_place(request, source, admission, pace)
-                .await?;
+            self.complete_in_place(request, source, admission, pace).await?;
         } else {
-            self.replace_with_a_new_copy(request, source, admission, pace)
-                .await?;
+            self.replace_with_a_new_copy(request, source, admission, pace).await?;
         }
         self.store_state(SegmentState {
             fenced_epoch: self.state.fenced_epoch.max(request.segment.epoch),
@@ -473,8 +440,7 @@ impl SegmentCopy {
         while self.local_end_or(empty_end) < request.sealed_end {
             let local_end = self.local_end_or(empty_end);
             let fetched = fetch_batches_after(source, request, local_end, pace).await?;
-            self.store_batches(request.segment, &fetched.batches, admission)
-                .await?;
+            self.store_batches(request.segment, &fetched.batches, admission).await?;
             // Hold back so that repair cannot starve appends of the disk
             // and the network (design, section 10).
             tokio::time::sleep(pace.pause_after(fetched.frame_bytes)).await;
@@ -500,9 +466,7 @@ impl SegmentCopy {
             });
         }
         let scratch_path = segment_repair_path(self.address);
-        let built = self
-            .build_new_copy(&scratch_path, request, source, pace)
-            .await;
+        let built = self.build_new_copy(&scratch_path, request, source, pace).await;
         if let Err(replica_error) = built {
             // Best effort: a leftover is removed when the replica starts.
             drop(self.disk.remove_file(&scratch_path).await);
@@ -515,13 +479,7 @@ impl SegmentCopy {
         if let Err(io_error) = self.disk.rename_file(&scratch_path, &final_path).await {
             return Err(self.failed_write_of_the_new_copy("move it into place", &io_error));
         }
-        let opened = SegmentFile::open(
-            self.disk.as_ref(),
-            &final_path,
-            self.address,
-            self.preallocated_bytes,
-        )
-        .await;
+        let opened = SegmentFile::open(self.disk.as_ref(), &final_path, self.address, self.preallocated_bytes).await;
         match opened {
             Ok((file, _scan_stop)) => {
                 self.file = Some(file);
@@ -553,13 +511,7 @@ impl SegmentCopy {
             epoch: request.segment.epoch,
             first_sequence: request.segment.first_sequence,
         };
-        let created = SegmentFile::create(
-            self.disk.as_ref(),
-            scratch_path,
-            header,
-            self.preallocated_bytes,
-        )
-        .await;
+        let created = SegmentFile::create(self.disk.as_ref(), scratch_path, header, self.preallocated_bytes).await;
         let mut new_copy = match created {
             Ok(new_copy) => new_copy,
             Err(segment_error) => {
@@ -586,11 +538,7 @@ impl SegmentCopy {
     /// Records that the disk refused a write while a new copy was being
     /// built, and returns the error to answer with. The process must stop,
     /// as after any refused write; the old copy was not written to.
-    fn failed_write_of_the_new_copy(
-        &mut self,
-        step: &str,
-        cause: &dyn std::fmt::Display,
-    ) -> ReplicaError {
+    fn failed_write_of_the_new_copy(&mut self, step: &str, cause: &dyn std::fmt::Display) -> ReplicaError {
         let reason = format!("cannot rebuild the copy: failed to {step}: {cause}");
         tracing::error!(segment = %self.address, %reason, "the disk refused a write");
         self.has_failed_write = true;
@@ -695,19 +643,16 @@ impl SegmentCopy {
     /// one segment there is only one possible record at each sequence number
     /// (design, section 4, rule 1), so they can be acknowledged again without
     /// comparing content.
-    fn batches_after(
-        batches: &[Batch],
-        local_end: SequenceNumber,
-    ) -> Result<&[Batch], ReplicaError> {
+    fn batches_after(batches: &[Batch], local_end: SequenceNumber) -> Result<&[Batch], ReplicaError> {
         let already_stored = batches
             .iter()
             .take_while(|batch| batch.last_sequence() <= local_end)
             .count();
         let new_batches = &batches[already_stored..];
         match new_batches.first() {
-            Some(straddling_batch) if straddling_batch.first_sequence() <= local_end => Err(
-                invalid_request("batch boundaries do not match the replica's copy"),
-            ),
+            Some(straddling_batch) if straddling_batch.first_sequence() <= local_end => {
+                Err(invalid_request("batch boundaries do not match the replica's copy"))
+            }
             _ => Ok(new_batches),
         }
     }
@@ -788,23 +733,17 @@ impl SegmentCopy {
     }
 
     fn local_end_or(&self, end_of_an_empty_copy: SequenceNumber) -> SequenceNumber {
-        self.file
-            .as_ref()
-            .map_or(end_of_an_empty_copy, SegmentFile::local_end)
+        self.file.as_ref().map_or(end_of_an_empty_copy, SegmentFile::local_end)
     }
 
     /// The epoch that created the data file, which nothing older may write.
     fn file_epoch(&self) -> Epoch {
-        self.file
-            .as_ref()
-            .map_or(Epoch::ZERO, |file| file.header().epoch)
+        self.file.as_ref().map_or(Epoch::ZERO, |file| file.header().epoch)
     }
 
     fn fail_if_damaged(&self) -> Result<(), ReplicaError> {
         match &self.damage {
-            Some(reason) => Err(ReplicaError::Storage {
-                reason: reason.clone(),
-            }),
+            Some(reason) => Err(ReplicaError::Storage { reason: reason.clone() }),
             None => Ok(()),
         }
     }
@@ -862,8 +801,7 @@ mod tests {
             let payloads: Vec<Bytes> = (*first_sequence..first_sequence + record_count)
                 .map(|sequence| Bytes::from(format!("record-{sequence}")))
                 .collect();
-            let batch = Batch::encode(SEGMENT, SequenceNumber::new(*first_sequence), &payloads)
-                .expect("valid batch");
+            let batch = Batch::encode(SEGMENT, SequenceNumber::new(*first_sequence), &payloads).expect("valid batch");
             batch_frames.extend_from_slice(batch.frame());
         }
         batch_frames.freeze()
@@ -906,10 +844,7 @@ mod tests {
     }
 
     async fn readable_sequences(copy: &mut SegmentCopy, limit: ReadLimit) -> Vec<u64> {
-        let response = copy
-            .read(&read_request(FIRST_SEQUENCE, limit))
-            .await
-            .expect("read");
+        let response = copy.read(&read_request(FIRST_SEQUENCE, limit)).await.expect("read");
         decode_frames(SEGMENT, &response.batch_frames)
             .expect("valid frames")
             .iter()
@@ -923,9 +858,7 @@ mod tests {
     #[tokio::test]
     async fn append_acknowledges_the_new_local_end() {
         let disk = MemoryDisk::new();
-        let response = new_copy(&disk)
-            .append(&append_request(&[(100, 5)], 0), ROOMY)
-            .await;
+        let response = new_copy(&disk).append(&append_request(&[(100, 5)], 0), ROOMY).await;
         assert_eq!(
             response,
             Ok(AppendResponse {
@@ -939,10 +872,7 @@ mod tests {
         let disk = MemoryDisk::new();
         copy_with_records(&disk).await;
         disk.crash();
-        assert_eq!(
-            reload(&disk).await.status().local_end,
-            Some(SequenceNumber::new(109))
-        );
+        assert_eq!(reload(&disk).await.status().local_end, Some(SequenceNumber::new(109)));
     }
 
     #[tokio::test]
@@ -962,9 +892,7 @@ mod tests {
     #[tokio::test]
     async fn first_append_not_starting_at_the_segment_start_is_refused() {
         let disk = MemoryDisk::new();
-        let refused = new_copy(&disk)
-            .append(&append_request(&[(105, 5)], 0), ROOMY)
-            .await;
+        let refused = new_copy(&disk).append(&append_request(&[(105, 5)], 0), ROOMY).await;
         assert_eq!(
             refused,
             Err(ReplicaError::OutOfOrder {
@@ -986,9 +914,7 @@ mod tests {
     async fn resent_batches_are_acknowledged_again() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        let response = copy
-            .append(&append_request(&[(100, 5), (105, 5)], 0), ROOMY)
-            .await;
+        let response = copy.append(&append_request(&[(100, 5), (105, 5)], 0), ROOMY).await;
         assert_eq!(
             response,
             Ok(AppendResponse {
@@ -1056,9 +982,7 @@ mod tests {
     async fn nearly_full_disk_still_appends_to_an_existing_segment() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        let response = copy
-            .append(&append_request(&[(110, 1)], 0), NEARLY_FULL)
-            .await;
+        let response = copy.append(&append_request(&[(110, 1)], 0), NEARLY_FULL).await;
         assert!(response.is_ok());
     }
 
@@ -1089,9 +1013,7 @@ mod tests {
     async fn first_append_whose_flush_fails_leaves_a_valid_empty_copy() {
         let disk = MemoryDisk::new();
         disk.fail_flushes(true);
-        let failed = new_copy(&disk)
-            .append(&append_request(&[(100, 5)], 0), ROOMY)
-            .await;
+        let failed = new_copy(&disk).append(&append_request(&[(100, 5)], 0), ROOMY).await;
         disk.crash();
         disk.fail_flushes(false);
         let status = reload(&disk).await.status();
@@ -1120,10 +1042,7 @@ mod tests {
             bytes_per_second: 1_000_000,
             request_timeout: Duration::from_secs(1),
         };
-        assert_eq!(
-            one_megabyte_per_second.pause_after(250_000),
-            Duration::from_millis(250)
-        );
+        assert_eq!(one_megabyte_per_second.pause_after(250_000), Duration::from_millis(250));
     }
 
     // ---- fencing ----
@@ -1168,16 +1087,9 @@ mod tests {
     #[tokio::test]
     async fn fence_survives_a_crash() {
         let disk = MemoryDisk::new();
-        copy_with_records(&disk)
-            .await
-            .fence(NEXT_EPOCH)
-            .await
-            .expect("fence");
+        copy_with_records(&disk).await.fence(NEXT_EPOCH).await.expect("fence");
         disk.crash();
-        let refused = reload(&disk)
-            .await
-            .append(&append_request(&[(110, 1)], 0), ROOMY)
-            .await;
+        let refused = reload(&disk).await.append(&append_request(&[(110, 1)], 0), ROOMY).await;
         assert!(matches!(refused, Err(ReplicaError::Fenced { .. })));
     }
 
@@ -1234,10 +1146,7 @@ mod tests {
         let disk = MemoryDisk::new();
         new_copy(&disk).fence(NEXT_EPOCH).await.expect("fence");
         disk.crash();
-        let refused = reload(&disk)
-            .await
-            .append(&append_request(&[(100, 5)], 0), ROOMY)
-            .await;
+        let refused = reload(&disk).await.append(&append_request(&[(100, 5)], 0), ROOMY).await;
         assert!(matches!(refused, Err(ReplicaError::Fenced { .. })));
     }
 
@@ -1291,10 +1200,7 @@ mod tests {
         let status = reload(&disk).await.status();
         assert_eq!(
             (status.sealed_end, status.local_end),
-            (
-                Some(SequenceNumber::new(104)),
-                Some(SequenceNumber::new(104))
-            )
+            (Some(SequenceNumber::new(104)), Some(SequenceNumber::new(104)))
         );
     }
 
@@ -1330,10 +1236,7 @@ mod tests {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
         let refused = copy.seal(SequenceNumber::new(106)).await;
-        assert!(
-            matches!(refused, Err(ReplicaError::InvalidRequest { .. }))
-                && copy.status().sealed_end.is_none()
-        );
+        assert!(matches!(refused, Err(ReplicaError::InvalidRequest { .. })) && copy.status().sealed_end.is_none());
     }
 
     #[tokio::test]
@@ -1366,10 +1269,7 @@ mod tests {
             .durable_content(&segment_file_path(SEGMENT))
             .expect("file exists")
             .len();
-        assert_eq!(
-            u64::try_from(file_bytes).expect("small"),
-            copy.status().size_bytes
-        );
+        assert_eq!(u64::try_from(file_bytes).expect("small"), copy.status().size_bytes);
     }
 
     // ---- reads ----
@@ -1388,9 +1288,7 @@ mod tests {
     async fn heartbeat_advances_what_readers_see() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 109), ROOMY)
-            .await
-            .expect("heartbeat");
+        copy.append(&append_request(&[], 109), ROOMY).await.expect("heartbeat");
         assert_eq!(copy.readable_end(), Some(SequenceNumber::new(109)));
     }
 
@@ -1398,9 +1296,7 @@ mod tests {
     async fn durable_sequence_never_moves_backwards() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 100), ROOMY)
-            .await
-            .expect("heartbeat");
+        copy.append(&append_request(&[], 100), ROOMY).await.expect("heartbeat");
         assert_eq!(copy.readable_end(), Some(SequenceNumber::new(104)));
     }
 
@@ -1408,9 +1304,7 @@ mod tests {
     async fn durable_sequence_beyond_the_copy_is_capped_at_its_end() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 500), ROOMY)
-            .await
-            .expect("heartbeat");
+        copy.append(&append_request(&[], 500), ROOMY).await.expect("heartbeat");
         assert_eq!(copy.readable_end(), Some(SequenceNumber::new(109)));
     }
 
@@ -1494,8 +1388,7 @@ mod tests {
         let mut copy = new_copy(&disk);
         copy.fence(NEXT_EPOCH).await.expect("fence");
         assert_eq!(
-            copy.read(&read_request(100, ReadLimit::DurableSequence))
-                .await,
+            copy.read(&read_request(100, ReadLimit::DurableSequence)).await,
             Err(ReplicaError::SegmentNotFound { segment: SEGMENT })
         );
     }
@@ -1554,11 +1447,7 @@ mod tests {
     #[tokio::test]
     async fn copy_with_an_unreadable_state_loads_as_damaged() {
         let disk = MemoryDisk::new();
-        copy_with_records(&disk)
-            .await
-            .fence(NEXT_EPOCH)
-            .await
-            .expect("fence");
+        copy_with_records(&disk).await.fence(NEXT_EPOCH).await.expect("fence");
         disk.corrupt_byte(&segment_state_path(SEGMENT), 15, 0x01);
         assert!(reload(&disk).await.status().is_damaged);
     }
@@ -1570,19 +1459,14 @@ mod tests {
     async fn copy_whose_flushed_records_were_damaged_loads_as_damaged() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 109), ROOMY)
-            .await
-            .expect("heartbeat");
+        copy.append(&append_request(&[], 109), ROOMY).await.expect("heartbeat");
         let inside_the_first_batch = bitacora_segment::format::SEGMENT_HEADER_BYTES + 30;
         disk.corrupt_byte(&segment_file_path(SEGMENT), inside_the_first_batch, 0x01);
         disk.crash();
         let mut reloaded = reload(&disk).await;
         assert!(
             reloaded.status().is_damaged
-                && matches!(
-                    reloaded.fence(NEXT_EPOCH).await,
-                    Err(ReplicaError::Storage { .. })
-                )
+                && matches!(reloaded.fence(NEXT_EPOCH).await, Err(ReplicaError::Storage { .. }))
         );
     }
 
@@ -1590,9 +1474,7 @@ mod tests {
     async fn heartbeat_to_a_copy_whose_mark_is_current_flushes_nothing() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 109), ROOMY)
-            .await
-            .expect("heartbeat");
+        copy.append(&append_request(&[], 109), ROOMY).await.expect("heartbeat");
         disk.fail_flushes(true);
         let second_heartbeat = copy.append(&append_request(&[], 109), ROOMY).await;
         assert!(second_heartbeat.is_ok());

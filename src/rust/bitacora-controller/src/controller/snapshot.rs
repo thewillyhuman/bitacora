@@ -74,9 +74,8 @@ impl Controller {
                 }
             },
         };
-        let is_due = newest_snapshot_at.is_none_or(|newest| {
-            now.duration_since(newest) >= self.settings.metadata_snapshot_interval
-        });
+        let is_due = newest_snapshot_at
+            .is_none_or(|newest| now.duration_since(newest) >= self.settings.metadata_snapshot_interval);
         if !is_due {
             self.remember_newest_snapshot(newest_snapshot_at);
             return;
@@ -113,14 +112,9 @@ impl Controller {
     /// # Errors
     ///
     /// Returns why the object store could not be listed.
-    async fn find_newest_snapshot(
-        &self,
-        artifact_store: &dyn ArtifactStore,
-    ) -> Result<Option<Timestamp>, String> {
+    async fn find_newest_snapshot(&self, artifact_store: &dyn ArtifactStore) -> Result<Option<Timestamp>, String> {
         let snapshot_times = self.list_snapshot_times(artifact_store).await?;
-        Ok(snapshot_times
-            .last()
-            .map(|(_object_key, taken_at)| *taken_at))
+        Ok(snapshot_times.last().map(|(_object_key, taken_at)| *taken_at))
     }
 
     /// Lists the snapshot objects with the time each was taken, oldest first. Objects under the snapshot
@@ -157,11 +151,7 @@ impl Controller {
     /// # Errors
     ///
     /// Returns why the metadata store could not be read or the object could not be stored.
-    async fn write_snapshot(
-        &self,
-        artifact_store: &dyn ArtifactStore,
-        now: Timestamp,
-    ) -> Result<(), String> {
+    async fn write_snapshot(&self, artifact_store: &dyn ArtifactStore, now: Timestamp) -> Result<(), String> {
         let snapshot = match self.metadata.snapshot(now).await {
             Ok(snapshot) => snapshot,
             Err(meta_error) => return Err(meta_error.to_string()),
@@ -197,11 +187,7 @@ impl Controller {
         let kept_count = self.settings.metadata_snapshots_kept.max(1);
         let outdated_count = snapshot_times.len().saturating_sub(kept_count);
         for (object_key, _taken_at) in &snapshot_times[..outdated_count] {
-            let deleted = timeout(
-                self.settings.request_timeout,
-                artifact_store.delete_object(object_key),
-            )
-            .await;
+            let deleted = timeout(self.settings.request_timeout, artifact_store.delete_object(object_key)).await;
             match deleted {
                 Ok(Ok(())) => tracing::debug!(%object_key, "deleted an old metadata snapshot"),
                 Ok(Err(artifact_error)) => {

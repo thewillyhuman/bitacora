@@ -105,10 +105,7 @@ impl ReplicaList {
                 replica.replica_id.clone(),
                 replica.address.clone(),
                 yes_or_no(replica.is_alive),
-                format!(
-                    "{} ago",
-                    format_age(Duration::from_secs(replica.heartbeat_age_seconds))
-                ),
+                format!("{} ago", format_age(Duration::from_secs(replica.heartbeat_age_seconds))),
                 format!("{}%", replica.used_percent),
                 format_bytes(replica.capacity_bytes),
                 yes_or_no(replica.is_draining),
@@ -244,10 +241,7 @@ pub(crate) async fn list(cluster: &Cluster) -> Result<ReplicaList, CommandError>
 ///
 /// * [`CommandError::UnknownReplica`] if no replica with this identifier is registered.
 /// * [`CommandError::Replica`] or [`CommandError::ReplicaTimedOut`] if the replica does not answer.
-pub(crate) async fn status(
-    cluster: &Cluster,
-    replica_id: &ReplicaId,
-) -> Result<ReplicaReport, CommandError> {
+pub(crate) async fn status(cluster: &Cluster, replica_id: &ReplicaId) -> Result<ReplicaReport, CommandError> {
     let registration = registered_replica(cluster, replica_id).await?;
     let client = cluster
         .connector
@@ -332,10 +326,7 @@ pub(crate) async fn drain(
 }
 
 /// Looks at every stream and collects what still names `replica_id`.
-async fn drain_progress(
-    cluster: &Cluster,
-    replica_id: &ReplicaId,
-) -> Result<DrainReport, CommandError> {
+async fn drain_progress(cluster: &Cluster, replica_id: &ReplicaId) -> Result<DrainReport, CommandError> {
     let streams = cluster.metadata.list_streams().await?;
     let mut open_segments = Vec::new();
     let mut standby_streams = Vec::new();
@@ -406,17 +397,12 @@ pub(crate) async fn remove(
     }
     cluster.metadata.remove_replica(replica_id).await?;
     Ok(Acknowledgement {
-        message: format!(
-            "replica {replica_id} removed from the registry; the controller re-creates its copies"
-        ),
+        message: format!("replica {replica_id} removed from the registry; the controller re-creates its copies"),
     })
 }
 
 /// Looks a replica up in the registry.
-async fn registered_replica(
-    cluster: &Cluster,
-    replica_id: &ReplicaId,
-) -> Result<ReplicaRecord, CommandError> {
+async fn registered_replica(cluster: &Cluster, replica_id: &ReplicaId) -> Result<ReplicaRecord, CommandError> {
     let registered_replicas = cluster.metadata.list_replicas().await?;
     for replica in registered_replicas {
         if &replica.replica_id == replica_id {

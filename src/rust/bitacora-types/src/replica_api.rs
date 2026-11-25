@@ -379,14 +379,8 @@ impl StaticReplicaConnector {
 
     /// Makes `replica`, whose identity is `replica_id`, reachable at
     /// `address`, replacing any previous one.
-    pub fn register(
-        &mut self,
-        replica_id: ReplicaId,
-        address: impl Into<String>,
-        replica: Arc<dyn ReplicaApi>,
-    ) {
-        self.replicas_by_address
-            .insert(address.into(), (replica_id, replica));
+    pub fn register(&mut self, replica_id: ReplicaId, address: impl Into<String>, replica: Arc<dyn ReplicaApi>) {
+        self.replicas_by_address.insert(address.into(), (replica_id, replica));
     }
 }
 
@@ -397,9 +391,7 @@ impl ReplicaConnector for StaticReplicaConnector {
             Some((registered_id, _replica)) => Arc::new(UnreachableReplica::new(format!(
                 "{address} is replica {registered_id}, not {replica_id}"
             ))),
-            None => Arc::new(UnreachableReplica::new(format!(
-                "no replica is reachable at {address}"
-            ))),
+            None => Arc::new(UnreachableReplica::new(format!("no replica is reachable at {address}"))),
         }
     }
 }
@@ -416,9 +408,7 @@ impl UnreachableReplica {
     /// Creates a handle whose every request fails with `reason`.
     #[must_use]
     pub fn new(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
+        Self { reason: reason.into() }
     }
 
     fn unavailable<Response>(&self) -> Result<Response, ReplicaError> {
@@ -446,17 +436,11 @@ impl ReplicaApi for UnreachableReplica {
         self.unavailable()
     }
 
-    async fn repair_segment(
-        &self,
-        _request: RepairRequest,
-    ) -> Result<RepairResponse, ReplicaError> {
+    async fn repair_segment(&self, _request: RepairRequest) -> Result<RepairResponse, ReplicaError> {
         self.unavailable()
     }
 
-    async fn upload_segment(
-        &self,
-        _request: UploadRequest,
-    ) -> Result<UploadResponse, ReplicaError> {
+    async fn upload_segment(&self, _request: UploadRequest) -> Result<UploadResponse, ReplicaError> {
         self.unavailable()
     }
 

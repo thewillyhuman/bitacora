@@ -63,8 +63,8 @@ use std::time::Duration;
 use bitacora_artifact::ArtifactStore;
 use bitacora_meta::{KeyValueStore, MetadataStore};
 use bitacora_process::{
-    InstrumentedArtifactStore, InstrumentedDisk, InstrumentedKeyValueStore, InstrumentedReplica,
-    MetricsRegistry, Readiness, ShutdownSignal, serve_observability,
+    InstrumentedArtifactStore, InstrumentedDisk, InstrumentedKeyValueStore, InstrumentedReplica, MetricsRegistry,
+    Readiness, ShutdownSignal, serve_observability,
 };
 use bitacora_proto::{ServeError, serve_replica};
 use bitacora_replica::{Replica, WriteFailureHandler};
@@ -179,9 +179,7 @@ enum StopReason {
 /// Returns [`DaemonError::CannotStart`] if the data directory cannot be created or opened, the etcd
 /// settings can never work, or the object store cannot be opened. An etcd that is merely down is not
 /// an error: the daemon starts and registers when etcd is back.
-pub(crate) async fn open_environment(
-    settings: &ReplicaDaemonSettings,
-) -> Result<Environment, DaemonError> {
+pub(crate) async fn open_environment(settings: &ReplicaDaemonSettings) -> Result<Environment, DaemonError> {
     let data_directory = settings.data_directory.display();
     let disk = match LocalDisk::open(settings.data_directory.clone()).await {
         Ok(disk) => disk,
@@ -195,19 +193,13 @@ pub(crate) async fn open_environment(
     let key_value_store = match bitacora::connect_key_value_store(&settings.cluster).await {
         Ok(key_value_store) => key_value_store,
         Err(connect_error) => {
-            return Err(DaemonError::cannot_start(
-                "use the metadata store",
-                &connect_error,
-            ));
+            return Err(DaemonError::cannot_start("use the metadata store", &connect_error));
         }
     };
     let object_store = match bitacora::open_object_store(&settings.cluster.object_store).await {
         Ok(object_store) => object_store,
         Err(connect_error) => {
-            return Err(DaemonError::cannot_start(
-                "open the object store",
-                &connect_error,
-            ));
+            return Err(DaemonError::cannot_start("open the object store", &connect_error));
         }
     };
     Ok(Environment {
@@ -229,9 +221,7 @@ pub(crate) async fn open_environment(
 ///
 /// Returns [`DaemonError::CannotStart`] if an address cannot be bound, for example because another
 /// process listens on it.
-pub(crate) async fn bind_listeners(
-    settings: &ReplicaDaemonSettings,
-) -> Result<Listeners, DaemonError> {
+pub(crate) async fn bind_listeners(settings: &ReplicaDaemonSettings) -> Result<Listeners, DaemonError> {
     let grpc = match TcpListener::bind(settings.listen_address).await {
         Ok(listener) => listener,
         Err(io_error) => {
@@ -250,10 +240,7 @@ pub(crate) async fn bind_listeners(
             ));
         }
     };
-    Ok(Listeners {
-        grpc,
-        observability,
-    })
+    Ok(Listeners { grpc, observability })
 }
 
 /// A server task and the way to ask it to stop.
@@ -447,10 +434,7 @@ async fn open_replica(
         }
     };
     if let Some(object_store) = parts.object_store {
-        replica = replica.with_artifact_store(Arc::new(InstrumentedArtifactStore::new(
-            object_store,
-            metrics_registry,
-        )));
+        replica = replica.with_artifact_store(Arc::new(InstrumentedArtifactStore::new(object_store, metrics_registry)));
     }
     if replica.replica_id() != &settings.proposed_replica_id {
         tracing::info!(

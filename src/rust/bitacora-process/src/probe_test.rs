@@ -39,20 +39,14 @@ async fn loopback_listener() -> (TcpListener, String) {
 
 #[test]
 fn status_is_taken_from_the_status_line() {
-    let answer = parse_answer(
-        ADDRESS,
-        b"HTTP/1.1 503 Service Unavailable\r\n\r\nnot ready\n",
-    );
+    let answer = parse_answer(ADDRESS, b"HTTP/1.1 503 Service Unavailable\r\n\r\nnot ready\n");
 
     assert_eq!(answer.map(|answer| answer.status), Ok(503));
 }
 
 #[test]
 fn body_is_what_follows_the_headers() {
-    let answer = parse_answer(
-        ADDRESS,
-        b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nready\n",
-    );
+    let answer = parse_answer(ADDRESS, b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nready\n");
 
     assert_eq!(answer.map(|answer| answer.body), Ok("ready\n".to_owned()));
 }
@@ -68,40 +62,28 @@ fn answer_without_a_body_has_an_empty_body() {
 fn answer_without_an_end_of_headers_is_not_http() {
     let answer = parse_answer(ADDRESS, b"HTTP/1.1 200 OK\r\n");
 
-    assert!(
-        matches!(answer, Err(ProbeError::NotHttp { .. })),
-        "{answer:?}"
-    );
+    assert!(matches!(answer, Err(ProbeError::NotHttp { .. })), "{answer:?}");
 }
 
 #[test]
 fn answer_that_starts_with_something_else_is_not_http() {
     let answer = parse_answer(ADDRESS, b"SSH-2.0-OpenSSH\r\n\r\n");
 
-    assert!(
-        matches!(answer, Err(ProbeError::NotHttp { .. })),
-        "{answer:?}"
-    );
+    assert!(matches!(answer, Err(ProbeError::NotHttp { .. })), "{answer:?}");
 }
 
 #[test]
 fn status_that_is_not_a_number_is_not_http() {
     let answer = parse_answer(ADDRESS, b"HTTP/1.1 fine OK\r\n\r\n");
 
-    assert!(
-        matches!(answer, Err(ProbeError::NotHttp { .. })),
-        "{answer:?}"
-    );
+    assert!(matches!(answer, Err(ProbeError::NotHttp { .. })), "{answer:?}");
 }
 
 #[test]
 fn empty_answer_is_not_http() {
     let answer = parse_answer(ADDRESS, b"");
 
-    assert!(
-        matches!(answer, Err(ProbeError::NotHttp { .. })),
-        "{answer:?}"
-    );
+    assert!(matches!(answer, Err(ProbeError::NotHttp { .. })), "{answer:?}");
 }
 
 #[tokio::test]
@@ -111,10 +93,7 @@ async fn port_nobody_listens_on_is_unreachable() {
 
     let answer = http_get(&address, "/readyz", Duration::from_secs(5)).await;
 
-    assert!(
-        matches!(answer, Err(ProbeError::Unreachable { .. })),
-        "{answer:?}"
-    );
+    assert!(matches!(answer, Err(ProbeError::Unreachable { .. })), "{answer:?}");
 }
 
 #[tokio::test]
@@ -142,10 +121,7 @@ async fn server_that_does_not_speak_http_is_reported_as_such() {
         // Take the request off the socket first: closing a connection with unread data resets it, and
         // the client would see a broken connection instead of the greeting.
         let mut request = [0_u8; 1024];
-        let _request_bytes = connection
-            .read(&mut request)
-            .await
-            .expect("the request arrives");
+        let _request_bytes = connection.read(&mut request).await.expect("the request arrives");
         connection
             .write_all(b"hello, I am not a web server\n")
             .await
@@ -155,8 +131,5 @@ async fn server_that_does_not_speak_http_is_reported_as_such() {
     let answer = http_get(&address, "/readyz", Duration::from_secs(5)).await;
 
     not_an_http_server.await.expect("the server task finishes");
-    assert!(
-        matches!(answer, Err(ProbeError::NotHttp { .. })),
-        "{answer:?}"
-    );
+    assert!(matches!(answer, Err(ProbeError::NotHttp { .. })), "{answer:?}");
 }

@@ -19,15 +19,10 @@ use super::*;
 const OBJECT_KEY: &str = "streams/7/segments/3";
 
 /// An in-memory store, the same store instrumented, and the registry it records in.
-fn instrumented_memory_store() -> (
-    MemoryArtifactStore,
-    InstrumentedArtifactStore,
-    MetricsRegistry,
-) {
+fn instrumented_memory_store() -> (MemoryArtifactStore, InstrumentedArtifactStore, MetricsRegistry) {
     let registry = MetricsRegistry::new();
     let memory_store = MemoryArtifactStore::new();
-    let instrumented_store =
-        InstrumentedArtifactStore::new(Arc::new(memory_store.clone()), &registry);
+    let instrumented_store = InstrumentedArtifactStore::new(Arc::new(memory_store.clone()), &registry);
     (memory_store, instrumented_store, registry)
 }
 
@@ -109,10 +104,7 @@ async fn listing_through_the_decorator_returns_what_the_wrapped_store_holds() {
 
     let listed_through_the_decorator = instrumented_store.list_prefix("streams/").await;
 
-    assert_eq!(
-        listed_through_the_decorator,
-        memory_store.list_prefix("streams/").await
-    );
+    assert_eq!(listed_through_the_decorator, memory_store.list_prefix("streams/").await);
 }
 
 #[tokio::test(start_paused = true)]
@@ -148,10 +140,7 @@ async fn delete_is_counted_under_its_name() {
 
     let _deleted = instrumented_store.delete_object(OBJECT_KEY).await;
 
-    assert_eq!(
-        requests_of(&registry, "delete_object"),
-        Some("1".to_owned())
-    );
+    assert_eq!(requests_of(&registry, "delete_object"), Some("1".to_owned()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -273,12 +262,7 @@ fn every_kind_of_error_has_its_own_label_value() {
             "range_out_of_bounds",
         ),
         (ArtifactError::InvalidKey { object_key }, "invalid_key"),
-        (
-            ArtifactError::Unavailable {
-                reason: String::new(),
-            },
-            "unavailable",
-        ),
+        (ArtifactError::Unavailable { reason: String::new() }, "unavailable"),
     ];
 
     for (error, expected_kind) in &errors_and_kinds {

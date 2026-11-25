@@ -29,9 +29,7 @@ use bitacora_types::{Epoch, ReplicaId, ReplicationSettings, SequenceRange};
 
 use super::*;
 use crate::ControllerSettings;
-use crate::tests::{
-    STREAM, checkpoint_at, client, cluster_with_segments, held_segments, listed_segments, stream,
-};
+use crate::tests::{STREAM, checkpoint_at, client, cluster_with_segments, held_segments, listed_segments, stream};
 
 /// The moment the pure tests are evaluated at.
 const NOW: Timestamp = Timestamp::from_unix_millis(100_000_000);
@@ -48,8 +46,7 @@ fn copy(name: &str, state: CopyState) -> CopyRecord {
 
 /// A segment holding records 10 to 19, sealed `sealed_for` before [`NOW`], with three good copies.
 fn sealed_segment(sealed_for: Duration) -> SegmentRecord {
-    let sealed_at_millis =
-        NOW.unix_millis() - u64::try_from(sealed_for.as_millis()).expect("small");
+    let sealed_at_millis = NOW.unix_millis() - u64::try_from(sealed_for.as_millis()).expect("small");
     SegmentRecord {
         segment_id: SegmentId::new(2),
         epoch: Epoch::new(1),
@@ -98,12 +95,7 @@ fn object_key_names_the_stream_and_pads_the_segment() {
 fn segment_sealed_for_the_delay_with_three_good_copies_is_ready() {
     let segment = sealed_segment(DELAY);
 
-    assert!(is_ready_to_tier(
-        &stream_with_mark_at(1),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(is_ready_to_tier(&stream_with_mark_at(1), &segment, NOW, DELAY));
 }
 
 #[test]
@@ -111,12 +103,7 @@ fn segment_sealed_more_recently_than_the_delay_is_not_ready() {
     let one_second_short_of_the_delay = Duration::from_secs(DELAY.as_secs() - 1);
     let segment = sealed_segment(one_second_short_of_the_delay);
 
-    assert!(!is_ready_to_tier(
-        &stream_with_mark_at(1),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(!is_ready_to_tier(&stream_with_mark_at(1), &segment, NOW, DELAY));
 }
 
 #[test]
@@ -124,12 +111,7 @@ fn open_segment_is_not_ready() {
     let mut segment = sealed_segment(DELAY);
     segment.sealed = None;
 
-    assert!(!is_ready_to_tier(
-        &stream_with_mark_at(1),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(!is_ready_to_tier(&stream_with_mark_at(1), &segment, NOW, DELAY));
 }
 
 #[test]
@@ -137,12 +119,7 @@ fn segment_with_an_unverified_copy_is_not_ready() {
     let mut segment = sealed_segment(DELAY);
     segment.copies[1].state = CopyState::Unverified;
 
-    assert!(!is_ready_to_tier(
-        &stream_with_mark_at(1),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(!is_ready_to_tier(&stream_with_mark_at(1), &segment, NOW, DELAY));
 }
 
 #[test]
@@ -150,12 +127,7 @@ fn segment_with_a_bad_copy_is_not_ready() {
     let mut segment = sealed_segment(DELAY);
     segment.copies[2].state = CopyState::Bad;
 
-    assert!(!is_ready_to_tier(
-        &stream_with_mark_at(1),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(!is_ready_to_tier(&stream_with_mark_at(1), &segment, NOW, DELAY));
 }
 
 #[test]
@@ -168,12 +140,7 @@ fn segment_already_in_the_object_store_is_not_ready() {
         are_local_copies_dropped: false,
     });
 
-    assert!(!is_ready_to_tier(
-        &stream_with_mark_at(1),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(!is_ready_to_tier(&stream_with_mark_at(1), &segment, NOW, DELAY));
 }
 
 #[test]
@@ -184,36 +151,21 @@ fn segment_sealed_empty_is_not_ready() {
         at: Timestamp::from_unix_millis(0),
     });
 
-    assert!(!is_ready_to_tier(
-        &stream_with_mark_at(1),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(!is_ready_to_tier(&stream_with_mark_at(1), &segment, NOW, DELAY));
 }
 
 #[test]
 fn segment_below_the_low_water_mark_is_not_ready() {
     let segment = sealed_segment(DELAY);
 
-    assert!(!is_ready_to_tier(
-        &stream_with_mark_at(20),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(!is_ready_to_tier(&stream_with_mark_at(20), &segment, NOW, DELAY));
 }
 
 #[test]
 fn segment_that_the_low_water_mark_has_entered_is_still_ready() {
     let segment = sealed_segment(DELAY);
 
-    assert!(is_ready_to_tier(
-        &stream_with_mark_at(15),
-        &segment,
-        NOW,
-        DELAY
-    ));
+    assert!(is_ready_to_tier(&stream_with_mark_at(15), &segment, NOW, DELAY));
 }
 
 /// A controller that tiers to `artifact_store`.
@@ -233,23 +185,16 @@ fn controller_with(
 
 /// Runs one pass of a controller that tiers to the cluster's object store with the default settings.
 async fn run_tiering_pass(cluster: &Cluster) -> PassReport {
-    controller_with(
-        cluster,
-        ControllerSettings::default(),
-        cluster.artifact_store(),
-    )
-    .run_pass()
-    .await
-    .expect("the pass runs")
+    controller_with(cluster, ControllerSettings::default(), cluster.artifact_store())
+        .run_pass()
+        .await
+        .expect("the pass runs")
 }
 
 /// Lets `duration` pass for the cluster.
 async fn let_pass(cluster: &Cluster, duration: Duration) {
     tokio::time::advance(duration).await;
-    cluster
-        .renew_registrations()
-        .await
-        .expect("registrations are renewed");
+    cluster.renew_registrations().await.expect("registrations are renewed");
 }
 
 /// A cluster with `sealed_segment_count` sealed segments that have been sealed for the tiering delay.
@@ -331,10 +276,7 @@ async fn segments_sealed_for_the_tiering_delay_are_uploaded() {
     assert_eq!(report.segments_tiered, 2);
     assert_eq!(
         stored_object_keys(&cluster).await,
-        [
-            object_key_of(&cluster, 1).await,
-            object_key_of(&cluster, 2).await
-        ]
+        [object_key_of(&cluster, 1).await, object_key_of(&cluster, 2).await]
     );
 }
 
@@ -388,10 +330,7 @@ async fn controller_without_an_object_store_uploads_nothing() {
         ControllerSettings::default(),
     );
 
-    let report = controller_without_object_store
-        .run_pass()
-        .await
-        .expect("the pass runs");
+    let report = controller_without_object_store.run_pass().await.expect("the pass runs");
 
     assert_eq!(report.segments_tiered, 0);
     assert_eq!(stored_object_keys(&cluster).await, Vec::<String>::new());
@@ -498,14 +437,8 @@ async fn local_copies_stay_during_the_hot_read_window() {
 
     let held_by_the_first_node = held_segments(&cluster, 0).await;
     assert_eq!(report.segments_released, 0);
-    assert!(
-        held_by_the_first_node.contains(&1),
-        "{held_by_the_first_node:?}"
-    );
-    assert!(
-        held_by_the_first_node.contains(&2),
-        "{held_by_the_first_node:?}"
-    );
+    assert!(held_by_the_first_node.contains(&1), "{held_by_the_first_node:?}");
+    assert!(held_by_the_first_node.contains(&2), "{held_by_the_first_node:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -517,14 +450,8 @@ async fn local_copies_are_removed_after_the_hot_read_window() {
 
     let held_by_the_first_node = held_segments(&cluster, 0).await;
     assert_eq!(report.segments_released, 2);
-    assert!(
-        !held_by_the_first_node.contains(&1),
-        "{held_by_the_first_node:?}"
-    );
-    assert!(
-        !held_by_the_first_node.contains(&2),
-        "{held_by_the_first_node:?}"
-    );
+    assert!(!held_by_the_first_node.contains(&1), "{held_by_the_first_node:?}");
+    assert!(!held_by_the_first_node.contains(&2), "{held_by_the_first_node:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -549,10 +476,7 @@ async fn released_segment_is_read_from_the_object_store() {
     let_pass(&cluster, ControllerSettings::default().hot_read_window).await;
     run_tiering_pass(&cluster).await;
 
-    let records = reader(&cluster)
-        .read_range(range(1, 2))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(1, 2)).await.expect("reads");
 
     assert_eq!(records.len(), 2);
 }
@@ -571,14 +495,8 @@ async fn local_copies_are_kept_when_the_object_has_gone_missing() {
 
     let held_by_the_first_node = held_segments(&cluster, 0).await;
     assert_eq!(report.segments_released, 1);
-    assert!(
-        held_by_the_first_node.contains(&1),
-        "{held_by_the_first_node:?}"
-    );
-    assert!(
-        !held_by_the_first_node.contains(&2),
-        "{held_by_the_first_node:?}"
-    );
+    assert!(held_by_the_first_node.contains(&1), "{held_by_the_first_node:?}");
+    assert!(!held_by_the_first_node.contains(&2), "{held_by_the_first_node:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -640,19 +558,12 @@ async fn truncated_segment_that_awaits_deletion_is_no_longer_readable() {
 #[tokio::test(start_paused = true)]
 async fn deleted_stream_leaves_nothing_in_the_object_store() {
     let cluster = cluster_with_tiered_segments().await;
-    cluster
-        .metadata()
-        .delete_stream(STREAM)
-        .await
-        .expect("deleted");
+    cluster.metadata().delete_stream(STREAM).await.expect("deleted");
 
     run_tiering_pass(&cluster).await;
 
     assert_eq!(stored_object_keys(&cluster).await, Vec::<String>::new());
-    assert_eq!(
-        cluster.metadata().list_deleted_streams().await,
-        Ok(Vec::new())
-    );
+    assert_eq!(cluster.metadata().list_deleted_streams().await, Ok(Vec::new()));
 }
 
 /// What a stream's materializers wrote is garbage once the stream is gone: its checkpoints are deleted
@@ -669,18 +580,11 @@ async fn deleted_stream_leaves_no_materializer_artifacts_in_the_object_store() {
         )
         .await
         .expect("the artifact is stored");
-    cluster
-        .metadata()
-        .delete_stream(STREAM)
-        .await
-        .expect("deleted");
+    cluster.metadata().delete_stream(STREAM).await.expect("deleted");
 
     run_tiering_pass(&cluster).await;
 
-    assert_eq!(
-        materializer_object_keys(&cluster).await,
-        Vec::<String>::new()
-    );
+    assert_eq!(materializer_object_keys(&cluster).await, Vec::<String>::new());
 }
 
 #[tokio::test(start_paused = true)]
@@ -691,43 +595,25 @@ async fn artifacts_of_other_streams_survive_the_deletion_of_a_stream() {
         format!("materializers/{another_stream_id}/pages/00000000000000000001/0000000001-layer");
     cluster
         .artifact_store()
-        .put_object(
-            &artifact_of_another_stream,
-            bytes::Bytes::from_static(b"a layer file"),
-        )
+        .put_object(&artifact_of_another_stream, bytes::Bytes::from_static(b"a layer file"))
         .await
         .expect("the artifact is stored");
-    cluster
-        .metadata()
-        .delete_stream(STREAM)
-        .await
-        .expect("deleted");
+    cluster.metadata().delete_stream(STREAM).await.expect("deleted");
 
     run_tiering_pass(&cluster).await;
 
-    assert_eq!(
-        materializer_object_keys(&cluster).await,
-        [artifact_of_another_stream]
-    );
+    assert_eq!(materializer_object_keys(&cluster).await, [artifact_of_another_stream]);
 }
 
 #[tokio::test(start_paused = true)]
 async fn deleted_stream_is_remembered_while_the_object_store_is_down() {
     let cluster = cluster_with_tiered_segments().await;
-    cluster
-        .metadata()
-        .delete_stream(STREAM)
-        .await
-        .expect("deleted");
+    cluster.metadata().delete_stream(STREAM).await.expect("deleted");
     cluster.artifact_store().set_unavailable(true);
 
     run_tiering_pass(&cluster).await;
 
-    let remembered_streams = cluster
-        .metadata()
-        .list_deleted_streams()
-        .await
-        .expect("lists");
+    let remembered_streams = cluster.metadata().list_deleted_streams().await.expect("lists");
     assert_eq!(remembered_streams.len(), 1);
 }
 
@@ -741,15 +627,9 @@ async fn records_survive_the_loss_of_every_replica_disk() {
         node.lose_disk();
         node.restart().await;
     }
-    cluster
-        .renew_registrations()
-        .await
-        .expect("registrations are renewed");
+    cluster.renew_registrations().await.expect("registrations are renewed");
 
-    let records = reader(&cluster)
-        .read_range(range(1, 2))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(1, 2)).await.expect("reads");
 
     assert_eq!(records.len(), 2);
 }

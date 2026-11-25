@@ -147,9 +147,7 @@ impl Materializer for Recorder {
         let mut snapshot = BytesMut::new();
         snapshot.put_u64_le(self.record_count);
         snapshot.put_u32_le(self.payload_checksum);
-        let snapshot_key = artifacts
-            .put_artifact("snapshot", snapshot.freeze())
-            .await?;
+        let snapshot_key = artifacts.put_artifact("snapshot", snapshot.freeze()).await?;
 
         let mut probe = self.probe.lock();
         probe.checkpoints_written += 1;
@@ -193,8 +191,7 @@ fn state_after(record_numbers: RangeInclusive<u64>) -> (u64, u32) {
     let mut payload_checksum = 0;
     for record_number in record_numbers {
         record_count += 1;
-        payload_checksum =
-            crc32c::crc32c_append(payload_checksum, &numbered_payload(record_number));
+        payload_checksum = crc32c::crc32c_append(payload_checksum, &numbered_payload(record_number));
     }
     (record_count, payload_checksum)
 }
@@ -239,8 +236,7 @@ impl Running {
     async fn applied(&mut self, sequence: u64) {
         timeout(
             PATIENCE,
-            self.progress
-                .wait_until_applied(SequenceNumber::new(sequence)),
+            self.progress.wait_until_applied(SequenceNumber::new(sequence)),
         )
         .await
         .expect("the record is applied in time")
@@ -251,8 +247,7 @@ impl Running {
     async fn committed(&mut self, sequence: u64) {
         timeout(
             PATIENCE,
-            self.progress
-                .wait_until_committed(SequenceNumber::new(sequence)),
+            self.progress.wait_until_committed(SequenceNumber::new(sequence)),
         )
         .await
         .expect("the checkpoint is committed in time")
@@ -313,14 +308,11 @@ async fn materializer_that_is_not_registered_cannot_be_run() {
     let harness = Harness::start().await;
     let unregistered = RunnerSettings::for_materializer("never-registered");
 
-    let started =
-        MaterializerRunner::<Recorder>::start(harness.dependencies(), STREAM, unregistered).await;
+    let started = MaterializerRunner::<Recorder>::start(harness.dependencies(), STREAM, unregistered).await;
 
     assert!(matches!(
         started.err(),
-        Some(RunnerError::Metadata(
-            MetaError::MaterializerNotRegistered { .. }
-        ))
+        Some(RunnerError::Metadata(MetaError::MaterializerNotRegistered { .. }))
     ));
 }
 
@@ -333,10 +325,7 @@ async fn records_are_applied_once_each_and_in_order() {
     append_numbered(&writer, 20).await;
     running.applied(20).await;
 
-    assert_eq!(
-        running.probe.applied_sequences(),
-        (1..=20).collect::<Vec<u64>>()
-    );
+    assert_eq!(running.probe.applied_sequences(), (1..=20).collect::<Vec<u64>>());
 }
 
 #[tokio::test(start_paused = true)]
@@ -408,10 +397,7 @@ async fn checkpoint_is_committed_once_enough_time_has_passed() {
 
     running.committed(5).await;
 
-    assert_eq!(
-        harness.committed_checkpoint().await.checkpoint,
-        SequenceNumber::new(5)
-    );
+    assert_eq!(harness.committed_checkpoint().await.checkpoint, SequenceNumber::new(5));
 }
 
 #[tokio::test(start_paused = true)]
@@ -424,10 +410,7 @@ async fn checkpoint_is_not_committed_before_its_time() {
 
     sleep(CHECKPOINT_AFTER / 2).await;
 
-    assert_eq!(
-        harness.committed_checkpoint().await.checkpoint,
-        SequenceNumber::ZERO
-    );
+    assert_eq!(harness.committed_checkpoint().await.checkpoint, SequenceNumber::ZERO);
 }
 
 #[tokio::test(start_paused = true)]
@@ -526,10 +509,7 @@ async fn restarted_runner_applies_only_the_records_above_the_checkpoint() {
     let mut second_run = start_and_spawn(&harness, checkpoint_by_time()).await;
     second_run.applied(15).await;
 
-    assert_eq!(
-        second_run.probe.applied_sequences(),
-        (11..=15).collect::<Vec<u64>>()
-    );
+    assert_eq!(second_run.probe.applied_sequences(), (11..=15).collect::<Vec<u64>>());
 }
 
 #[tokio::test(start_paused = true)]
@@ -564,8 +544,7 @@ async fn manifest_of_another_checkpoint_is_refused_at_start() {
         MATERIALIZER,
         acquired.fencing_token,
     );
-    let manifest_of_checkpoint_7 =
-        encode_manifest(SequenceNumber::new(7), &CheckpointManifest::default());
+    let manifest_of_checkpoint_7 = encode_manifest(SequenceNumber::new(7), &CheckpointManifest::default());
     let manifest_key = artifacts
         .put_artifact("manifest", manifest_of_checkpoint_7)
         .await
@@ -581,15 +560,11 @@ async fn manifest_of_another_checkpoint_is_refused_at_start() {
         .await
         .expect("the checkpoint is committed");
 
-    let started =
-        MaterializerRunner::<Recorder>::start(harness.dependencies(), STREAM, checkpoint_by_time())
-            .await;
+    let started = MaterializerRunner::<Recorder>::start(harness.dependencies(), STREAM, checkpoint_by_time()).await;
 
     assert!(matches!(
         started.err(),
-        Some(RunnerError::Materializer(
-            MaterializerError::InvalidManifest { .. }
-        ))
+        Some(RunnerError::Materializer(MaterializerError::InvalidManifest { .. }))
     ));
 }
 
@@ -625,10 +600,7 @@ async fn log_is_truncated_up_to_the_committed_checkpoint_and_no_further() {
     harness.run_controller_pass().await;
 
     // Records 4 and 5 are applied but not checkpointed: their segments must stay.
-    assert_eq!(
-        harness.stream().await.low_water_mark,
-        SequenceNumber::new(4)
-    );
+    assert_eq!(harness.stream().await.low_water_mark, SequenceNumber::new(4));
 }
 
 #[tokio::test(start_paused = true)]
@@ -755,10 +727,7 @@ async fn artifact_store_outage_commits_nothing() {
     harness.artifact_store.set_unavailable(true);
     sleep(CHECKPOINT_AFTER * 2).await;
 
-    assert_eq!(
-        running.progress.latest().committed_checkpoint,
-        SequenceNumber::ZERO
-    );
+    assert_eq!(running.progress.latest().committed_checkpoint, SequenceNumber::ZERO);
 }
 
 #[tokio::test(start_paused = true)]
@@ -790,10 +759,7 @@ async fn checkpoint_put_off_by_an_artifact_store_outage_covers_everything_applie
     harness.artifact_store.set_unavailable(false);
     running.committed(8).await;
 
-    assert_eq!(
-        harness.committed_checkpoint().await.checkpoint,
-        SequenceNumber::new(8)
-    );
+    assert_eq!(harness.committed_checkpoint().await.checkpoint, SequenceNumber::new(8));
 }
 
 #[tokio::test(start_paused = true)]
@@ -829,10 +795,7 @@ async fn checkpoint_put_off_by_a_metadata_outage_is_committed_afterwards() {
     harness.cluster.key_value_store().set_unavailable(false);
     running.committed(5).await;
 
-    assert_eq!(
-        harness.committed_checkpoint().await.checkpoint,
-        SequenceNumber::new(5)
-    );
+    assert_eq!(harness.committed_checkpoint().await.checkpoint, SequenceNumber::new(5));
 }
 
 // ---- orphans ----
@@ -864,10 +827,7 @@ async fn crash_before_the_commit_leaves_artifacts_and_no_checkpoint() {
 
     let committed = harness.committed_checkpoint().await;
     assert!(orphan_count >= 2, "only {orphan_count} objects were left");
-    assert_eq!(
-        (committed.checkpoint, committed.manifest),
-        (SequenceNumber::ZERO, None)
-    );
+    assert_eq!((committed.checkpoint, committed.manifest), (SequenceNumber::ZERO, None));
 }
 
 #[tokio::test(start_paused = true)]

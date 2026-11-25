@@ -69,8 +69,8 @@ use tokio::time::timeout;
 
 use crate::contract::{CheckpointManifest, Materializer, MaterializerError};
 use crate::layer::{
-    LAYER_HEADER_BYTES, LayerDamage, LayerEntry, LayerKind, decode_header, decode_index,
-    decode_records, encode_layer, encode_records, verify_blob,
+    LAYER_HEADER_BYTES, LayerDamage, LayerEntry, LayerKind, decode_header, decode_index, decode_records, encode_layer,
+    encode_records, verify_blob,
 };
 use crate::namespace::ArtifactNamespace;
 
@@ -192,8 +192,7 @@ pub trait PageMaterializer: Default + Send + Sync + 'static {
     /// because a newer version of the engine wrote it. This is the one check made when a record is
     /// applied: the runner stops instead of going on past a record it does not understand. The design's
     /// signature returns the pages alone; the error is what lets an engine refuse a record in time.
-    fn pages_touched(&self, log_record: &LogRecord)
-    -> Result<Vec<Self::PageId>, MaterializerError>;
+    fn pages_touched(&self, log_record: &LogRecord) -> Result<Vec<Self::PageId>, MaterializerError>;
 
     /// Produces the next version of one page.
     ///
@@ -237,9 +236,7 @@ pub trait PageMaterializer: Default + Send + Sync + 'static {
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum PageReadError {
     /// The requested sequence was not applied within the time the caller allowed.
-    #[error(
-        "sequence {as_of_sequence} was not applied in time; the page store is at {applied_sequence}"
-    )]
+    #[error("sequence {as_of_sequence} was not applied in time; the page store is at {applied_sequence}")]
     NotReached {
         /// The sequence the read asked for.
         as_of_sequence: SequenceNumber,
@@ -247,9 +244,7 @@ pub enum PageReadError {
         applied_sequence: SequenceNumber,
     },
     /// The requested sequence is older than anything the page store still keeps.
-    #[error(
-        "pages can no longer be read as of {as_of_sequence}; the oldest readable sequence is {horizon}"
-    )]
+    #[error("pages can no longer be read as of {as_of_sequence}; the oldest readable sequence is {horizon}")]
     BelowHorizon {
         /// The sequence the read asked for.
         as_of_sequence: SequenceNumber,
@@ -342,11 +337,7 @@ impl<M: PageMaterializer> Shared<M> {
     }
 
     /// Decides what a read of `encoded_page_id` as of `as_of_sequence` needs.
-    fn plan_read(
-        &self,
-        encoded_page_id: &Bytes,
-        as_of_sequence: SequenceNumber,
-    ) -> Result<ReadPlan, PageReadError> {
+    fn plan_read(&self, encoded_page_id: &Bytes, as_of_sequence: SequenceNumber) -> Result<ReadPlan, PageReadError> {
         let state = self.read_state();
         if as_of_sequence < state.horizon {
             return Err(PageReadError::BelowHorizon {
@@ -404,11 +395,9 @@ impl<M: PageMaterializer> Shared<M> {
             let Some(blob) = self.read_blob(&delta.artifact_key, encoded_page_id).await? else {
                 continue;
             };
-            let records = decode_records(&blob)
-                .map_err(|layer_damage| damaged(&delta.artifact_key, layer_damage))?;
+            let records = decode_records(&blob).map_err(|layer_damage| damaged(&delta.artifact_key, layer_damage))?;
             for record in &records {
-                let is_in_reach =
-                    record.sequence > plan.base_sequence && record.sequence <= as_of_sequence;
+                let is_in_reach = record.sequence > plan.base_sequence && record.sequence <= as_of_sequence;
                 if is_in_reach {
                     page = Some(self.apply_to_page(page_id, page.as_ref(), record)?);
                 }
@@ -447,14 +436,13 @@ impl<M: PageMaterializer> Shared<M> {
             .artifacts
             .get_artifact_range(artifact_key, 0..LAYER_HEADER_BYTES as u64)
             .await?;
-        let header = decode_header(&header_bytes)
-            .map_err(|layer_damage| damaged(artifact_key, layer_damage))?;
+        let header = decode_header(&header_bytes).map_err(|layer_damage| damaged(artifact_key, layer_damage))?;
         let index_bytes = self
             .artifacts
             .get_artifact_range(artifact_key, header.index_range())
             .await?;
-        let entries = decode_index(&header, &index_bytes)
-            .map_err(|layer_damage| damaged(artifact_key, layer_damage))?;
+        let entries =
+            decode_index(&header, &index_bytes).map_err(|layer_damage| damaged(artifact_key, layer_damage))?;
         let loaded = Arc::new(LoadedIndex { entries });
         self.loaded_indexes
             .lock()
@@ -464,11 +452,7 @@ impl<M: PageMaterializer> Shared<M> {
     }
 
     /// The verified blob of one page of a layer, or `None` if the layer does not hold the page.
-    async fn read_blob(
-        &self,
-        artifact_key: &str,
-        encoded_page_id: &Bytes,
-    ) -> Result<Option<Bytes>, MaterializerError> {
+    async fn read_blob(&self, artifact_key: &str, encoded_page_id: &Bytes) -> Result<Option<Bytes>, MaterializerError> {
         let loaded = self.load_index(artifact_key).await?;
         let Some(entry) = loaded.entries.get(encoded_page_id) else {
             return Ok(None);
@@ -482,10 +466,7 @@ impl<M: PageMaterializer> Shared<M> {
     }
 
     /// Every verified blob of a layer, by encoded page identifier, fetched as one object.
-    async fn read_whole_layer(
-        &self,
-        artifact_key: &str,
-    ) -> Result<BTreeMap<Bytes, Bytes>, MaterializerError> {
+    async fn read_whole_layer(&self, artifact_key: &str) -> Result<BTreeMap<Bytes, Bytes>, MaterializerError> {
         let layer = self.artifacts.get_artifact(artifact_key).await?;
         let as_damage = |layer_damage| damaged(artifact_key, layer_damage);
         let header = decode_header(&layer).map_err(as_damage)?;
@@ -525,9 +506,7 @@ impl<M: PageMaterializer> Shared<M> {
         let mut pages = BTreeMap::new();
         let mut later_layers = layers;
         if let Some(position) = newest_image_position {
-            pages = self
-                .read_whole_layer(&layers[position].artifact_key)
-                .await?;
+            pages = self.read_whole_layer(&layers[position].artifact_key).await?;
             later_layers = &layers[position + 1..];
         }
         for delta in later_layers {
@@ -539,8 +518,8 @@ impl<M: PageMaterializer> Shared<M> {
                         reason: "a page identifier cannot be decoded".to_owned(),
                     });
                 };
-                let records = decode_records(&blob)
-                    .map_err(|layer_damage| damaged(&delta.artifact_key, layer_damage))?;
+                let records =
+                    decode_records(&blob).map_err(|layer_damage| damaged(&delta.artifact_key, layer_damage))?;
                 let mut page = pages.get(&encoded_page_id).cloned();
                 for record in &records {
                     page = Some(self.apply_to_page(&page_id, page.as_ref(), record)?);
@@ -581,10 +560,7 @@ fn delta_layers_since_the_last_image(layers: &[LayerDescriptor]) -> usize {
 /// # Returns
 ///
 /// The new horizon if anything was dropped: the sequence of the oldest image kept.
-fn drop_layers_no_read_needs(
-    layers: &mut Vec<LayerDescriptor>,
-    images_kept: usize,
-) -> Option<SequenceNumber> {
+fn drop_layers_no_read_needs(layers: &mut Vec<LayerDescriptor>, images_kept: usize) -> Option<SequenceNumber> {
     let mut image_positions = Vec::new();
     for (position, layer) in layers.iter().enumerate() {
         if layer.kind == LayerKind::Image {
@@ -616,8 +592,7 @@ fn encode_details(state: &StoreState) -> Bytes {
         });
         details.put_u64_le(layer.first_sequence.get());
         details.put_u64_le(layer.last_sequence.get());
-        details
-            .put_u32_le(u32::try_from(layer.artifact_key.len()).expect("an artifact key is short"));
+        details.put_u32_le(u32::try_from(layer.artifact_key.len()).expect("an artifact key is short"));
         details.put_slice(layer.artifact_key.as_bytes());
     }
     details.freeze()
@@ -775,8 +750,7 @@ impl<M: PageMaterializer> Materializer for PageStore<M> {
                 artifact_key: artifacts.put_artifact("image", image).await?,
             });
         }
-        let horizon =
-            drop_layers_no_read_needs(&mut layers, policy.images_kept).unwrap_or(before.horizon);
+        let horizon = drop_layers_no_read_needs(&mut layers, policy.images_kept).unwrap_or(before.horizon);
 
         let after = StoreState {
             layers,
@@ -785,11 +759,7 @@ impl<M: PageMaterializer> Materializer for PageStore<M> {
             horizon,
         };
         let manifest = CheckpointManifest {
-            artifact_keys: after
-                .layers
-                .iter()
-                .map(|layer| layer.artifact_key.clone())
-                .collect(),
+            artifact_keys: after.layers.iter().map(|layer| layer.artifact_key.clone()).collect(),
             details: encode_details(&after),
         };
         self.shared
@@ -910,11 +880,7 @@ impl<M: PageMaterializer> PageReader<M> {
     }
 
     /// Waits until the store has applied `as_of_sequence`, for at most `wait`.
-    async fn wait_until_applied(
-        &self,
-        as_of_sequence: SequenceNumber,
-        wait: Duration,
-    ) -> Result<(), PageReadError> {
+    async fn wait_until_applied(&self, as_of_sequence: SequenceNumber, wait: Duration) -> Result<(), PageReadError> {
         let mut applied = self.shared.applied.subscribe();
         let reached = timeout(
             wait,

@@ -125,10 +125,7 @@ fn quantile_of_a_single_value_is_within_a_thirty_second_above_it() {
         let reported = u64::try_from(histogram.quantile(500).as_micros()).expect("fits");
 
         assert!(reported >= micros, "{micros} was reported as {reported}");
-        assert!(
-            reported - micros <= micros / 32,
-            "{micros} was reported as {reported}"
-        );
+        assert!(reported - micros <= micros / 32, "{micros} was reported as {reported}");
     }
 }
 
@@ -160,11 +157,7 @@ fn every_bucket_counts_the_values_up_to_its_upper_bound() {
 fn value_right_above_a_bucket_is_counted_in_the_next_one() {
     for bucket in 0..BUCKETS - 1 {
         let first_value_of_the_next = upper_bound_of(bucket) + 1;
-        assert_eq!(
-            bucket_of(first_value_of_the_next),
-            bucket + 1,
-            "bucket {bucket}"
-        );
+        assert_eq!(bucket_of(first_value_of_the_next), bucket + 1, "bucket {bucket}");
     }
 }
 

@@ -54,9 +54,6 @@ mod tests {
     async fn clock_advances_with_tokio_time() {
         let clock = VirtualClock::new();
         tokio::time::advance(Duration::from_secs(90)).await;
-        assert_eq!(
-            clock.now(),
-            VirtualClock::START.plus(Duration::from_secs(90))
-        );
+        assert_eq!(clock.now(), VirtualClock::START.plus(Duration::from_secs(90)));
     }
 }

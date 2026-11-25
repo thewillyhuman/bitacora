@@ -41,9 +41,8 @@ fn configuration_with_endpoints_alone_gets_the_defaults() {
 
 #[test]
 fn configuration_can_name_its_key_prefix() {
-    let config =
-        parse(r#"{"etcd_endpoints": ["http://127.0.0.1:2379"], "etcd_key_prefix": "/staging/"}"#)
-            .expect("valid configuration");
+    let config = parse(r#"{"etcd_endpoints": ["http://127.0.0.1:2379"], "etcd_key_prefix": "/staging/"}"#)
+        .expect("valid configuration");
 
     assert_eq!(config.etcd_key_prefix, "/staging/");
 }
@@ -122,17 +121,15 @@ fn configuration_can_name_an_s3_compatible_service() {
 
 #[test]
 fn s3_configuration_without_a_bucket_is_refused() {
-    let config =
-        parse(r#"{"etcd_endpoints": [], "object_store": {"kind": "s3", "region": "eu-west-1"}}"#);
+    let config = parse(r#"{"etcd_endpoints": [], "object_store": {"kind": "s3", "region": "eu-west-1"}}"#);
 
     assert!(config.is_err(), "{config:?}");
 }
 
 #[test]
 fn configuration_can_say_explicitly_that_there_is_no_object_store() {
-    let config =
-        parse(r#"{"etcd_endpoints": ["http://127.0.0.1:2379"], "object_store": {"kind": "none"}}"#)
-            .expect("valid configuration");
+    let config = parse(r#"{"etcd_endpoints": ["http://127.0.0.1:2379"], "object_store": {"kind": "none"}}"#)
+        .expect("valid configuration");
 
     assert_eq!(config.object_store, ObjectStoreConfig::None);
 }
@@ -174,10 +171,7 @@ async fn connecting_without_any_endpoint_is_refused() {
 
     let connected = connect(&config, ClientSettings::default()).await;
 
-    assert!(matches!(
-        connected.err(),
-        Some(ConnectError::InvalidMetadataStore(_))
-    ));
+    assert!(matches!(connected.err(), Some(ConnectError::InvalidMetadataStore(_))));
 }
 
 #[tokio::test]
@@ -189,10 +183,7 @@ async fn key_value_store_without_any_endpoint_is_refused() {
 
     let connected = connect_key_value_store(&config).await;
 
-    assert!(matches!(
-        connected.err(),
-        Some(ConnectError::InvalidMetadataStore(_))
-    ));
+    assert!(matches!(connected.err(), Some(ConnectError::InvalidMetadataStore(_))));
 }
 
 /// A daemon that instruments its metadata store builds it on this store. Like a client, it must start
@@ -287,10 +278,7 @@ async fn s3_endpoint_over_http_is_refused_unless_allowed() {
 
     let opened = open_object_store(&plain_http_without_consent).await;
 
-    assert!(matches!(
-        opened.err(),
-        Some(ConnectError::InvalidObjectStore(_))
-    ));
+    assert!(matches!(opened.err(), Some(ConnectError::InvalidObjectStore(_))));
 }
 
 #[tokio::test]
@@ -304,11 +292,7 @@ async fn object_store_directory_that_cannot_be_created_is_refused() {
         .expect("put");
     // The store keeps the object as a regular file, and a path below a regular file can never become
     // a directory.
-    let below_a_file = directory
-        .path()
-        .join("objects")
-        .join("placeholder")
-        .join("store");
+    let below_a_file = directory.path().join("objects").join("placeholder").join("store");
 
     let opened = open_object_store(&ObjectStoreConfig::LocalDirectory { path: below_a_file }).await;
 

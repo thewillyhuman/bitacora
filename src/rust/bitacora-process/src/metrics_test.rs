@@ -198,11 +198,7 @@ async fn successful_request_is_returned_unchanged() {
     let (_registry, metrics) = registry_with_request_metrics();
 
     let outcome = metrics
-        .observe(
-            "turn",
-            async { Ok::<u32, TestFailure>(7) },
-            kind_of_test_failure,
-        )
+        .observe("turn", async { Ok::<u32, TestFailure>(7) }, kind_of_test_failure)
         .await;
 
     assert_eq!(outcome, Ok(7));
@@ -228,18 +224,11 @@ async fn request_is_counted_under_its_operation() {
     let (registry, metrics) = registry_with_request_metrics();
 
     let _outcome = metrics
-        .observe(
-            "turn",
-            async { Ok::<u32, TestFailure>(7) },
-            kind_of_test_failure,
-        )
+        .observe("turn", async { Ok::<u32, TestFailure>(7) }, kind_of_test_failure)
         .await;
 
     assert_eq!(
-        exposition_value(
-            &registry,
-            "bitacora_widget_requests_total{operation=\"turn\"} "
-        ),
+        exposition_value(&registry, "bitacora_widget_requests_total{operation=\"turn\"} "),
         Some("1".to_owned())
     );
 }
@@ -257,10 +246,7 @@ async fn failed_request_is_counted_as_a_request_too() {
         .await;
 
     assert_eq!(
-        exposition_value(
-            &registry,
-            "bitacora_widget_requests_total{operation=\"turn\"} "
-        ),
+        exposition_value(&registry, "bitacora_widget_requests_total{operation=\"turn\"} "),
         Some("1".to_owned())
     );
 }
@@ -291,17 +277,11 @@ async fn successful_request_is_not_counted_as_a_failure() {
     let (registry, metrics) = registry_with_request_metrics();
 
     let _outcome = metrics
-        .observe(
-            "turn",
-            async { Ok::<u32, TestFailure>(7) },
-            kind_of_test_failure,
-        )
+        .observe("turn", async { Ok::<u32, TestFailure>(7) }, kind_of_test_failure)
         .await;
 
     assert!(
-        !registry
-            .encode()
-            .contains("bitacora_widget_request_failures_total{"),
+        !registry.encode().contains("bitacora_widget_request_failures_total{"),
         "{}",
         registry.encode()
     );
@@ -315,9 +295,7 @@ async fn request_duration_is_the_time_the_request_took() {
         Ok::<u32, TestFailure>(7)
     };
 
-    let _outcome = metrics
-        .observe("turn", slow_request, kind_of_test_failure)
-        .await;
+    let _outcome = metrics.observe("turn", slow_request, kind_of_test_failure).await;
 
     assert_eq!(
         exposition_value(
@@ -333,25 +311,14 @@ async fn requests_of_two_operations_are_counted_apart() {
     let (registry, metrics) = registry_with_request_metrics();
 
     let _first_outcome = metrics
-        .observe(
-            "turn",
-            async { Ok::<u32, TestFailure>(7) },
-            kind_of_test_failure,
-        )
+        .observe("turn", async { Ok::<u32, TestFailure>(7) }, kind_of_test_failure)
         .await;
     let _second_outcome = metrics
-        .observe(
-            "stop",
-            async { Ok::<u32, TestFailure>(7) },
-            kind_of_test_failure,
-        )
+        .observe("stop", async { Ok::<u32, TestFailure>(7) }, kind_of_test_failure)
         .await;
 
     assert_eq!(
-        exposition_value(
-            &registry,
-            "bitacora_widget_requests_total{operation=\"stop\"} "
-        ),
+        exposition_value(&registry, "bitacora_widget_requests_total{operation=\"stop\"} "),
         Some("1".to_owned())
     );
 }

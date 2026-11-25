@@ -140,10 +140,7 @@ mod tests {
 
     #[test]
     fn sealed_state_survives_a_round_trip() {
-        assert_eq!(
-            SegmentState::decode(&sealed_state().encode()),
-            Ok(sealed_state())
-        );
+        assert_eq!(SegmentState::decode(&sealed_state().encode()), Ok(sealed_state()));
     }
 
     #[test]
@@ -161,10 +158,7 @@ mod tests {
             fenced_epoch: Epoch::new(6),
             sealed_end: Some(SequenceNumber::ZERO),
         };
-        assert_eq!(
-            SegmentState::decode(&sealed_empty.encode()),
-            Ok(sealed_empty)
-        );
+        assert_eq!(SegmentState::decode(&sealed_empty.encode()), Ok(sealed_empty));
     }
 
     #[test]
@@ -202,10 +196,7 @@ mod tests {
             let mut encoded = sealed_state().encode();
             encoded[flipped_byte] ^= 0x01;
             assert!(
-                matches!(
-                    SegmentState::decode(&encoded),
-                    Err(StateError::ChecksumMismatch { .. })
-                ),
+                matches!(SegmentState::decode(&encoded), Err(StateError::ChecksumMismatch { .. })),
                 "flip at byte {flipped_byte} went undetected"
             );
         }

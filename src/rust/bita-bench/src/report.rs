@@ -172,17 +172,9 @@ impl AppendReport {
             rendered,
             "append      stream {}, {} stream(s), {} appends in flight each, {} record(s) of {} B per \
              append, {pace}",
-            self.stream,
-            self.streams,
-            self.appends_in_flight,
-            self.records_per_append,
-            self.record_bytes
+            self.stream, self.streams, self.appends_in_flight, self.records_per_append, self.record_bytes
         );
-        let _ = writeln!(
-            rendered,
-            "elapsed     {}",
-            format_seconds(self.elapsed_milliseconds)
-        );
+        let _ = writeln!(rendered, "elapsed     {}", format_seconds(self.elapsed_milliseconds));
         let _ = writeln!(rendered, "appends     {}", self.appends);
         let _ = writeln!(
             rendered,
@@ -251,11 +243,7 @@ impl ReadReport {
     pub(crate) fn render_text(&self) -> String {
         let mut rendered = String::new();
         let _ = writeln!(rendered, "read        stream {}", self.stream);
-        let _ = writeln!(
-            rendered,
-            "elapsed     {}",
-            format_seconds(self.elapsed_milliseconds)
-        );
+        let _ = writeln!(rendered, "elapsed     {}", format_seconds(self.elapsed_milliseconds));
         let _ = writeln!(
             rendered,
             "records     {} ({} records/s)",

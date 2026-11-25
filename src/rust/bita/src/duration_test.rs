@@ -51,9 +51,7 @@ fn text_without_a_number_is_refused() {
 fn empty_text_is_refused() {
     assert_eq!(
         parse_duration(""),
-        Err(InvalidDuration::MissingNumber {
-            text: String::new()
-        })
+        Err(InvalidDuration::MissingNumber { text: String::new() })
     );
 }
 
@@ -61,9 +59,7 @@ fn empty_text_is_refused() {
 fn number_without_a_unit_is_refused() {
     assert_eq!(
         parse_duration("30"),
-        Err(InvalidDuration::UnknownUnit {
-            text: "30".to_owned()
-        })
+        Err(InvalidDuration::UnknownUnit { text: "30".to_owned() })
     );
 }
 

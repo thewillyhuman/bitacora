@@ -8,9 +8,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use bitacora_sim::{
-    Event, FaultMix, InjectedBug, KvOutcome, SimulationConfig, SimulationReport, Violation, run,
-};
+use bitacora_sim::{Event, FaultMix, InjectedBug, KvOutcome, SimulationConfig, SimulationReport, Violation, run};
 use bitacora_types::SequenceNumber;
 
 /// How many seeds each of the four fault-matrix tests runs by default.
@@ -243,15 +241,13 @@ fn bug_is_caught(injected_bug: InjectedBug, seed: u64) -> bool {
 /// the store's use on purpose and require the simulation to notice.
 #[test]
 fn reads_that_skip_the_barrier_are_caught() {
-    let is_caught =
-        (0..SEEDS_TO_CATCH_A_BUG).any(|seed| bug_is_caught(InjectedBug::ReadsSkipTheBarrier, seed));
+    let is_caught = (0..SEEDS_TO_CATCH_A_BUG).any(|seed| bug_is_caught(InjectedBug::ReadsSkipTheBarrier, seed));
     assert!(is_caught, "stale reads went unnoticed");
 }
 
 #[test]
 fn writes_of_unknown_outcome_reported_as_done_are_caught() {
-    let is_caught = (0..SEEDS_TO_CATCH_A_BUG)
-        .any(|seed| bug_is_caught(InjectedBug::UnknownWritesReportedDone, seed));
+    let is_caught = (0..SEEDS_TO_CATCH_A_BUG).any(|seed| bug_is_caught(InjectedBug::UnknownWritesReportedDone, seed));
     assert!(is_caught, "lost writes went unnoticed");
 }
 
@@ -264,9 +260,7 @@ fn same_seed_replays_the_same_history() {
     let first_run = run(&config);
     let second_run = run(&config);
     assert!(
-        first_run == second_run
-            && first_run.fingerprint() == second_run.fingerprint()
-            && first_run.faults_injected > 5,
+        first_run == second_run && first_run.fingerprint() == second_run.fingerprint() && first_run.faults_injected > 5,
         "runs differ, or only {} faults were injected",
         first_run.faults_injected
     );
@@ -341,10 +335,6 @@ fn each_fault_alone_holds_the_invariants() {
         },
     ] {
         let report = run(&only(faults));
-        assert!(
-            report.is_clean(),
-            "{faults:?}\n{}",
-            report.failure_summary()
-        );
+        assert!(report.is_clean(), "{faults:?}\n{}", report.failure_summary());
     }
 }

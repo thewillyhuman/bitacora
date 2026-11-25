@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 
 use crate::key_value::{
-    Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome,
-    VersionedValue,
+    Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome, VersionedValue,
 };
 
 #[derive(Debug, Default)]
@@ -72,10 +71,7 @@ impl KeyValueStore for MemoryKeyValueStore {
         Ok(self.available_state()?.entries_by_key.get(key).cloned())
     }
 
-    async fn list(
-        &self,
-        key_prefix: &str,
-    ) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
+    async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
         Ok(self
             .available_state()?
             .entries_by_key
@@ -102,9 +98,7 @@ impl KeyValueStore for MemoryKeyValueStore {
         for mutation in mutations {
             match mutation {
                 Mutation::Put { key, value } => {
-                    state
-                        .entries_by_key
-                        .insert(key, VersionedValue { value, revision });
+                    state.entries_by_key.insert(key, VersionedValue { value, revision });
                 }
                 Mutation::Delete { key } => {
                     state.entries_by_key.remove(&key);
@@ -127,9 +121,7 @@ mod tests {
         key: &str,
         value: &'static [u8],
     ) -> Result<TransactionOutcome, StoreUnavailable> {
-        store
-            .transact(Vec::new(), vec![put_mutation(key, value)])
-            .await
+        store.transact(Vec::new(), vec![put_mutation(key, value)]).await
     }
 
     async fn revision_of(store: &MemoryKeyValueStore, key: &str) -> Revision {
@@ -159,10 +151,7 @@ mod tests {
         let store = MemoryKeyValueStore::new();
         put(&store, "streams/orders", b"v1").await.expect("put");
         let stored = store.get("streams/orders").await.expect("get");
-        assert_eq!(
-            stored.map(|stored| stored.value),
-            Some(Bytes::from_static(b"v1"))
-        );
+        assert_eq!(stored.map(|stored| stored.value), Some(Bytes::from_static(b"v1")));
     }
 
     #[tokio::test]
@@ -283,16 +272,10 @@ mod tests {
     async fn transaction_writes_all_its_keys_at_one_revision() {
         let store = MemoryKeyValueStore::new();
         store
-            .transact(
-                Vec::new(),
-                vec![put_mutation("a", b"1"), put_mutation("b", b"2")],
-            )
+            .transact(Vec::new(), vec![put_mutation("a", b"1"), put_mutation("b", b"2")])
             .await
             .expect("transact");
-        assert_eq!(
-            revision_of(&store, "a").await,
-            revision_of(&store, "b").await
-        );
+        assert_eq!(revision_of(&store, "a").await, revision_of(&store, "b").await);
     }
 
     #[tokio::test]
@@ -335,9 +318,7 @@ mod tests {
         store.set_unavailable(false);
         let stored = store.get("streams/orders").await.expect("get");
         assert!(
-            read.is_err()
-                && write.is_err()
-                && stored.map(|stored| stored.value) == Some(Bytes::from_static(b"v1"))
+            read.is_err() && write.is_err() && stored.map(|stored| stored.value) == Some(Bytes::from_static(b"v1"))
         );
     }
 
@@ -346,12 +327,6 @@ mod tests {
         let store = MemoryKeyValueStore::new();
         let other_client = store.clone();
         put(&store, "streams/orders", b"v1").await.expect("put");
-        assert!(
-            other_client
-                .get("streams/orders")
-                .await
-                .expect("get")
-                .is_some()
-        );
+        assert!(other_client.get("streams/orders").await.expect("get").is_some());
     }
 }

@@ -33,8 +33,7 @@ fn channel_to(connector: &GrpcReplicaConnector, address: &str) -> Channel {
 
 #[test]
 fn host_and_port_are_dialled_over_plain_http() {
-    let endpoint = endpoint_of("replica-a.example:7000", &GrpcConnectorSettings::default())
-        .expect("a valid address");
+    let endpoint = endpoint_of("replica-a.example:7000", &GrpcConnectorSettings::default()).expect("a valid address");
 
     assert_eq!(endpoint.uri().to_string(), "http://replica-a.example:7000/");
 }
@@ -47,10 +46,7 @@ fn endpoint_carries_the_connect_timeout_of_the_settings() {
 
     let endpoint = endpoint_of("replica-a.example:7000", &settings).expect("a valid address");
 
-    assert_eq!(
-        endpoint.get_connect_timeout(),
-        Some(Duration::from_millis(150))
-    );
+    assert_eq!(endpoint.get_connect_timeout(), Some(Duration::from_millis(150)));
 }
 
 #[test]

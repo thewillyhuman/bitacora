@@ -24,8 +24,8 @@
 
 use super::*;
 use crate::state::{
-    AbandonedSegment, EMPTY_POSITION, Epoch, FIRST_EPOCH, FIRST_SEGMENT, REPLICA_COUNT,
-    RecoveryPhase, SECOND_EPOCH, Sequence,
+    AbandonedSegment, EMPTY_POSITION, Epoch, FIRST_EPOCH, FIRST_SEGMENT, REPLICA_COUNT, RecoveryPhase, SECOND_EPOCH,
+    Sequence,
 };
 
 /// More states than any bounded model below has. A check that reaches it has run away and proves nothing.
@@ -164,8 +164,7 @@ fn roll_raced_against_failover_holds_every_invariant() {
 #[test]
 fn first_writer_can_commit_all_its_records() {
     let is_reachable = can_reach(Bounds::FAILOVER, |state| {
-        state.observations.committed[1] == Some(FIRST_EPOCH)
-            && state.observations.committed[2] == Some(FIRST_EPOCH)
+        state.observations.committed[1] == Some(FIRST_EPOCH) && state.observations.committed[2] == Some(FIRST_EPOCH)
     });
 
     assert!(is_reachable);
@@ -174,8 +173,7 @@ fn first_writer_can_commit_all_its_records() {
 #[test]
 fn recovering_writer_can_commit_after_the_first_writers_records() {
     let is_reachable = can_reach(Bounds::FAILOVER, |state| {
-        state.observations.committed[2] == Some(FIRST_EPOCH)
-            && state.observations.committed[3] == Some(SECOND_EPOCH)
+        state.observations.committed[2] == Some(FIRST_EPOCH) && state.observations.committed[3] == Some(SECOND_EPOCH)
     });
 
     assert!(is_reachable);
@@ -186,8 +184,7 @@ fn recovering_writer_can_commit_after_the_first_writers_records() {
 #[test]
 fn record_of_unknown_outcome_can_survive_the_takeover() {
     let is_reachable = can_reach(Bounds::FAILOVER, |state| {
-        state.observations.committed[1].is_none()
-            && state.observations.committed[2] == Some(SECOND_EPOCH)
+        state.observations.committed[1].is_none() && state.observations.committed[2] == Some(SECOND_EPOCH)
     });
 
     assert!(is_reachable);
@@ -197,8 +194,7 @@ fn record_of_unknown_outcome_can_survive_the_takeover() {
 #[test]
 fn record_of_unknown_outcome_can_be_discarded_by_the_takeover() {
     let is_reachable = can_reach(Bounds::FAILOVER, |state| {
-        state.first_writer.appender.assigned_end >= 1
-            && state.observations.committed[1] == Some(SECOND_EPOCH)
+        state.first_writer.appender.assigned_end >= 1 && state.observations.committed[1] == Some(SECOND_EPOCH)
     });
 
     assert!(is_reachable);
@@ -249,9 +245,7 @@ fn old_writer_may_commit_on_acknowledgements_that_predate_the_fence() {
 #[test]
 fn takeover_can_follow_a_roll_and_recover_the_second_segment() {
     let is_reachable = can_reach(Bounds::ROLL_RACING_FAILOVER, |state| {
-        state.first_writer.rolled_from.is_some()
-            && is_recovering_writer_writing(state)
-            && state.segment_count() == 3
+        state.first_writer.rolled_from.is_some() && is_recovering_writer_writing(state) && state.segment_count() == 3
     });
 
     assert!(is_reachable);
@@ -294,8 +288,7 @@ fn roll_can_resend_an_uncommitted_record_to_the_new_segment() {
 #[test]
 fn replica_that_misses_the_seal_can_keep_a_tail_until_it_learns_it() {
     let is_reachable = can_reach(Bounds::ROLL, |state| {
-        state.segment(FIRST_SEGMENT).sealed_end == Some(1)
-            && some_replica_holds_through(state, FIRST_SEGMENT, 2)
+        state.segment(FIRST_SEGMENT).sealed_end == Some(1) && some_replica_holds_through(state, FIRST_SEGMENT, 2)
     });
 
     assert!(is_reachable);
@@ -303,10 +296,7 @@ fn replica_that_misses_the_seal_can_keep_a_tail_until_it_learns_it() {
 
 #[test]
 fn replica_that_learns_the_seal_discards_its_tail() {
-    let keeps_a_tail_after_learning = can_reach(
-        Bounds::ROLL,
-        some_replica_keeps_a_tail_above_a_seal_it_knows,
-    );
+    let keeps_a_tail_after_learning = can_reach(Bounds::ROLL, some_replica_keeps_a_tail_above_a_seal_it_knows);
 
     assert!(!keeps_a_tail_after_learning);
 }
@@ -314,8 +304,7 @@ fn replica_that_learns_the_seal_discards_its_tail() {
 #[test]
 fn replica_can_restart_and_forget_what_it_may_serve() {
     let is_reachable = can_reach(Bounds::FAILOVER, |state| {
-        state.observations.ever_readable[1] == Some(FIRST_EPOCH)
-            && no_replica_serves_anything_of(state, FIRST_SEGMENT)
+        state.observations.ever_readable[1] == Some(FIRST_EPOCH) && no_replica_serves_anything_of(state, FIRST_SEGMENT)
     });
 
     assert!(is_reachable);
@@ -345,11 +334,7 @@ fn takeover_without_a_standby_segment_seals_but_cannot_open() {
 fn committing_below_the_write_quorum_is_noticed() {
     let counterexample = counterexample_of(Rules::COMMITS_BELOW_THE_WRITE_QUORUM, Bounds::FAILOVER);
 
-    assert_eq!(
-        counterexample.invariant,
-        Invariant::SingleWriter,
-        "{counterexample:#?}"
-    );
+    assert_eq!(counterexample.invariant, Invariant::SingleWriter, "{counterexample:#?}");
 }
 
 /// Without the single-writer clause the same mistake still costs durability: the takeover seals the
@@ -392,50 +377,28 @@ fn committing_below_the_write_quorum_can_lose_a_committed_record() {
 fn replicas_that_ignore_fencing_are_noticed() {
     let counterexample = counterexample_of(Rules::REPLICAS_IGNORE_FENCING, Bounds::FAILOVER);
 
-    assert_eq!(
-        counterexample.invariant,
-        Invariant::SingleWriter,
-        "{counterexample:#?}"
-    );
+    assert_eq!(counterexample.invariant, Invariant::SingleWriter, "{counterexample:#?}");
 }
 
 #[test]
 fn replicas_that_acknowledge_before_flushing_are_noticed() {
-    let counterexample = counterexample_of(
-        Rules::REPLICAS_ACKNOWLEDGE_BEFORE_FLUSHING,
-        Bounds::FAILOVER,
-    );
+    let counterexample = counterexample_of(Rules::REPLICAS_ACKNOWLEDGE_BEFORE_FLUSHING, Bounds::FAILOVER);
 
-    assert_eq!(
-        counterexample.invariant,
-        Invariant::Durability,
-        "{counterexample:#?}"
-    );
+    assert_eq!(counterexample.invariant, Invariant::Durability, "{counterexample:#?}");
 }
 
 #[test]
 fn recovery_that_takes_the_shortest_responder_is_noticed() {
-    let counterexample = counterexample_of(
-        Rules::RECOVERY_TAKES_THE_SHORTEST_RESPONDER,
-        Bounds::FAILOVER,
-    );
+    let counterexample = counterexample_of(Rules::RECOVERY_TAKES_THE_SHORTEST_RESPONDER, Bounds::FAILOVER);
 
-    assert_eq!(
-        counterexample.invariant,
-        Invariant::Durability,
-        "{counterexample:#?}"
-    );
+    assert_eq!(counterexample.invariant, Invariant::Durability, "{counterexample:#?}");
 }
 
 #[test]
 fn recovery_that_skips_its_quorum_is_noticed() {
     let counterexample = counterexample_of(Rules::RECOVERY_SKIPS_ITS_QUORUM, Bounds::FAILOVER);
 
-    assert_eq!(
-        counterexample.invariant,
-        Invariant::Durability,
-        "{counterexample:#?}"
-    );
+    assert_eq!(counterexample.invariant, Invariant::Durability, "{counterexample:#?}");
 }
 
 // ---- the check's own contract ----
@@ -450,10 +413,7 @@ fn counterexample_replays_to_a_state_that_violates_its_invariant() {
 
     let violating_state = model.replay(&counterexample.trace);
 
-    assert_eq!(
-        violated_invariant(&violating_state),
-        Some(counterexample.invariant)
-    );
+    assert_eq!(violated_invariant(&violating_state), Some(counterexample.invariant));
 }
 
 #[test]
@@ -463,10 +423,5 @@ fn check_that_hits_its_state_limit_proves_nothing() {
 
     let outcome = model.check(state_limit);
 
-    assert_eq!(
-        outcome,
-        CheckOutcome::Inconclusive {
-            states_explored: 100
-        }
-    );
+    assert_eq!(outcome, CheckOutcome::Inconclusive { states_explored: 100 });
 }

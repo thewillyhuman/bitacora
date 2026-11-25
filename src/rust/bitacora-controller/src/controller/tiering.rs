@@ -53,9 +53,7 @@
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
-use bitacora_meta::{
-    CopyState, MetaError, ReplicaRecord, SegmentRecord, StreamRecord, TieredRecord,
-};
+use bitacora_meta::{CopyState, MetaError, ReplicaRecord, SegmentRecord, StreamRecord, TieredRecord};
 use bitacora_types::replica_api::UploadRequest;
 use bitacora_types::{SegmentId, SequenceNumber, StreamId, Timestamp};
 use tokio::time::timeout;
@@ -76,11 +74,7 @@ use super::{Controller, PassReport, Survey};
 ///
 /// The key, for example `streams/7/segments/00000000000000000003`.
 pub(super) fn tiered_object_key(stream_id: StreamId, segment_id: SegmentId) -> String {
-    format!(
-        "{}{:020}",
-        tiered_objects_prefix(stream_id),
-        segment_id.get()
-    )
+    format!("{}{:020}", tiered_objects_prefix(stream_id), segment_id.get())
 }
 
 /// The key prefix of every tiered segment of a stream.
@@ -99,12 +93,7 @@ fn materializer_objects_prefix(stream_id: StreamId) -> String {
 ///
 /// A segment is uploaded once it is sealed, holds records, is still above the low-water mark, has a full
 /// set of good copies, and has been sealed for at least `tiering_delay`.
-fn is_ready_to_tier(
-    stream: &StreamRecord,
-    segment: &SegmentRecord,
-    now: Timestamp,
-    tiering_delay: Duration,
-) -> bool {
+fn is_ready_to_tier(stream: &StreamRecord, segment: &SegmentRecord, now: Timestamp, tiering_delay: Duration) -> bool {
     let Some(seal) = segment.sealed else {
         return false;
     };
@@ -277,17 +266,12 @@ impl Controller {
             let Some(tiered) = &segment.tiered else {
                 continue;
             };
-            let is_window_over =
-                now.duration_since(tiered.uploaded_at) >= self.settings.hot_read_window;
+            let is_window_over = now.duration_since(tiered.uploaded_at) >= self.settings.hot_read_window;
             if tiered.are_local_copies_dropped || !is_window_over {
                 continue;
             }
             if !self
-                .is_object_stored(
-                    artifact_store.as_ref(),
-                    &tiered.object_key,
-                    tiered.size_bytes,
-                )
+                .is_object_stored(artifact_store.as_ref(), &tiered.object_key, tiered.size_bytes)
                 .await
             {
                 tracing::error!(
@@ -357,10 +341,7 @@ impl Controller {
                 );
                 continue;
             };
-            if !self
-                .delete_object(artifact_store.as_ref(), &tiered.object_key)
-                .await
-            {
+            if !self.delete_object(artifact_store.as_ref(), &tiered.object_key).await {
                 continue;
             }
             let deleted_segment_id = segment.segment_id;
@@ -393,14 +374,8 @@ impl Controller {
             return true;
         };
         let mut is_everything_deleted = true;
-        for key_prefix in [
-            tiered_objects_prefix(stream_id),
-            materializer_objects_prefix(stream_id),
-        ] {
-            if !self
-                .delete_objects_under(artifact_store.as_ref(), &key_prefix)
-                .await
-            {
+        for key_prefix in [tiered_objects_prefix(stream_id), materializer_objects_prefix(stream_id)] {
+            if !self.delete_objects_under(artifact_store.as_ref(), &key_prefix).await {
                 is_everything_deleted = false;
             }
         }
@@ -409,16 +384,8 @@ impl Controller {
 
     /// Deletes every object whose key starts with `key_prefix`. Returns whether none is left; `false` if
     /// the store could not be listed or an object could not be deleted, both of which are logged.
-    async fn delete_objects_under(
-        &self,
-        artifact_store: &dyn ArtifactStore,
-        key_prefix: &str,
-    ) -> bool {
-        let listing = timeout(
-            self.settings.request_timeout,
-            artifact_store.list_prefix(key_prefix),
-        )
-        .await;
+    async fn delete_objects_under(&self, artifact_store: &dyn ArtifactStore, key_prefix: &str) -> bool {
+        let listing = timeout(self.settings.request_timeout, artifact_store.list_prefix(key_prefix)).await;
         let Ok(Ok(objects)) = listing else {
             tracing::warn!(%key_prefix, "cannot list the objects of a deleted stream");
             return false;
@@ -434,17 +401,8 @@ impl Controller {
 
     /// Whether the object store holds `object_key` with exactly `size_bytes`. `false` also if the store
     /// could not be asked in time.
-    async fn is_object_stored(
-        &self,
-        artifact_store: &dyn ArtifactStore,
-        object_key: &str,
-        size_bytes: u64,
-    ) -> bool {
-        let listing = timeout(
-            self.settings.request_timeout,
-            artifact_store.list_prefix(object_key),
-        )
-        .await;
+    async fn is_object_stored(&self, artifact_store: &dyn ArtifactStore, object_key: &str, size_bytes: u64) -> bool {
+        let listing = timeout(self.settings.request_timeout, artifact_store.list_prefix(object_key)).await;
         let Ok(Ok(objects)) = listing else {
             return false;
         };
@@ -458,11 +416,7 @@ impl Controller {
 
     /// Deletes one object. Returns whether it is gone; a failure is logged.
     async fn delete_object(&self, artifact_store: &dyn ArtifactStore, object_key: &str) -> bool {
-        let deleted = timeout(
-            self.settings.request_timeout,
-            artifact_store.delete_object(object_key),
-        )
-        .await;
+        let deleted = timeout(self.settings.request_timeout, artifact_store.delete_object(object_key)).await;
         match deleted {
             Ok(Ok(())) => true,
             Ok(Err(artifact_error)) => {
@@ -487,10 +441,7 @@ fn is_below_the_mark(segment: &SegmentRecord, low_water_mark: SequenceNumber) ->
 
 /// Picks the replica that uploads `segment`: the first one that holds a good copy and answered this
 /// pass's survey. `None` if no such replica is registered.
-fn source_replica_of<'survey>(
-    segment: &SegmentRecord,
-    survey: &'survey Survey,
-) -> Option<&'survey ReplicaRecord> {
+fn source_replica_of<'survey>(segment: &SegmentRecord, survey: &'survey Survey) -> Option<&'survey ReplicaRecord> {
     for copy in &segment.copies {
         let answered_the_survey = survey.copies_by_replica.contains_key(&copy.replica_id);
         if copy.state != CopyState::Good || !answered_the_survey {

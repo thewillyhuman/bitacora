@@ -44,11 +44,6 @@ pub async fn serve_on_loopback(replica: Arc<dyn ReplicaApi>, replica_id: Replica
         .local_addr()
         .expect("a bound socket has an address")
         .to_string();
-    tokio::spawn(serve_replica(
-        replica,
-        replica_id,
-        listener,
-        future::pending(),
-    ));
+    tokio::spawn(serve_replica(replica, replica_id, listener, future::pending()));
     address
 }

@@ -48,9 +48,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bitacora_types::SegmentAddress;
 use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadRequest, ReadResponse,
-    RepairRequest, RepairResponse, ReplicaApi, ReplicaError, ReplicaStatus, SealRequest,
-    SealResponse, SegmentStatus, UploadRequest, UploadResponse,
+    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadRequest, ReadResponse, RepairRequest,
+    RepairResponse, ReplicaApi, ReplicaError, ReplicaStatus, SealRequest, SealResponse, SegmentStatus, UploadRequest,
+    UploadResponse,
 };
 
 use crate::metrics::{MetricsRegistry, RequestMetrics};
@@ -125,11 +125,7 @@ impl InstrumentedReplica {
 impl ReplicaApi for InstrumentedReplica {
     async fn append(&self, request: AppendRequest) -> Result<AppendResponse, ReplicaError> {
         self.metrics
-            .observe(
-                "append",
-                self.replica.append(request),
-                kind_of_replica_error,
-            )
+            .observe("append", self.replica.append(request), kind_of_replica_error)
             .await
     }
 
@@ -183,11 +179,7 @@ impl ReplicaApi for InstrumentedReplica {
 
     async fn list_segments(&self) -> Result<Vec<SegmentStatus>, ReplicaError> {
         self.metrics
-            .observe(
-                "list_segments",
-                self.replica.list_segments(),
-                kind_of_replica_error,
-            )
+            .observe("list_segments", self.replica.list_segments(), kind_of_replica_error)
             .await
     }
 

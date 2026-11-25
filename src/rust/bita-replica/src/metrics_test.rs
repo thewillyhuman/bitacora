@@ -18,10 +18,7 @@ use bitacora_process::undocumented_metrics;
 use super::*;
 
 /// Where the reference lies, seen from where Bazel and Cargo run the tests.
-const REFERENCE_LOCATIONS: [&str; 2] = [
-    "docs/operations/metrics.md",
-    "../../../docs/operations/metrics.md",
-];
+const REFERENCE_LOCATIONS: [&str; 2] = ["docs/operations/metrics.md", "../../../docs/operations/metrics.md"];
 
 /// Reads `docs/operations/metrics.md`.
 fn read_reference() -> String {
@@ -53,9 +50,7 @@ fn held_copies_are_exposed_as_a_gauge_of_the_replica() {
     metrics.segment_copies.set_unsigned(12);
 
     assert!(
-        registry
-            .encode()
-            .contains("bitacora_replica_segment_copies 12\n"),
+        registry.encode().contains("bitacora_replica_segment_copies 12\n"),
         "{}",
         registry.encode()
     );

@@ -22,10 +22,7 @@ pub enum InvalidReplicationSettings {
 /// How many replicas hold each segment of a stream, and how many of them
 /// must acknowledge a record before it is committed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(
-    try_from = "UncheckedReplicationSettings",
-    into = "UncheckedReplicationSettings"
-)]
+#[serde(try_from = "UncheckedReplicationSettings", into = "UncheckedReplicationSettings")]
 pub struct ReplicationSettings {
     replica_count: u8,
     write_quorum: u8,
@@ -45,10 +42,7 @@ impl ReplicationSettings {
     /// # Errors
     ///
     /// Returns [`InvalidReplicationSettings`] unless `1 <= W <= N`.
-    pub const fn new(
-        replica_count: u8,
-        write_quorum: u8,
-    ) -> Result<Self, InvalidReplicationSettings> {
+    pub const fn new(replica_count: u8, write_quorum: u8) -> Result<Self, InvalidReplicationSettings> {
         if write_quorum == 0 {
             return Err(InvalidReplicationSettings::ZeroWriteQuorum);
         }
@@ -135,11 +129,8 @@ mod tests {
     fn recovery_quorum_always_overlaps_the_write_quorum() {
         for replica_count in 1..=9_u8 {
             for write_quorum in 1..=replica_count {
-                let settings =
-                    ReplicationSettings::new(replica_count, write_quorum).expect("valid settings");
-                assert!(
-                    settings.recovery_quorum() + settings.write_quorum() > settings.replica_count()
-                );
+                let settings = ReplicationSettings::new(replica_count, write_quorum).expect("valid settings");
+                assert!(settings.recovery_quorum() + settings.write_quorum() > settings.replica_count());
             }
         }
     }
@@ -165,8 +156,7 @@ mod tests {
 
     #[test]
     fn settings_are_validated_when_deserialized() {
-        let deserialized =
-            serde_json::from_str::<ReplicationSettings>(r#"{"replica_count":2,"write_quorum":3}"#);
+        let deserialized = serde_json::from_str::<ReplicationSettings>(r#"{"replica_count":2,"write_quorum":3}"#);
         assert!(deserialized.is_err());
     }
 }

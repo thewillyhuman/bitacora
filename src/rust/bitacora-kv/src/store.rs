@@ -74,8 +74,8 @@ use std::time::Duration;
 use bitacora_artifact::ArtifactStore;
 use bitacora_client::{AppendError, BitacoraClient, OpenError, StreamWriter, TakeoverPolicy};
 use bitacora_materializer::{
-    MaterializerRunner, PageReadError, PageReader, PageStore, RunnerDependencies, RunnerError,
-    RunnerProgress, RunnerSettings,
+    MaterializerRunner, PageReadError, PageReader, PageStore, RunnerDependencies, RunnerError, RunnerProgress,
+    RunnerSettings,
 };
 use bitacora_meta::{MetaError, MetadataStore};
 use bitacora_types::{Epoch, SequenceNumber};
@@ -231,9 +231,7 @@ impl KvStore {
     /// Returns [`MetaError::StreamNotFound`] if the stream does not exist, or [`MetaError::Unavailable`]
     /// if the metadata store cannot be reached.
     pub async fn initialize(metadata: &MetadataStore, stream_name: &str) -> Result<(), MetaError> {
-        metadata
-            .register_materializer(stream_name, KV_MATERIALIZER)
-            .await?;
+        metadata.register_materializer(stream_name, KV_MATERIALIZER).await?;
         Ok(())
     }
 
@@ -256,15 +254,8 @@ impl KvStore {
     /// [`KvError::Materializer`] if the materializer could not start, for example because
     /// [`KvStore::initialize`] was never run; the stream is then left without a writer until a store is
     /// opened on it.
-    pub async fn open(
-        dependencies: KvDependencies,
-        stream_name: &str,
-        settings: KvSettings,
-    ) -> Result<Self, KvError> {
-        let writer = dependencies
-            .client
-            .open_writer(stream_name, settings.takeover)
-            .await?;
+    pub async fn open(dependencies: KvDependencies, stream_name: &str, settings: KvSettings) -> Result<Self, KvError> {
+        let writer = dependencies.client.open_writer(stream_name, settings.takeover).await?;
         let runner_settings = RunnerSettings {
             checkpoint_after_bytes: settings.checkpoint_after_bytes,
             checkpoint_after: settings.checkpoint_after,
@@ -276,12 +267,8 @@ impl KvStore {
             metadata: dependencies.metadata,
             artifact_store: dependencies.artifact_store,
         };
-        let runner = MaterializerRunner::<PageStore<KvPages>>::start(
-            runner_dependencies,
-            stream_name,
-            runner_settings,
-        )
-        .await?;
+        let runner =
+            MaterializerRunner::<PageStore<KvPages>>::start(runner_dependencies, stream_name, runner_settings).await?;
         let pages = runner.materializer().reader();
         let progress = runner.progress();
         let stopped = Arc::new(OnceLock::new());
@@ -348,9 +335,7 @@ impl KvStore {
         let payload = KvRecord { operations }.encode();
         match self.writer.append(payload).await {
             Ok(sequence) => Ok(sequence),
-            Err(reason @ (AppendError::Closed | AppendError::Rejected(_))) => {
-                Err(KvError::NotWritten { reason })
-            }
+            Err(reason @ (AppendError::Closed | AppendError::Rejected(_))) => Err(KvError::NotWritten { reason }),
             Err(reason @ (AppendError::Fenced | AppendError::Indeterminate { .. })) => {
                 Err(KvError::OutcomeUnknown { reason })
             }
@@ -400,11 +385,7 @@ impl KvStore {
     ///
     /// Returns [`KvError::Read`] if `sequence` was not applied in time or is older than what the store
     /// still keeps, and [`KvError::Materializer`] if the materializer has stopped short of `sequence`.
-    pub async fn get_as_of(
-        &self,
-        key: &[u8],
-        sequence: SequenceNumber,
-    ) -> Result<Option<Bytes>, KvError> {
+    pub async fn get_as_of(&self, key: &[u8], sequence: SequenceNumber) -> Result<Option<Bytes>, KvError> {
         let bucket = bucket_of(key);
         let page = self.read_bucket(bucket, sequence).await?;
         value_in_bucket(page.as_ref(), key).map_err(|damaged| KvError::DamagedBucket {
@@ -474,15 +455,8 @@ impl KvStore {
     }
 
     /// Reads one bucket page as of `sequence`, and says why if it cannot.
-    async fn read_bucket(
-        &self,
-        bucket: u32,
-        sequence: SequenceNumber,
-    ) -> Result<Option<Bytes>, KvError> {
-        let read = self
-            .pages
-            .read_page(&bucket, sequence, self.read_wait)
-            .await;
+    async fn read_bucket(&self, bucket: u32, sequence: SequenceNumber) -> Result<Option<Bytes>, KvError> {
+        let read = self.pages.read_page(&bucket, sequence, self.read_wait).await;
         match read {
             Ok(page) => Ok(page),
             Err(not_reached @ PageReadError::NotReached { .. }) => {

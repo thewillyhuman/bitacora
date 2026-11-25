@@ -100,10 +100,7 @@ impl Oracle {
     /// Remembers that the record at `sequence` appended `value` to `page_ids`.
     fn record(&mut self, sequence: u64, value: u8, page_ids: &[u8]) {
         for page_id in page_ids {
-            self.values_by_page
-                .entry(*page_id)
-                .or_default()
-                .push((sequence, value));
+            self.values_by_page.entry(*page_id).or_default().push((sequence, value));
         }
     }
 
@@ -162,12 +159,8 @@ impl Fixture {
         next_sequence: u64,
         oracle: Oracle,
     ) -> Self {
-        let artifacts = ArtifactNamespace::for_runner(
-            Arc::new(artifact_store.clone()),
-            STREAM,
-            MATERIALIZER,
-            fencing_token,
-        );
+        let artifacts =
+            ArtifactNamespace::for_runner(Arc::new(artifact_store.clone()), STREAM, MATERIALIZER, fencing_token);
         let pages = PageStore::restore_from_checkpoint(last_checkpoint, &artifacts)
             .await
             .expect("the checkpoint is restorable");
@@ -226,11 +219,7 @@ impl Fixture {
     /// Reads a page as of a sequence, without waiting.
     async fn page(&self, page_id: u8, as_of_sequence: u64) -> Result<Option<Bytes>, PageReadError> {
         self.reader
-            .read_page(
-                &page_id,
-                SequenceNumber::new(as_of_sequence),
-                Duration::ZERO,
-            )
+            .read_page(&page_id, SequenceNumber::new(as_of_sequence), Duration::ZERO)
             .await
     }
 
@@ -580,10 +569,7 @@ async fn restored_store_reads_identical_pages_at_every_sequence() {
 async fn restored_store_keeps_its_horizon() {
     let mut fixture = Fixture::new().await;
     let manifests = history_with_three_images(&mut fixture).await;
-    let last_manifest = manifests
-        .last()
-        .expect("six checkpoints were written")
-        .clone();
+    let last_manifest = manifests.last().expect("six checkpoints were written").clone();
 
     let restarted = fixture.restart_from(last_manifest).await;
 
@@ -622,12 +608,7 @@ async fn records_applied_after_the_checkpoint_are_gone_after_a_restart_until_rep
 
 #[tokio::test]
 async fn details_of_another_format_are_refused_at_restore() {
-    let artifacts = ArtifactNamespace::for_runner(
-        Arc::new(MemoryArtifactStore::new()),
-        STREAM,
-        MATERIALIZER,
-        1,
-    );
+    let artifacts = ArtifactNamespace::for_runner(Arc::new(MemoryArtifactStore::new()), STREAM, MATERIALIZER, 1);
     let manifest = CheckpointManifest {
         artifact_keys: Vec::new(),
         details: Bytes::from_static(b"not what a page store writes"),
@@ -693,12 +674,10 @@ async fn damaged_page_in_a_layer_is_detected_when_it_is_read() {
 
     assert_eq!(
         fixture.page(1, 1).await,
-        Err(PageReadError::Materializer(
-            MaterializerError::DamagedArtifact {
-                artifact_key: delta_key,
-                reason: "a page fails its checksum".to_owned(),
-            }
-        ))
+        Err(PageReadError::Materializer(MaterializerError::DamagedArtifact {
+            artifact_key: delta_key,
+            reason: "a page fails its checksum".to_owned(),
+        }))
     );
 }
 
@@ -708,20 +687,16 @@ async fn damaged_layer_header_is_detected_by_a_store_that_has_not_read_it_yet() 
     fixture.apply(10, &[1]);
     let manifest = fixture.checkpoint().await;
     let delta_key = manifest.artifact_keys[0].clone();
-    fixture
-        .damage_layer(&delta_key, DamagedByte::InTheHeader)
-        .await;
+    fixture.damage_layer(&delta_key, DamagedByte::InTheHeader).await;
 
     let restarted = fixture.restart_from(manifest).await;
 
     assert_eq!(
         restarted.page(1, 1).await,
-        Err(PageReadError::Materializer(
-            MaterializerError::DamagedArtifact {
-                artifact_key: delta_key,
-                reason: "its header fails its checksum".to_owned(),
-            }
-        ))
+        Err(PageReadError::Materializer(MaterializerError::DamagedArtifact {
+            artifact_key: delta_key,
+            reason: "its header fails its checksum".to_owned(),
+        }))
     );
 }
 
@@ -737,10 +712,7 @@ async fn damaged_layer_fails_the_checkpoint_that_would_build_an_image_from_it() 
 
     let written = fixture.pages.write_checkpoint(&fixture.artifacts).await;
 
-    assert!(matches!(
-        written,
-        Err(MaterializerError::DamagedArtifact { .. })
-    ));
+    assert!(matches!(written, Err(MaterializerError::DamagedArtifact { .. })));
 }
 
 #[tokio::test]
@@ -753,12 +725,10 @@ async fn record_that_cannot_be_applied_fails_the_reads_of_its_page() {
 
     assert_eq!(
         read,
-        Err(PageReadError::Materializer(
-            MaterializerError::InvalidRecord {
-                sequence: SequenceNumber::new(2),
-                reason: "the value is poison".to_owned(),
-            }
-        ))
+        Err(PageReadError::Materializer(MaterializerError::InvalidRecord {
+            sequence: SequenceNumber::new(2),
+            reason: "the value is poison".to_owned(),
+        }))
     );
 }
 

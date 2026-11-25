@@ -40,9 +40,7 @@
 //!   `response_conversions.rs`, which build on these.
 
 use bitacora_types::replica_api as domain;
-use bitacora_types::{
-    Epoch, InvalidReplicaId, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId,
-};
+use bitacora_types::{Epoch, InvalidReplicaId, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId};
 use thiserror::Error;
 
 use crate::v1 as wire;
@@ -122,10 +120,7 @@ pub enum MalformedMessage {
 /// # Errors
 ///
 /// Returns [`MalformedMessage::MissingField`] if `value` is `None`.
-pub(crate) fn required_field<Field>(
-    value: Option<Field>,
-    field: &'static str,
-) -> Result<Field, MalformedMessage> {
+pub(crate) fn required_field<Field>(value: Option<Field>, field: &'static str) -> Result<Field, MalformedMessage> {
     value.ok_or(MalformedMessage::MissingField { field })
 }
 
@@ -143,10 +138,7 @@ pub(crate) fn required_field<Field>(
 /// # Errors
 ///
 /// Returns [`MalformedMessage::ZeroRecordSequence`] if `raw_sequence` is 0.
-pub(crate) fn record_sequence(
-    raw_sequence: u64,
-    field: &'static str,
-) -> Result<SequenceNumber, MalformedMessage> {
+pub(crate) fn record_sequence(raw_sequence: u64, field: &'static str) -> Result<SequenceNumber, MalformedMessage> {
     if raw_sequence == 0 {
         return Err(MalformedMessage::ZeroRecordSequence { field });
     }
@@ -165,12 +157,8 @@ pub(crate) fn record_sequence(
 /// Returns [`MalformedMessage::InvalidReplicaId`] if `identifier` is empty,
 /// longer than 128 bytes, or holds anything but ASCII letters, digits, `.`,
 /// `_` and `-`.
-pub(crate) fn replica_id_from_wire(
-    identifier: String,
-    field: &'static str,
-) -> Result<ReplicaId, MalformedMessage> {
-    ReplicaId::new(identifier)
-        .map_err(|reason| MalformedMessage::InvalidReplicaId { field, reason })
+pub(crate) fn replica_id_from_wire(identifier: String, field: &'static str) -> Result<ReplicaId, MalformedMessage> {
+    ReplicaId::new(identifier).map_err(|reason| MalformedMessage::InvalidReplicaId { field, reason })
 }
 
 /// Reads an optional end of a copy or of a segment: absent stays absent.
@@ -192,10 +180,7 @@ impl From<wire::SegmentAddress> for SegmentAddress {
     /// Reads a segment address. Every pair of numbers is an address, so this
     /// cannot fail; whether the segment exists is for the replica to say.
     fn from(address: wire::SegmentAddress) -> Self {
-        Self::new(
-            StreamId::new(address.stream_id),
-            SegmentId::new(address.segment_id),
-        )
+        Self::new(StreamId::new(address.stream_id), SegmentId::new(address.segment_id))
     }
 }
 
@@ -221,10 +206,7 @@ impl TryFrom<wire::SegmentDescriptor> for domain::SegmentDescriptor {
     /// [`MalformedMessage::ZeroRecordSequence`] if the first sequence is 0.
     fn try_from(descriptor: wire::SegmentDescriptor) -> Result<Self, Self::Error> {
         let address = required_field(descriptor.address, "SegmentDescriptor.address")?;
-        let first_sequence = record_sequence(
-            descriptor.first_sequence,
-            "SegmentDescriptor.first_sequence",
-        )?;
+        let first_sequence = record_sequence(descriptor.first_sequence, "SegmentDescriptor.first_sequence")?;
         Ok(Self {
             address: address.into(),
             epoch: Epoch::new(descriptor.epoch),

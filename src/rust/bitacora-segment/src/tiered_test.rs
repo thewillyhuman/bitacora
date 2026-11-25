@@ -82,8 +82,7 @@ fn open(object: &Bytes) -> Result<(TieredFooter, TieredIndex), TieredError> {
 
 /// The sequence numbers of the records in the blocks that `byte_range` names.
 fn sequences_in(object: &Bytes, byte_range: &Range<u64>) -> Vec<u64> {
-    let batches = decode_frames(SEGMENT, &bytes_of(object, byte_range))
-        .expect("a block range holds whole frames");
+    let batches = decode_frames(SEGMENT, &bytes_of(object, byte_range)).expect("a block range holds whole frames");
     let mut sequences = Vec::new();
     for batch in &batches {
         for record in batch.records() {
@@ -243,10 +242,7 @@ fn copy_that_does_not_start_at_the_segment_start_is_not_uploaded() {
 fn empty_copy_of_a_segment_with_records_is_not_uploaded() {
     assert!(matches!(
         encode_tiered_segment(header(), LARGE_SEALED_END, &Bytes::new()),
-        Err(TieredError::WrongExtent {
-            found_first: None,
-            ..
-        })
+        Err(TieredError::WrongExtent { found_first: None, .. })
     ));
 }
 
@@ -272,10 +268,7 @@ fn bytes_shorter_than_a_footer_are_refused() {
 
 #[test]
 fn object_that_is_not_a_tiered_segment_is_refused() {
-    assert_eq!(
-        TieredFooter::decode(&[b'x'; 200]),
-        Err(TieredError::BadMagic)
-    );
+    assert_eq!(TieredFooter::decode(&[b'x'; 200]), Err(TieredError::BadMagic));
 }
 
 #[test]

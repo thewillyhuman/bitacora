@@ -79,12 +79,7 @@ fn bare_state(segment_id: u64, fenced_epoch: u64) -> SegmentStatus {
 
 /// The tiered object of a segment written under `epoch` that holds the records `first_sequence` to
 /// `sealed_end`.
-fn tiered_object(
-    segment_id: u64,
-    epoch: u64,
-    first_sequence: u64,
-    sealed_end: u64,
-) -> TieredObject {
+fn tiered_object(segment_id: u64, epoch: u64, first_sequence: u64, sealed_end: u64) -> TieredObject {
     let address = SegmentAddress::new(STREAM_ID, SegmentId::new(segment_id));
     let mut frames = BytesMut::new();
     for sequence in first_sequence..=sealed_end {
@@ -101,8 +96,8 @@ fn tiered_object(
         epoch: Epoch::new(epoch),
         first_sequence: SequenceNumber::new(first_sequence),
     };
-    let object = encode_tiered_segment(header, SequenceNumber::new(sealed_end), &frames.freeze())
-        .expect("a valid segment");
+    let object =
+        encode_tiered_segment(header, SequenceNumber::new(sealed_end), &frames.freeze()).expect("a valid segment");
     TieredObject {
         object_key: format!("streams/7/segments/{segment_id:020}"),
         size_bytes: object.len() as u64,
@@ -160,10 +155,7 @@ fn segment_whose_seal_the_replicas_recorded_is_sealed_there() {
 
     let record = record_of_the_stream(&inputs);
 
-    assert_eq!(
-        record.segments[0].sealed_end(),
-        Some(SequenceNumber::new(9))
-    );
+    assert_eq!(record.segments[0].sealed_end(), Some(SequenceNumber::new(9)));
 }
 
 #[test]
@@ -200,19 +192,13 @@ fn seal_nobody_recorded_is_inferred_from_the_start_of_the_next_segment() {
     let planned = plan_of_the_stream(&inputs);
 
     let record = planned.record.expect("a record is planned");
-    assert_eq!(
-        record.segments[0].sealed_end(),
-        Some(SequenceNumber::new(9))
-    );
+    assert_eq!(record.segments[0].sealed_end(), Some(SequenceNumber::new(9)));
     assert_eq!(planned.problems, Vec::<String>::new());
 }
 
 #[test]
 fn last_segment_without_a_recorded_seal_is_left_open() {
-    let copies = [
-        file_copy(1, 4, 1, 9, Some(9)),
-        file_copy(2, 5, 10, 15, None),
-    ];
+    let copies = [file_copy(1, 4, 1, 9, Some(9)), file_copy(2, 5, 10, 15, None)];
     let inputs = inputs_with(&['a', 'b', 'c'], &copies);
 
     let record = record_of_the_stream(&inputs);
@@ -296,10 +282,7 @@ fn longest_copies_are_kept_when_more_were_found_than_the_replication_asks_for() 
 
 #[test]
 fn segments_that_do_not_connect_are_a_problem() {
-    let copies = [
-        file_copy(1, 4, 1, 9, Some(9)),
-        file_copy(3, 5, 20, 29, Some(29)),
-    ];
+    let copies = [file_copy(1, 4, 1, 9, Some(9)), file_copy(3, 5, 20, 29, Some(29))];
     let inputs = inputs_with(&['a', 'b', 'c'], &copies);
 
     let planned = plan_of_the_stream(&inputs);
@@ -309,10 +292,7 @@ fn segments_that_do_not_connect_are_a_problem() {
 
 #[test]
 fn stream_with_a_gap_is_rebuilt_from_the_segment_after_it() {
-    let copies = [
-        file_copy(1, 4, 1, 9, Some(9)),
-        file_copy(3, 5, 20, 29, Some(29)),
-    ];
+    let copies = [file_copy(1, 4, 1, 9, Some(9)), file_copy(3, 5, 20, 29, Some(29))];
     let inputs = inputs_with(&['a', 'b', 'c'], &copies);
 
     let record = record_of_the_stream(&inputs);
@@ -805,10 +785,7 @@ async fn replica_named_on_the_command_line_is_asked_although_it_is_not_registere
     for asked in &report.replicas {
         asked_replicas.push(asked.replica_id.clone());
     }
-    assert!(
-        asked_replicas.contains(&unregistered.to_string()),
-        "{asked_replicas:?}"
-    );
+    assert!(asked_replicas.contains(&unregistered.to_string()), "{asked_replicas:?}");
 }
 
 #[tokio::test(start_paused = true)]

@@ -117,11 +117,7 @@ impl S3ArtifactStore {
     /// * `key_prefix` - The path inside the service that every key is put under: empty, or a plain
     ///   relative path without a leading or trailing `/`.
     /// * `request_timeout` - The longest one operation may take.
-    pub(crate) fn over(
-        object_store: Arc<dyn ObjectStore>,
-        key_prefix: &str,
-        request_timeout: Duration,
-    ) -> Self {
+    pub(crate) fn over(object_store: Arc<dyn ObjectStore>, key_prefix: &str, request_timeout: Duration) -> Self {
         let key_namespace = if key_prefix.is_empty() {
             String::new()
         } else {
@@ -187,16 +183,8 @@ impl S3ArtifactStore {
     }
 
     /// Stores an object. Any failure is an outage: a `PUT` has no other way to fail.
-    async fn store_at(
-        &self,
-        location: &Path,
-        object_key: &str,
-        contents: Bytes,
-    ) -> Result<(), ArtifactError> {
-        let stored = self
-            .object_store
-            .put(location, PutPayload::from(contents))
-            .await;
+    async fn store_at(&self, location: &Path, object_key: &str, contents: Bytes) -> Result<(), ArtifactError> {
+        let stored = self.object_store.put(location, PutPayload::from(contents)).await;
         match stored {
             Ok(_version) => Ok(()),
             Err(error) => Err(unavailable("store", object_key, &error)),
@@ -320,9 +308,7 @@ impl S3ArtifactStore {
 /// Whether `error` says that the object is absent from a bucket that exists.
 fn is_missing_object(error: &object_store::Error) -> bool {
     match error {
-        object_store::Error::NotFound { source, .. } => {
-            !source.to_string().contains(MISSING_BUCKET_CODE)
-        }
+        object_store::Error::NotFound { source, .. } => !source.to_string().contains(MISSING_BUCKET_CODE),
         _other => false,
     }
 }
@@ -336,11 +322,7 @@ fn not_found(object_key: &str) -> ArtifactError {
 
 /// The error for a failed read of an object: `NotFound` if the service says the object is absent,
 /// `Unavailable` for everything else.
-fn not_found_or_unavailable(
-    operation: &str,
-    object_key: &str,
-    error: &object_store::Error,
-) -> ArtifactError {
+fn not_found_or_unavailable(operation: &str, object_key: &str, error: &object_store::Error) -> ArtifactError {
     if is_missing_object(error) {
         not_found(object_key)
     } else {
@@ -381,11 +363,7 @@ impl ArtifactStore for S3ArtifactStore {
         self.within_deadline("read", object_key, request).await
     }
 
-    async fn get_range(
-        &self,
-        object_key: &str,
-        byte_range: Range<u64>,
-    ) -> Result<Bytes, ArtifactError> {
+    async fn get_range(&self, object_key: &str, byte_range: Range<u64>) -> Result<Bytes, ArtifactError> {
         let location = self.location_of(object_key)?;
         let request = self.read_range_at(&location, object_key, byte_range);
         self.within_deadline("read", object_key, request).await

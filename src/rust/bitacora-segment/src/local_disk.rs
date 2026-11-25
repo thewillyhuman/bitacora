@@ -67,9 +67,7 @@ impl LocalDisk {
 async fn run_blocking<Output: Send + 'static>(
     operation: impl FnOnce() -> io::Result<Output> + Send + 'static,
 ) -> io::Result<Output> {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(io::Error::other)?
+    tokio::task::spawn_blocking(operation).await.map_err(io::Error::other)?
 }
 
 /// Makes the entries of `directory` durable. Creating or renaming a file
@@ -103,20 +101,14 @@ fn create_parent_directories(root_directory: &Path, file_path: &Path) -> io::Res
     Ok(())
 }
 
-fn collect_files(
-    directory: &Path,
-    root_directory: &Path,
-    found: &mut Vec<String>,
-) -> io::Result<()> {
+fn collect_files(directory: &Path, root_directory: &Path, found: &mut Vec<String>) -> io::Result<()> {
     for entry in fs::read_dir(directory)? {
         let entry_path = entry?.path();
         if entry_path.is_dir() {
             collect_files(&entry_path, root_directory, found)?;
             continue;
         }
-        let relative_path = entry_path
-            .strip_prefix(root_directory)
-            .map_err(io::Error::other)?;
+        let relative_path = entry_path.strip_prefix(root_directory).map_err(io::Error::other)?;
         let listed_path = relative_path
             .components()
             .map(|component| component.as_os_str().to_string_lossy())
@@ -166,9 +158,7 @@ impl Disk for LocalDisk {
             file.sync_all()?;
             fs::rename(&temporary_path, &file_path)?;
             sync_directory(parent_of(&file_path)?)?;
-            Ok(Box::new(LocalDiskFile {
-                file: Arc::new(file),
-            }) as Box<dyn DiskFile>)
+            Ok(Box::new(LocalDiskFile { file: Arc::new(file) }) as Box<dyn DiskFile>)
         })
         .await
     }
@@ -177,9 +167,7 @@ impl Disk for LocalDisk {
         let file_path = self.resolve(path)?;
         run_blocking(move || {
             let file = OpenOptions::new().read(true).write(true).open(&file_path)?;
-            Ok(Box::new(LocalDiskFile {
-                file: Arc::new(file),
-            }) as Box<dyn DiskFile>)
+            Ok(Box::new(LocalDiskFile { file: Arc::new(file) }) as Box<dyn DiskFile>)
         })
         .await
     }
@@ -271,8 +259,7 @@ impl DiskFile for LocalDiskFile {
             let mut contents = BytesMut::zeroed(length_bytes);
             let mut filled_bytes = 0;
             while filled_bytes < length_bytes {
-                let read_offset =
-                    offset_bytes + u64::try_from(filled_bytes).expect("lengths fit in 64 bits");
+                let read_offset = offset_bytes + u64::try_from(filled_bytes).expect("lengths fit in 64 bits");
                 match file.read_at(&mut contents[filled_bytes..], read_offset) {
                     Ok(0) => break,
                     Ok(read_bytes) => filled_bytes += read_bytes,
@@ -327,20 +314,11 @@ mod tests {
     async fn written_bytes_are_read_back_after_reopening() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let mut file = disk
-            .create_file(PATH, Bytes::new(), 0)
-            .await
-            .expect("new file");
-        file.write_at(3, Bytes::from_static(b"abc"))
-            .await
-            .expect("write");
+        let mut file = disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
+        file.write_at(3, Bytes::from_static(b"abc")).await.expect("write");
         file.sync_data().await.expect("flush");
 
-        let reopened = disk_in(&directory)
-            .await
-            .open_file(PATH)
-            .await
-            .expect("open");
+        let reopened = disk_in(&directory).await.open_file(PATH).await.expect("open");
         assert_eq!(
             reopened.read_at(0, 64).await.expect("read"),
             Bytes::from_static(b"\0\0\0abc")
@@ -372,9 +350,7 @@ mod tests {
             .await
             .expect("write");
 
-        disk.rename_file("7/3.seg.repair", "7/3.seg")
-            .await
-            .expect("rename");
+        disk.rename_file("7/3.seg.repair", "7/3.seg").await.expect("rename");
 
         assert_eq!(
             disk.read_file("7/3.seg").await.expect("read"),
@@ -393,10 +369,7 @@ mod tests {
 
         let renamed = disk.rename_file("7/3.seg.repair", "7/3.seg").await;
 
-        assert_eq!(
-            renamed.map_err(|error| error.kind()),
-            Err(io::ErrorKind::NotFound)
-        );
+        assert_eq!(renamed.map_err(|error| error.kind()), Err(io::ErrorKind::NotFound));
         assert_eq!(
             disk.read_file("7/3.seg").await.expect("read"),
             Some(Bytes::from_static(b"old copy"))
@@ -418,10 +391,7 @@ mod tests {
     async fn new_file_has_its_preallocated_length() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let file = disk
-            .create_file(PATH, Bytes::new(), 4096)
-            .await
-            .expect("new file");
+        let file = disk.create_file(PATH, Bytes::new(), 4096).await.expect("new file");
         assert_eq!(file.length_bytes().await.expect("length"), 4096);
     }
 
@@ -429,9 +399,7 @@ mod tests {
     async fn creating_an_existing_file_fails() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        disk.create_file(PATH, Bytes::new(), 0)
-            .await
-            .expect("new file");
+        disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
         let second_attempt = disk.create_file(PATH, Bytes::new(), 0).await;
         assert_eq!(
             second_attempt.err().map(|error| error.kind()),
@@ -443,27 +411,16 @@ mod tests {
     async fn opening_a_missing_file_fails() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let opened = disk_in(&directory).await.open_file(PATH).await;
-        assert_eq!(
-            opened.err().map(|error| error.kind()),
-            Some(io::ErrorKind::NotFound)
-        );
+        assert_eq!(opened.err().map(|error| error.kind()), Some(io::ErrorKind::NotFound));
     }
 
     #[tokio::test]
     async fn reading_past_the_end_returns_what_exists() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let mut file = disk
-            .create_file(PATH, Bytes::new(), 0)
-            .await
-            .expect("new file");
-        file.write_at(0, Bytes::from_static(b"abc"))
-            .await
-            .expect("write");
-        assert_eq!(
-            file.read_at(1, 64).await.expect("read"),
-            Bytes::from_static(b"bc")
-        );
+        let mut file = disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
+        file.write_at(0, Bytes::from_static(b"abc")).await.expect("write");
+        assert_eq!(file.read_at(1, 64).await.expect("read"), Bytes::from_static(b"bc"));
     }
 
     #[tokio::test]
@@ -493,23 +450,16 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
         for path in ["7/3.seg", "2/9.seg", "7/3.state.tmp"] {
-            disk.create_file(path, Bytes::new(), 0)
-                .await
-                .expect("new file");
+            disk.create_file(path, Bytes::new(), 0).await.expect("new file");
         }
-        assert_eq!(
-            disk.list_files().await.expect("list"),
-            ["2/9.seg", "7/3.seg"]
-        );
+        assert_eq!(disk.list_files().await.expect("list"), ["2/9.seg", "7/3.seg"]);
     }
 
     #[tokio::test]
     async fn removed_file_is_no_longer_listed() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        disk.create_file(PATH, Bytes::new(), 0)
-            .await
-            .expect("new file");
+        disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
         disk.remove_file(PATH).await.expect("remove");
         assert_eq!(disk.list_files().await.expect("list"), Vec::<String>::new());
     }
@@ -525,18 +475,10 @@ mod tests {
     async fn shrinking_a_file_cuts_its_content() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let disk = disk_in(&directory).await;
-        let mut file = disk
-            .create_file(PATH, Bytes::new(), 0)
-            .await
-            .expect("new file");
-        file.write_at(0, Bytes::from_static(b"keep-drop"))
-            .await
-            .expect("write");
+        let mut file = disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
+        file.write_at(0, Bytes::from_static(b"keep-drop")).await.expect("write");
         file.set_length(4).await.expect("shrink");
-        assert_eq!(
-            file.read_at(0, 64).await.expect("read"),
-            Bytes::from_static(b"keep")
-        );
+        assert_eq!(file.read_at(0, 64).await.expect("read"), Bytes::from_static(b"keep"));
     }
 
     #[tokio::test]

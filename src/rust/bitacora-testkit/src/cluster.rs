@@ -5,15 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bitacora_artifact::MemoryArtifactStore;
-use bitacora_meta::{
-    MemoryKeyValueStore, MetaError, MetadataStore, RECORD_SCHEMA_VERSION, ReplicaRecord,
-};
+use bitacora_meta::{MemoryKeyValueStore, MetaError, MetadataStore, RECORD_SCHEMA_VERSION, ReplicaRecord};
 use bitacora_replica::{Replica, ReplicaSettings};
 use bitacora_segment::format::{Batch, decode_frames};
 use bitacora_segment::{Disk, MemoryDisk};
-use bitacora_types::replica_api::{
-    ReadLimit, ReadRequest, ReplicaApi, ReplicaConnector, UnreachableReplica,
-};
+use bitacora_types::replica_api::{ReadLimit, ReadRequest, ReplicaApi, ReplicaConnector, UnreachableReplica};
 use bitacora_types::{Clock, ReplicaId, SegmentAddress, SequenceNumber};
 
 use crate::clock::VirtualClock;
@@ -50,9 +46,7 @@ impl ReplicaConnector for ClusterConnector {
                 link,
                 expected_replica_id: replica_id.clone(),
             }),
-            None => Arc::new(UnreachableReplica::new(format!(
-                "no node is reachable at {address}"
-            ))),
+            None => Arc::new(UnreachableReplica::new(format!("no node is reachable at {address}"))),
         }
     }
 }
@@ -89,8 +83,7 @@ impl Node {
         connector: ClusterConnector,
         artifact_store: MemoryArtifactStore,
     ) -> Self {
-        let replica_id =
-            ReplicaId::new(format!("replica-{node_number}")).expect("valid identifier");
+        let replica_id = ReplicaId::new(format!("replica-{node_number}")).expect("valid identifier");
         let disk = MemoryDisk::new();
         let has_failed_write = Arc::new(AtomicBool::new(false));
         let replica = open_replica(
@@ -117,8 +110,7 @@ impl Node {
             artifact_store,
             has_failed_write,
         };
-        node.connector
-            .register(node.address.clone(), Arc::clone(&node.link));
+        node.connector.register(node.address.clone(), Arc::clone(&node.link));
         node
     }
 
@@ -210,11 +202,8 @@ impl Node {
         self.link.set_replica(None);
         let mut storage = self.storage();
         storage.disks_lost += 1;
-        storage.replica_id = ReplicaId::new(format!(
-            "replica-{}-disk-{}",
-            self.node_number, storage.disks_lost
-        ))
-        .expect("valid identifier");
+        storage.replica_id = ReplicaId::new(format!("replica-{}-disk-{}", self.node_number, storage.disks_lost))
+            .expect("valid identifier");
         storage.disk = MemoryDisk::new();
     }
 
@@ -455,9 +444,7 @@ mod tests {
     use std::time::Duration;
 
     use bitacora_artifact::ArtifactStore as _;
-    use bitacora_types::replica_api::{
-        AppendRequest, ReplicaError, SealRequest, SegmentDescriptor, UploadRequest,
-    };
+    use bitacora_types::replica_api::{AppendRequest, ReplicaError, SealRequest, SegmentDescriptor, UploadRequest};
     use bitacora_types::{Epoch, SegmentId, StreamId};
     use bytes::Bytes;
     use tokio::time::Instant;
@@ -489,11 +476,7 @@ mod tests {
 
     async fn cluster_with_three_records() -> Cluster {
         let cluster = Cluster::start(1).await;
-        cluster.nodes()[0]
-            .link()
-            .append(append(1, 3))
-            .await
-            .expect("append");
+        cluster.nodes()[0].link().append(append(1, 3)).await.expect("append");
         cluster
     }
 
@@ -520,10 +503,7 @@ mod tests {
             .connect(&node.replica_id(), node.address())
             .status()
             .await;
-        assert_eq!(
-            status.map(|status| status.replica_id),
-            Ok(node.replica_id())
-        );
+        assert_eq!(status.map(|status| status.replica_id), Ok(node.replica_id()));
     }
 
     #[tokio::test(start_paused = true)]
@@ -614,9 +594,7 @@ mod tests {
         let node = &cluster.nodes()[0];
         // Keep the segment header and the first bytes of the only batch.
         let surviving_bytes = bitacora_segment::format::SEGMENT_HEADER_BYTES + 16;
-        node.crash_keeping(|_path, durable, _visible| {
-            durable[..durable.len().min(surviving_bytes)].to_vec()
-        });
+        node.crash_keeping(|_path, durable, _visible| durable[..durable.len().min(surviving_bytes)].to_vec());
         node.restart().await;
         assert_eq!(node.local_end(SEGMENT).await, Some(SequenceNumber::ZERO));
     }
@@ -630,9 +608,7 @@ mod tests {
         node.restart().await;
         let status = node.link().status().await.expect("status");
         assert!(
-            status.replica_id != identity_before
-                && status.replica_id == node.replica_id()
-                && status.segment_count == 0,
+            status.replica_id != identity_before && status.replica_id == node.replica_id() && status.segment_count == 0,
             "{status:?}"
         );
     }
@@ -681,17 +657,13 @@ mod tests {
         node.lose_disk();
         node.restart().await;
         let connector = cluster.connector();
-        let as_old_identity = connector
-            .connect(&old_identity, node.address())
-            .list_segments()
-            .await;
+        let as_old_identity = connector.connect(&old_identity, node.address()).list_segments().await;
         let as_new_identity = connector
             .connect(&node.replica_id(), node.address())
             .list_segments()
             .await;
         assert!(
-            matches!(as_old_identity, Err(ReplicaError::Unavailable { .. }))
-                && as_new_identity == Ok(Vec::new()),
+            matches!(as_old_identity, Err(ReplicaError::Unavailable { .. })) && as_new_identity == Ok(Vec::new()),
             "as the old identity: {as_old_identity:?}"
         );
     }
@@ -735,10 +707,7 @@ mod tests {
         let cluster = Cluster::start(2).await;
         cluster.nodes()[1].crash();
         tokio::time::advance(Duration::from_secs(60)).await;
-        cluster
-            .renew_registrations()
-            .await
-            .expect("the store is available");
+        cluster.renew_registrations().await.expect("the store is available");
         let now = cluster.clock().now();
         let alive: Vec<bool> = cluster
             .metadata()

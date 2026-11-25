@@ -126,11 +126,7 @@ impl InstrumentedArtifactStore {
         );
         Self {
             store,
-            metrics: RequestMetrics::register(
-                registry,
-                "object_store",
-                "Requests to the object store",
-            ),
+            metrics: RequestMetrics::register(registry, "object_store", "Requests to the object store"),
             transferred_bytes,
         }
     }
@@ -161,21 +157,13 @@ impl ArtifactStore for InstrumentedArtifactStore {
     async fn get_object(&self, object_key: &str) -> Result<Bytes, ArtifactError> {
         let contents = self
             .metrics
-            .observe(
-                "get_object",
-                self.store.get_object(object_key),
-                kind_of_artifact_error,
-            )
+            .observe("get_object", self.store.get_object(object_key), kind_of_artifact_error)
             .await?;
         self.count_transferred(DOWNLOADED, contents.len());
         Ok(contents)
     }
 
-    async fn get_range(
-        &self,
-        object_key: &str,
-        byte_range: Range<u64>,
-    ) -> Result<Bytes, ArtifactError> {
+    async fn get_range(&self, object_key: &str, byte_range: Range<u64>) -> Result<Bytes, ArtifactError> {
         let contents = self
             .metrics
             .observe(

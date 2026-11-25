@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use bitacora_types::replica_api::SegmentDescriptor;
 use bitacora_types::{
-    Epoch, ReplicaId, ReplicationSettings, SegmentAddress, SegmentId, SequenceNumber, StreamId,
-    Timestamp,
+    Epoch, ReplicaId, ReplicationSettings, SegmentAddress, SegmentId, SequenceNumber, StreamId, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -148,10 +147,7 @@ impl SegmentRecord {
     /// everything from its first sequence on.
     #[must_use]
     pub fn contains(&self, sequence: SequenceNumber) -> bool {
-        sequence >= self.first_sequence
-            && self
-                .sealed_end()
-                .is_none_or(|sealed_end| sequence <= sealed_end)
+        sequence >= self.first_sequence && self.sealed_end().is_none_or(|sealed_end| sequence <= sealed_end)
     }
 }
 
@@ -209,9 +205,7 @@ impl StreamRecord {
     /// The segment that holds `sequence`, if it has not been deleted.
     #[must_use]
     pub fn segment_containing(&self, sequence: SequenceNumber) -> Option<&SegmentRecord> {
-        self.segments
-            .iter()
-            .find(|segment| segment.contains(sequence))
+        self.segments.iter().find(|segment| segment.contains(sequence))
     }
 
     /// The sequence number the next segment will start at.
@@ -335,9 +329,7 @@ mod tests {
             retention: RetentionPolicy::default(),
             epoch: Epoch::new(1),
             writer: None,
-            next_segment_id: SegmentId::new(
-                segments.last().map_or(1, |last| last.segment_id.get() + 1),
-            ),
+            next_segment_id: SegmentId::new(segments.last().map_or(1, |last| last.segment_id.get() + 1)),
             segments,
             standby_replicas: None,
             truncate_before: None,
@@ -359,9 +351,7 @@ mod tests {
     #[test]
     fn open_segment_contains_everything_from_its_start() {
         let open = segment(1, 10, None);
-        assert!(
-            !open.contains(SequenceNumber::new(9)) && open.contains(SequenceNumber::new(1_000_000))
-        );
+        assert!(!open.contains(SequenceNumber::new(9)) && open.contains(SequenceNumber::new(1_000_000)));
     }
 
     #[test]
@@ -374,20 +364,14 @@ mod tests {
     fn stream_finds_the_segment_holding_a_sequence() {
         let orders = stream(vec![segment(1, 1, Some(9)), segment(2, 10, None)]);
         let found = orders.segment_containing(SequenceNumber::new(9));
-        assert_eq!(
-            found.map(|segment| segment.segment_id),
-            Some(SegmentId::new(1))
-        );
+        assert_eq!(found.map(|segment| segment.segment_id), Some(SegmentId::new(1)));
     }
 
     #[test]
     fn stream_skips_an_empty_sealed_segment_when_locating_a_sequence() {
         let orders = stream(vec![segment(1, 1, Some(0)), segment(2, 1, None)]);
         let found = orders.segment_containing(SequenceNumber::new(1));
-        assert_eq!(
-            found.map(|segment| segment.segment_id),
-            Some(SegmentId::new(2))
-        );
+        assert_eq!(found.map(|segment| segment.segment_id), Some(SegmentId::new(2)));
     }
 
     #[test]
@@ -399,28 +383,19 @@ mod tests {
 
     #[test]
     fn next_segment_of_a_fresh_stream_starts_at_the_first_record() {
-        assert_eq!(
-            stream(Vec::new()).next_segment_first_sequence(),
-            SequenceNumber::FIRST
-        );
+        assert_eq!(stream(Vec::new()).next_segment_first_sequence(), SequenceNumber::FIRST);
     }
 
     #[test]
     fn next_segment_starts_right_after_the_last_sealed_end() {
         let orders = stream(vec![segment(1, 1, Some(9))]);
-        assert_eq!(
-            orders.next_segment_first_sequence(),
-            SequenceNumber::new(10)
-        );
+        assert_eq!(orders.next_segment_first_sequence(), SequenceNumber::new(10));
     }
 
     #[test]
     fn next_segment_after_an_empty_sealed_one_reuses_its_start() {
         let orders = stream(vec![segment(1, 1, Some(9)), segment(2, 10, Some(9))]);
-        assert_eq!(
-            orders.next_segment_first_sequence(),
-            SequenceNumber::new(10)
-        );
+        assert_eq!(orders.next_segment_first_sequence(), SequenceNumber::new(10));
     }
 
     #[test]

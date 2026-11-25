@@ -225,8 +225,7 @@ impl ReplicaConfigFile {
             ));
         }
         let listen_address = parse_listen_address("listen_address", &self.listen_address)?;
-        let metrics_listen_address =
-            parse_listen_address("metrics_listen_address", &self.metrics_listen_address)?;
+        let metrics_listen_address = parse_listen_address("metrics_listen_address", &self.metrics_listen_address)?;
         if listen_address == metrics_listen_address {
             return Err(InvalidConfig::because(
                 "metrics_listen_address",
@@ -237,10 +236,7 @@ impl ReplicaConfigFile {
         for failure_domain in &self.failure_domains {
             check_failure_domain(failure_domain)?;
         }
-        let registration_interval = whole_seconds(
-            "registration_interval_seconds",
-            self.registration_interval_seconds,
-        )?;
+        let registration_interval = whole_seconds("registration_interval_seconds", self.registration_interval_seconds)?;
         let scrub_interval = whole_seconds("scrub_interval_seconds", self.scrub_interval_seconds)?;
         let replica = self.storage.validate()?;
         Ok(ReplicaDaemonSettings {
@@ -315,9 +311,7 @@ fn check_advertised_address(address: &str) -> Result<(), InvalidConfig> {
     let refuse = |reason: &str| {
         Err(InvalidConfig::because(
             "advertised_address",
-            format!(
-                "{address:?} {reason}; write `host:port`, for example `replica-a.example.org:7000`"
-            ),
+            format!("{address:?} {reason}; write `host:port`, for example `replica-a.example.org:7000`"),
         ))
     };
     let Some((host, port_text)) = address.rsplit_once(':') else {
@@ -340,10 +334,7 @@ fn check_advertised_address(address: &str) -> Result<(), InvalidConfig> {
 /// stray whitespace would silently never match.
 fn check_failure_domain(failure_domain: &str) -> Result<(), InvalidConfig> {
     if failure_domain.is_empty() {
-        return Err(InvalidConfig::because(
-            "failure_domains",
-            "a label is empty",
-        ));
+        return Err(InvalidConfig::because("failure_domains", "a label is empty"));
     }
     if failure_domain.chars().any(char::is_whitespace) {
         return Err(InvalidConfig::because(

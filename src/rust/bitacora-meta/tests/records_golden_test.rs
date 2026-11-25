@@ -17,13 +17,10 @@
 use std::collections::BTreeSet;
 
 use bitacora_meta::{
-    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord,
-    RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
-    TieredRecord, WriterLease,
+    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
+    RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,
 };
-use bitacora_types::{
-    Epoch, ReplicaId, ReplicationSettings, SegmentId, SequenceNumber, StreamId, Timestamp,
-};
+use bitacora_types::{Epoch, ReplicaId, ReplicationSettings, SegmentId, SequenceNumber, StreamId, Timestamp};
 
 /// The stream record of schema version 1.
 const GOLDEN_STREAM: &str = concat!(
@@ -65,8 +62,7 @@ const GOLDEN_LEADER: &str = concat!(
 
 /// A leader record as it was written before `leading_since` existed. Controllers are upgraded one at a
 /// time, so a new one must read what an old one wrote.
-const GOLDEN_LEADER_WITHOUT_ITS_START: &str =
-    r#"{"holder":"controller-1","expires_at":1795000010000}"#;
+const GOLDEN_LEADER_WITHOUT_ITS_START: &str = r#"{"holder":"controller-1","expires_at":1795000010000}"#;
 
 /// The deleted-stream record of schema version 1.
 const GOLDEN_DELETED_STREAM: &str = r#"{"stream_id":7,"name":"orders"}"#;
@@ -151,11 +147,7 @@ fn replica_registration() -> ReplicaRecord {
         schema_version: RECORD_SCHEMA_VERSION,
         replica_id: replica("replica-a"),
         address: "10.0.0.11:7000".to_owned(),
-        failure_domains: vec![
-            "zone-1".to_owned(),
-            "rack-4".to_owned(),
-            "host-11".to_owned(),
-        ],
+        failure_domains: vec!["zone-1".to_owned(), "rack-4".to_owned(), "host-11".to_owned()],
         capacity_bytes: 960_000_000_000,
         free_bytes: 412_000_000_000,
         is_draining: false,
@@ -203,8 +195,7 @@ fn checkpoint_record_is_written_as_in_schema_version_1() {
 
 #[test]
 fn checkpoint_record_of_schema_version_1_is_read() {
-    let read: CheckpointRecord =
-        serde_json::from_str(GOLDEN_CHECKPOINT).expect("the golden text is valid");
+    let read: CheckpointRecord = serde_json::from_str(GOLDEN_CHECKPOINT).expect("the golden text is valid");
 
     assert_eq!(read, checkpoint());
 }
@@ -218,8 +209,7 @@ fn replica_record_is_written_as_in_schema_version_1() {
 
 #[test]
 fn replica_record_of_schema_version_1_is_read() {
-    let read: ReplicaRecord =
-        serde_json::from_str(GOLDEN_REPLICA).expect("the golden text is valid");
+    let read: ReplicaRecord = serde_json::from_str(GOLDEN_REPLICA).expect("the golden text is valid");
 
     assert_eq!(read, replica_registration());
 }
@@ -240,8 +230,7 @@ fn leader_record_of_schema_version_1_is_read() {
 
 #[test]
 fn leader_record_written_before_its_start_was_recorded_is_read() {
-    let read: LeaderRecord =
-        serde_json::from_str(GOLDEN_LEADER_WITHOUT_ITS_START).expect("the golden text is valid");
+    let read: LeaderRecord = serde_json::from_str(GOLDEN_LEADER_WITHOUT_ITS_START).expect("the golden text is valid");
 
     assert_eq!(
         read,
@@ -261,8 +250,7 @@ fn deleted_stream_record_is_written_as_in_schema_version_1() {
 
 #[test]
 fn deleted_stream_record_of_schema_version_1_is_read() {
-    let read: DeletedStreamRecord =
-        serde_json::from_str(GOLDEN_DELETED_STREAM).expect("the golden text is valid");
+    let read: DeletedStreamRecord = serde_json::from_str(GOLDEN_DELETED_STREAM).expect("the golden text is valid");
 
     assert_eq!(read, deleted_stream());
 }

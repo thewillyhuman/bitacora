@@ -43,8 +43,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora::{
-    BitacoraClient, ClientSettings, ClusterConfig, ConnectError, DEFAULT_ETCD_KEY_PREFIX,
-    ObjectStoreConfig, WriterSettings,
+    BitacoraClient, ClientSettings, ClusterConfig, ConnectError, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig,
+    WriterSettings,
 };
 use bitacora_artifact::ArtifactStore;
 use bitacora_meta::MetadataStore;
@@ -201,10 +201,7 @@ impl Cluster {
     /// # Errors
     ///
     /// Returns [`ConnectError`] if the configuration can never work or the object store cannot be opened.
-    pub(crate) async fn connect(
-        config: &ClusterConfig,
-        request_timeout: Duration,
-    ) -> Result<Self, ConnectError> {
+    pub(crate) async fn connect(config: &ClusterConfig, request_timeout: Duration) -> Result<Self, ConnectError> {
         Ok(Self {
             metadata: bitacora::connect_metadata(config).await?,
             connector: bitacora::replica_connector(),

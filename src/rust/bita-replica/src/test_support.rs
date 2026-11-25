@@ -30,9 +30,7 @@ use std::sync::Arc;
 use bitacora_replica::{Replica, ReplicaSettings};
 use bitacora_segment::MemoryDisk;
 use bitacora_segment::format::Batch;
-use bitacora_types::replica_api::{
-    AppendRequest, ReplicaApi, SealRequest, SegmentDescriptor, StaticReplicaConnector,
-};
+use bitacora_types::replica_api::{AppendRequest, ReplicaApi, SealRequest, SegmentDescriptor, StaticReplicaConnector};
 use bitacora_types::{Epoch, ReplicaId, SegmentAddress, SegmentId, SequenceNumber, StreamId};
 use bytes::Bytes;
 
@@ -90,8 +88,7 @@ pub(crate) fn append_of(first_sequence: u64, record_count: u64) -> AppendRequest
     for sequence in first_sequence..first_sequence + record_count {
         payloads.push(Bytes::from(format!("record-{sequence}")));
     }
-    let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads)
-        .expect("a valid batch");
+    let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads).expect("a valid batch");
     AppendRequest {
         segment: descriptor(),
         writer_epoch: WRITER_EPOCH,
@@ -118,8 +115,5 @@ pub(crate) async fn write_sealed_segment(replica: &dyn ReplicaApi) {
         .append(append_of(1, SEALED_END))
         .await
         .expect("the append is acknowledged");
-    replica
-        .seal(seal_at(SEALED_END))
-        .await
-        .expect("the seal is recorded");
+    replica.seal(seal_at(SEALED_END)).await.expect("the seal is recorded");
 }

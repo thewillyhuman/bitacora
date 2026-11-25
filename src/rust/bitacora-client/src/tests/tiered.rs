@@ -209,10 +209,7 @@ async fn reader_without_an_object_store_cannot_read_a_segment_the_replicas_dropp
 
     let read = reader_without_object_store.read_range(range(1, 6)).await;
 
-    assert!(
-        matches!(read, Err(ReadError::Unavailable { .. })),
-        "{read:?}"
-    );
+    assert!(matches!(read, Err(ReadError::Unavailable { .. })), "{read:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -221,14 +218,9 @@ async fn range_read_fails_while_the_object_store_is_down() {
     tier_first_segment(&cluster, LocalCopies::Dropped).await;
     cluster.artifact_store().set_unavailable(true);
 
-    let read = reader_with_object_store(&cluster)
-        .read_range(range(1, 6))
-        .await;
+    let read = reader_with_object_store(&cluster).read_range(range(1, 6)).await;
 
-    assert!(
-        matches!(read, Err(ReadError::Unavailable { .. })),
-        "{read:?}"
-    );
+    assert!(matches!(read, Err(ReadError::Unavailable { .. })), "{read:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -254,18 +246,11 @@ async fn damaged_object_fails_the_read_instead_of_yielding_wrong_records() {
     let (cluster, _writer) = cluster_with_a_sealed_segment().await;
     tier_first_segment(&cluster, LocalCopies::Dropped).await;
     let offset_inside_the_first_batch = 30;
-    cluster.artifact_store().corrupt_byte(
-        &first_segment_key(&cluster).await,
-        offset_inside_the_first_batch,
-        0x01,
-    );
+    cluster
+        .artifact_store()
+        .corrupt_byte(&first_segment_key(&cluster).await, offset_inside_the_first_batch, 0x01);
 
-    let read = reader_with_object_store(&cluster)
-        .read_range(range(1, 6))
-        .await;
+    let read = reader_with_object_store(&cluster).read_range(range(1, 6)).await;
 
-    assert!(
-        matches!(read, Err(ReadError::Unavailable { .. })),
-        "{read:?}"
-    );
+    assert!(matches!(read, Err(ReadError::Unavailable { .. })), "{read:?}");
 }

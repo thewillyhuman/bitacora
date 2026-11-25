@@ -76,9 +76,7 @@ pub(crate) enum TieredReadError {
         reason: TieredError,
     },
     /// The object is intact but is not the segment the metadata store says it is.
-    #[error(
-        "object {object_key:?} is not segment {expected_segment} sealed at {expected_sealed_end}"
-    )]
+    #[error("object {object_key:?} is not segment {expected_segment} sealed at {expected_sealed_end}")]
     WrongSegment {
         /// The object that was read.
         object_key: String,
@@ -166,13 +164,7 @@ impl TieredSegment {
             return Err(wrong_segment());
         }
 
-        let index_bytes = fetch(
-            artifact_store,
-            &object_key,
-            footer.index_range(),
-            request_timeout,
-        )
-        .await?;
+        let index_bytes = fetch(artifact_store, &object_key, footer.index_range(), request_timeout).await?;
         let index = TieredIndex::decode(&footer, &index_bytes).map_err(damaged)?;
         Ok(Self {
             object_key,
@@ -213,13 +205,7 @@ impl TieredSegment {
         if blocks_range.is_empty() {
             return Ok(Vec::new());
         }
-        let blocks = fetch(
-            artifact_store,
-            &self.object_key,
-            blocks_range,
-            self.request_timeout,
-        )
-        .await?;
+        let blocks = fetch(artifact_store, &self.object_key, blocks_range, self.request_timeout).await?;
         let batches = match decode_frames(self.address, &blocks) {
             Ok(batches) => batches,
             Err(reason) => {
@@ -248,11 +234,7 @@ async fn fetch(
     byte_range: Range<u64>,
     request_timeout: Duration,
 ) -> Result<Bytes, TieredReadError> {
-    let fetched = timeout(
-        request_timeout,
-        artifact_store.get_range(object_key, byte_range),
-    )
-    .await;
+    let fetched = timeout(request_timeout, artifact_store.get_range(object_key, byte_range)).await;
     match fetched {
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(reason)) => Err(TieredReadError::StoreFailed {

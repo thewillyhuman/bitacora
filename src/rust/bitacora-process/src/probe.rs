@@ -96,11 +96,7 @@ pub enum ProbeError {
 /// # Examples
 ///
 /// See [`crate::serve_observability`].
-pub async fn http_get(
-    address: &str,
-    path: &str,
-    request_timeout: Duration,
-) -> Result<HttpAnswer, ProbeError> {
+pub async fn http_get(address: &str, path: &str, request_timeout: Duration) -> Result<HttpAnswer, ProbeError> {
     let exchanged = timeout(request_timeout, exchange(address, path)).await;
     let raw_answer = match exchanged {
         Ok(Ok(raw_answer)) => raw_answer,
@@ -146,9 +142,7 @@ fn parse_answer(address: &str, raw_answer: &[u8]) -> Result<HttpAnswer, ProbeErr
         return Err(not_http("the answer is empty"));
     };
     if !protocol.starts_with("HTTP/") {
-        return Err(not_http(
-            "the answer does not start with an HTTP status line",
-        ));
+        return Err(not_http("the answer does not start with an HTTP status line"));
     }
     let Some(status_text) = status_line_words.next() else {
         return Err(not_http("the status line has no status code"));

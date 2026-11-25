@@ -107,10 +107,7 @@ fn pass_interval_is_read_in_milliseconds() {
 
     let settings = config.validate().expect("valid");
 
-    assert_eq!(
-        settings.controller.pass_interval,
-        Duration::from_millis(250)
-    );
+    assert_eq!(settings.controller.pass_interval, Duration::from_millis(250));
 }
 
 #[test]
@@ -127,14 +124,10 @@ fn tiering_settings_are_read_in_seconds() {
 
 #[test]
 fn placement_table_becomes_the_placement_policy() {
-    let file_text = format!(
-        "{MINIMAL_CONFIG}\n[placement]\nliveness_window_seconds = 30\nrefuse_at_used_percent = 70\n"
-    );
+    let file_text =
+        format!("{MINIMAL_CONFIG}\n[placement]\nliveness_window_seconds = 30\nrefuse_at_used_percent = 70\n");
 
-    let settings = parse(&file_text)
-        .expect("well-formed")
-        .validate()
-        .expect("valid");
+    let settings = parse(&file_text).expect("well-formed").validate().expect("valid");
 
     assert_eq!(
         settings.controller.placement,
@@ -173,9 +166,8 @@ fn unknown_setting_of_the_placement_table_is_refused_when_the_file_is_read() {
 
 #[test]
 fn file_without_an_identity_is_refused_when_it_is_read() {
-    let parsed = parse(
-        "metrics_listen_address = \"0.0.0.0:9101\"\n\n[cluster]\netcd_endpoints = [\"http://127.0.0.1:2379\"]\n",
-    );
+    let parsed =
+        parse("metrics_listen_address = \"0.0.0.0:9101\"\n\n[cluster]\netcd_endpoints = [\"http://127.0.0.1:2379\"]\n");
 
     assert!(parsed.is_err(), "{parsed:?}");
 }
@@ -235,10 +227,7 @@ fn liveness_window_of_zero_is_refused() {
     let mut config = minimal_config();
     config.placement.liveness_window_seconds = 0;
 
-    assert_eq!(
-        refused_setting(config),
-        Some("placement.liveness_window_seconds")
-    );
+    assert_eq!(refused_setting(config), Some("placement.liveness_window_seconds"));
 }
 
 #[test]
@@ -246,10 +235,7 @@ fn placement_threshold_above_the_whole_disk_is_refused() {
     let mut config = minimal_config();
     config.placement.refuse_at_used_percent = 101;
 
-    assert_eq!(
-        refused_setting(config),
-        Some("placement.refuse_at_used_percent")
-    );
+    assert_eq!(refused_setting(config), Some("placement.refuse_at_used_percent"));
 }
 
 #[test]
@@ -257,10 +243,7 @@ fn placement_threshold_of_zero_is_refused() {
     let mut config = minimal_config();
     config.placement.refuse_at_used_percent = 0;
 
-    assert_eq!(
-        refused_setting(config),
-        Some("placement.refuse_at_used_percent")
-    );
+    assert_eq!(refused_setting(config), Some("placement.refuse_at_used_percent"));
 }
 
 /// A replica that is given up as soon as it counts as dead would be re-replicated on every restart.
@@ -278,10 +261,7 @@ fn error_names_the_setting_and_the_reason() {
     let mut config = minimal_config();
     config.pass_interval_milliseconds = 0;
 
-    let message = config
-        .validate()
-        .expect_err("the interval is zero")
-        .to_string();
+    let message = config.validate().expect_err("the interval is zero").to_string();
 
     assert_eq!(
         message,

@@ -30,8 +30,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use bitacora::{
-    BitacoraClient, ClientSettings, SequenceNumber, SequenceRange, StreamOptions, StreamWriter,
-    TakeoverPolicy, WriterSettings,
+    BitacoraClient, ClientSettings, SequenceNumber, SequenceRange, StreamOptions, StreamWriter, TakeoverPolicy,
+    WriterSettings,
 };
 use bitacora_clusterkit::{Binaries, ChildProcess, RealCluster};
 use bitacora_meta::{CopyState, MetadataStore, StreamRecord};
@@ -80,10 +80,7 @@ fn payload_of(sequence: u64) -> Bytes {
 async fn append_records(writer: &StreamWriter, count: u64) {
     let first_sequence = writer.durable_sequence().get() + 1;
     for sequence in first_sequence..first_sequence + count {
-        let committed_at = writer
-            .append(payload_of(sequence))
-            .await
-            .expect("the record commits");
+        let committed_at = writer.append(payload_of(sequence)).await.expect("the record commits");
         assert_eq!(committed_at, SequenceNumber::new(sequence));
     }
 }
@@ -91,8 +88,7 @@ async fn append_records(writer: &StreamWriter, count: u64) {
 /// Reads records 1 to `last_sequence` and returns their payloads.
 async fn read_payloads(client: &BitacoraClient, last_sequence: u64) -> Vec<Bytes> {
     let whole_stream =
-        SequenceRange::new(SequenceNumber::FIRST, SequenceNumber::new(last_sequence))
-            .expect("a valid range");
+        SequenceRange::new(SequenceNumber::FIRST, SequenceNumber::new(last_sequence)).expect("a valid range");
     let records = client
         .open_reader(STREAM)
         .read_range(whole_stream)
@@ -233,12 +229,7 @@ async fn cluster_of_real_processes_survives_the_loss_and_the_return_of_a_replica
     // segment that has a silent replica.
     cluster.kill_replica(LOST_REPLICA);
     append_records(&writer, RECORDS_PER_PHASE).await;
-    wait_for_stream(
-        &metadata,
-        "the roll after the loss of a replica",
-        has_rolled,
-    )
-    .await;
+    wait_for_stream(&metadata, "the roll after the loss of a replica", has_rolled).await;
     append_records(&writer, RECORDS_PER_PHASE).await;
 
     // The replica returns on its data directory. It registers again, and the controller completes
@@ -284,19 +275,13 @@ async fn cluster_of_real_processes_survives_the_loss_and_the_return_of_a_replica
     let controller_address = cluster.controller_observability_address();
     assert_eq!(status_of(controller_address, "/readyz").await, 200);
     wait_for_metric(controller_address, "bitacora_controller_leading 1\n").await;
-    wait_for_metric(
-        controller_address,
-        "bitacora_controller_segments_missing_copies 0\n",
-    )
-    .await;
+    wait_for_metric(controller_address, "bitacora_controller_segments_missing_copies 0\n").await;
 
     // A supervisor stops everything. Each daemon exits cleanly.
     writer.close().await.expect("the writer closes");
     drop(client);
     for exited_daemon in cluster.stop().await {
-        let exit_code = exited_daemon
-            .exit_status
-            .and_then(|exit_status| exit_status.code());
+        let exit_code = exited_daemon.exit_status.and_then(|exit_status| exit_status.code());
         assert_eq!(exit_code, Some(0), "{} stops cleanly", exited_daemon.name);
     }
 }
@@ -356,10 +341,7 @@ async fn daemon_names_the_configuration_file_it_cannot_read() {
     )
     .await;
 
-    assert!(
-        output.contains("/no/such/directory/controller.toml"),
-        "{output}"
-    );
+    assert!(output.contains("/no/such/directory/controller.toml"), "{output}");
 }
 
 #[tokio::test]
@@ -383,8 +365,5 @@ async fn controller_daemon_prints_its_help_and_exits_successfully() {
     let (exit_code, output) = run_to_completion(&binaries.controller, &["--help"]).await;
 
     assert_eq!(exit_code, Some(0));
-    assert!(
-        output.starts_with("Usage: bita-controller --config <path>"),
-        "{output}"
-    );
+    assert!(output.starts_with("Usage: bita-controller --config <path>"), "{output}");
 }

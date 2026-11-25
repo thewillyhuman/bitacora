@@ -125,12 +125,7 @@ async fn creating_a_stream_that_exists_is_refused() {
     let store = store_with_stream(&etcd).await;
 
     let second_creation = store
-        .create_stream(
-            STREAM,
-            ReplicationSettings::DEFAULT,
-            RetentionPolicy::default(),
-            None,
-        )
+        .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
         .await;
 
     assert_eq!(
@@ -177,9 +172,7 @@ async fn second_claim_from_the_same_epoch_loses() {
         .await
         .expect("epoch is claimed");
 
-    let late_claim = store
-        .claim_epoch(STREAM, Epoch::ZERO, "compute-2", LEASE_EXPIRY)
-        .await;
+    let late_claim = store.claim_epoch(STREAM, Epoch::ZERO, "compute-2", LEASE_EXPIRY).await;
 
     assert_eq!(
         late_claim,
@@ -253,10 +246,7 @@ async fn sealed_segment_keeps_its_end() {
         .await
         .expect("segment is sealed");
 
-    assert_eq!(
-        record.segments[0].sealed_end(),
-        Some(SequenceNumber::new(50))
-    );
+    assert_eq!(record.segments[0].sealed_end(), Some(SequenceNumber::new(50)));
 }
 
 #[tokio::test]
@@ -395,11 +385,7 @@ async fn lapsed_leadership_can_be_taken_over() {
         .expect("store is available");
 
     let leads = store
-        .try_lead(
-            "controller-2",
-            LEADERSHIP_EXPIRY,
-            Timestamp::from_unix_millis(11_000),
-        )
+        .try_lead("controller-2", LEADERSHIP_EXPIRY, Timestamp::from_unix_millis(11_000))
         .await;
 
     assert_eq!(leads, Ok(true));

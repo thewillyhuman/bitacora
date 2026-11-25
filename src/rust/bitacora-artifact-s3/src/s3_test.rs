@@ -78,8 +78,7 @@ fn opened_store_carries_the_request_timeout_of_its_settings() {
     let mut patient = settings();
     patient.request_timeout = Duration::from_secs(1234);
 
-    let store = S3ArtifactStore::open_with_credentials(&patient, &credentials())
-        .expect("the settings are valid");
+    let store = S3ArtifactStore::open_with_credentials(&patient, &credentials()).expect("the settings are valid");
 
     assert_eq!(store.request_timeout(), Duration::from_secs(1234));
 }
@@ -101,10 +100,7 @@ fn invalid_settings_are_refused_with_credentials_from_the_environment_too() {
 
     let refused = S3ArtifactStore::open(&without_bucket);
 
-    assert_eq!(
-        refused.err(),
-        Some(InvalidS3Settings::because("there is no bucket"))
-    );
+    assert_eq!(refused.err(), Some(InvalidS3Settings::because("there is no bucket")));
 }
 
 #[test]

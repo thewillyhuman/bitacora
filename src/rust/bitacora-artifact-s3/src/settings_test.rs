@@ -46,10 +46,7 @@ fn settings_without_a_bucket_are_refused() {
 
     let verdict = settings.validate();
 
-    assert_eq!(
-        verdict,
-        Err(InvalidS3Settings::because("there is no bucket"))
-    );
+    assert_eq!(verdict, Err(InvalidS3Settings::because("there is no bucket")));
 }
 
 #[test]
@@ -76,10 +73,7 @@ fn settings_without_a_region_are_refused() {
 
     let verdict = settings.validate();
 
-    assert_eq!(
-        verdict,
-        Err(InvalidS3Settings::because("there is no region"))
-    );
+    assert_eq!(verdict, Err(InvalidS3Settings::because("there is no region")));
 }
 
 #[test]
@@ -97,10 +91,7 @@ fn endpoint_that_is_not_a_url_is_refused() {
 
     let refusal = refusal_of(&settings).expect("the settings are refused");
 
-    assert!(
-        refusal.contains("is not an http:// or https:// URL"),
-        "{refusal}"
-    );
+    assert!(refusal.contains("is not an http:// or https:// URL"), "{refusal}");
 }
 
 #[test]
@@ -157,10 +148,7 @@ fn zero_connect_timeout_is_refused() {
 
     let verdict = settings.validate();
 
-    assert_eq!(
-        verdict,
-        Err(InvalidS3Settings::because("the connect timeout is zero"))
-    );
+    assert_eq!(verdict, Err(InvalidS3Settings::because("the connect timeout is zero")));
 }
 
 #[test]
@@ -170,10 +158,7 @@ fn zero_request_timeout_is_refused() {
 
     let verdict = settings.validate();
 
-    assert_eq!(
-        verdict,
-        Err(InvalidS3Settings::because("the request timeout is zero"))
-    );
+    assert_eq!(verdict, Err(InvalidS3Settings::because("the request timeout is zero")));
 }
 
 #[test]

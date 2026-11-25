@@ -82,18 +82,12 @@ impl From<ReplicaError> for wire::ReplicaError {
             ReplicaError::InvalidRequest { reason } => {
                 wire_error::Kind::InvalidRequest(wire_error::InvalidRequest { reason })
             }
-            ReplicaError::NoCapacity { used_percent } => {
-                wire_error::Kind::NoCapacity(wire_error::NoCapacity {
-                    used_percent: u32::from(used_percent),
-                })
-            }
+            ReplicaError::NoCapacity { used_percent } => wire_error::Kind::NoCapacity(wire_error::NoCapacity {
+                used_percent: u32::from(used_percent),
+            }),
             ReplicaError::Draining => wire_error::Kind::Draining(wire_error::Draining {}),
-            ReplicaError::Storage { reason } => {
-                wire_error::Kind::Storage(wire_error::Storage { reason })
-            }
-            ReplicaError::Unavailable { reason } => {
-                wire_error::Kind::Unavailable(wire_error::Unavailable { reason })
-            }
+            ReplicaError::Storage { reason } => wire_error::Kind::Storage(wire_error::Storage { reason }),
+            ReplicaError::Unavailable { reason } => wire_error::Kind::Unavailable(wire_error::Unavailable { reason }),
         };
         Self { kind: Some(kind) }
     }
@@ -130,10 +124,7 @@ impl TryFrom<wire::ReplicaError> for ReplicaError {
                 requested_sealed_end: SequenceNumber::new(conflicting_seal.requested_sealed_end),
             },
             wire_error::Kind::SegmentNotFound(segment_not_found) => {
-                let segment = required_field(
-                    segment_not_found.segment,
-                    "ReplicaError.SegmentNotFound.segment",
-                )?;
+                let segment = required_field(segment_not_found.segment, "ReplicaError.SegmentNotFound.segment")?;
                 Self::SegmentNotFound {
                     segment: segment.into(),
                 }
@@ -145,9 +136,7 @@ impl TryFrom<wire::ReplicaError> for ReplicaError {
                 used_percent: used_percent_from_wire(no_capacity.used_percent)?,
             },
             wire_error::Kind::Draining(wire_error::Draining {}) => Self::Draining,
-            wire_error::Kind::Storage(storage) => Self::Storage {
-                reason: storage.reason,
-            },
+            wire_error::Kind::Storage(storage) => Self::Storage { reason: storage.reason },
             wire_error::Kind::Unavailable(unavailable) => Self::Unavailable {
                 reason: unavailable.reason,
             },

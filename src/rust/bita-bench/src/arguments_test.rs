@@ -68,8 +68,7 @@ fn append_workload_takes_every_option() {
 
 #[test]
 fn read_workload_takes_a_start_and_a_record_limit() {
-    let arguments =
-        parse("bita-bench read orders --from 100 --records 5000").expect("a valid command line");
+    let arguments = parse("bita-bench read orders --from 100 --records 5000").expect("a valid command line");
 
     assert_eq!(
         arguments.workload,
@@ -104,8 +103,7 @@ fn cluster_options_are_accepted_after_the_workload() {
 
 #[test]
 fn seconds_and_records_together_are_a_usage_error() {
-    let refused = parse("bita-bench append orders --seconds 5 --records 100")
-        .expect_err("an invalid command line");
+    let refused = parse("bita-bench append orders --seconds 5 --records 100").expect_err("an invalid command line");
 
     assert_eq!(refused.kind(), ErrorKind::ArgumentConflict);
 }

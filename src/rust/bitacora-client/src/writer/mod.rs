@@ -108,10 +108,7 @@ impl StreamWriter {
 
         let state = WriterState::new(
             segment.descriptor(stream.stream_id),
-            replicas
-                .iter()
-                .map(|replica| replica.replica_id.clone())
-                .collect(),
+            replicas.iter().map(|replica| replica.replica_id.clone()).collect(),
             stream.replication.write_quorum(),
             Instant::now(),
         );
@@ -201,22 +198,18 @@ impl StreamWriter {
         self.shared.lock().begin_closing();
         self.shared.announce_change();
 
-        let drained = timeout(
-            self.shared.settings.request_timeout,
-            self.wait_until_drained(),
-        )
-        .await
-        .unwrap_or_else(|_elapsed| {
-            Err(AppendError::Indeterminate {
-                reason: "accepted records did not commit before the writer closed".to_owned(),
-            })
-        });
+        let drained = timeout(self.shared.settings.request_timeout, self.wait_until_drained())
+            .await
+            .unwrap_or_else(|_elapsed| {
+                Err(AppendError::Indeterminate {
+                    reason: "accepted records did not commit before the writer closed".to_owned(),
+                })
+            });
         let closed = match drained {
             Ok(()) => self.seal_and_release().await,
             Err(error) => Err(error),
         };
-        self.shared
-            .stop(closed.as_ref().err().unwrap_or(&AppendError::Closed));
+        self.shared.stop(closed.as_ref().err().unwrap_or(&AppendError::Closed));
         closed
     }
 
@@ -341,12 +334,7 @@ async fn run_driver(shared: Arc<Shared>, first_replicas: Vec<ConnectedReplica>) 
     }
 }
 
-fn spawn_senders(
-    shared: &Arc<Shared>,
-    tasks: &mut JoinSet<()>,
-    generation: u64,
-    replicas: &[ConnectedReplica],
-) {
+fn spawn_senders(shared: &Arc<Shared>, tasks: &mut JoinSet<()>, generation: u64, replicas: &[ConnectedReplica]) {
     for (replica_index, replica) in replicas.iter().enumerate() {
         tasks.spawn(run_sender(
             Arc::clone(shared),
@@ -358,11 +346,7 @@ fn spawn_senders(
 }
 
 async fn renew_lease(shared: &Shared) {
-    let expires_at = shared
-        .context
-        .clock
-        .now()
-        .plus(shared.settings.lease_duration);
+    let expires_at = shared.context.clock.now().plus(shared.settings.lease_duration);
     match shared
         .context
         .metadata
@@ -465,10 +449,7 @@ async fn roll(shared: &Arc<Shared>, roll_reason: &RollReason) -> Option<Vec<Conn
     // Step 4: resend every record above the sealed end to the new segment.
     shared.lock().complete_roll(
         new_segment.descriptor(shared.stream_id),
-        new_replicas
-            .iter()
-            .map(|replica| replica.replica_id.clone())
-            .collect(),
+        new_replicas.iter().map(|replica| replica.replica_id.clone()).collect(),
         Instant::now(),
     );
     shared.announce_change();
@@ -481,24 +462,13 @@ async fn roll(shared: &Arc<Shared>, roll_reason: &RollReason) -> Option<Vec<Conn
         .find(|segment| segment.segment_id == old_segment.address.segment_id)
         && let Ok(old_replicas) = shared.context.connect_copies(&sealed_segment.copies).await
     {
-        announce_seal(
-            &old_replicas,
-            old_segment.address,
-            sealed_end,
-            &shared.settings,
-        )
-        .await;
+        announce_seal(&old_replicas, old_segment.address, sealed_end, &shared.settings).await;
     }
     Some(new_replicas)
 }
 
 /// Keeps one replica of the segment opened at `generation` up to date.
-async fn run_sender(
-    shared: Arc<Shared>,
-    generation: u64,
-    replica_index: usize,
-    replica: Arc<dyn ReplicaApi>,
-) {
+async fn run_sender(shared: Arc<Shared>, generation: u64, replica_index: usize, replica: Arc<dyn ReplicaApi>) {
     let mut changes = shared.changes.subscribe();
     let mut last_durable_sent: Option<SequenceNumber> = None;
     let mut heartbeat_due_at = Instant::now();
@@ -508,8 +478,7 @@ async fn run_sender(
             if matches!(state.status(), Status::Stopped(_)) || state.generation() != generation {
                 return;
             }
-            state.has_batches_for(generation, replica_index)
-                || Some(state.durable_sequence()) != last_durable_sent
+            state.has_batches_for(generation, replica_index) || Some(state.durable_sequence()) != last_durable_sent
         };
         if !has_news && Instant::now() < heartbeat_due_at {
             // Wait for news or for the heartbeat to fall due.
@@ -517,11 +486,10 @@ async fn run_sender(
             continue;
         }
 
-        let Some(plan) = shared.lock().plan_request(
-            generation,
-            replica_index,
-            shared.settings.max_request_bytes,
-        ) else {
+        let Some(plan) = shared
+            .lock()
+            .plan_request(generation, replica_index, shared.settings.max_request_bytes)
+        else {
             return;
         };
         let durable_sent = plan.durable_sequence;

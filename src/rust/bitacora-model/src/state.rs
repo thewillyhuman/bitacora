@@ -615,11 +615,7 @@ impl State {
     /// assigned and committed, and the segment it rolled away from.
     fn write_first_writer(&self, fingerprint: &mut Vec<u8>) {
         let appender = self.first_writer.appender;
-        fingerprint.extend([
-            encode_index(appender.segment),
-            appender.assigned_end,
-            appender.durable,
-        ]);
+        fingerprint.extend([encode_index(appender.segment), appender.assigned_end, appender.durable]);
         match self.first_writer.rolled_from {
             Some(abandoned) => {
                 fingerprint.extend([encode_index(abandoned.segment), abandoned.offered_through]);
@@ -672,8 +668,7 @@ impl State {
     /// Appends the views of the three replicas in sorted order, which is what makes the fingerprint blind
     /// to which replica is which.
     fn write_replica_views(&self, fingerprint: &mut Vec<u8>) {
-        let mut replica_views: [ReplicaView; REPLICA_COUNT] =
-            std::array::from_fn(|replica| self.replica_view(replica));
+        let mut replica_views: [ReplicaView; REPLICA_COUNT] = std::array::from_fn(|replica| self.replica_view(replica));
         replica_views.sort_unstable();
         for replica_view in replica_views {
             fingerprint.extend(replica_view);
@@ -699,8 +694,7 @@ impl State {
                 copy.acknowledged_to_owner,
             ]);
         }
-        replica_view[FIRST_WRITER_BELIEF_OFFSET] =
-            self.first_writer.appender.acknowledged_ends[replica];
+        replica_view[FIRST_WRITER_BELIEF_OFFSET] = self.first_writer.appender.acknowledged_ends[replica];
         replica_view[RECOVERING_WRITER_BELIEF_OFFSET] = match self.recovering_writer.phase {
             RecoveryPhase::NotStarted | RecoveryPhase::Sealed { .. } => 0,
             RecoveryPhase::Fencing { replies } => encode_optional(replies[replica]),
@@ -718,8 +712,7 @@ impl State {
 /// Panics if the two writers together may assign more records than there are sequence slots, or if there
 /// are more standby segments than free segment slots.
 fn assert_bounds_fit_a_state(bounds: Bounds) {
-    let total_records =
-        usize::from(bounds.first_writer_records) + usize::from(bounds.recovering_writer_records);
+    let total_records = usize::from(bounds.first_writer_records) + usize::from(bounds.recovering_writer_records);
     assert!(
         total_records < SEQUENCE_SLOTS,
         "the model has room for {} records, not {total_records}",

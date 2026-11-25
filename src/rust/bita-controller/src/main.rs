@@ -55,9 +55,7 @@ mod metrics;
 use std::path::Path;
 use std::process::ExitCode;
 
-use bitacora_process::{
-    CommandLine, ShutdownListener, init_logging, load_config_file, parse_command_line, usage,
-};
+use bitacora_process::{CommandLine, ShutdownListener, init_logging, load_config_file, parse_command_line, usage};
 
 use crate::config::{ControllerConfigFile, ControllerDaemonSettings};
 use crate::daemon::DaemonError;
@@ -114,10 +112,7 @@ fn start(config_path: &Path) -> ExitCode {
         eprintln!("{DAEMON_NAME}: {logging_error}");
         return ExitCode::FAILURE;
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(io_error) => {
             tracing::error!(%io_error, "cannot start the runtime");
@@ -153,12 +148,6 @@ async fn serve(settings: ControllerDaemonSettings) -> Result<(), DaemonError> {
     };
     let observability_listener = daemon::bind_listener(&settings).await?;
     let environment = daemon::open_environment(&settings).await?;
-    daemon::run(
-        settings,
-        environment,
-        observability_listener,
-        shutdown_listener.wait(),
-    )
-    .await;
+    daemon::run(settings, environment, observability_listener, shutdown_listener.wait()).await;
     Ok(())
 }

@@ -238,9 +238,7 @@ fn put_length_prefixed(encoded: &mut BytesMut, bytes: &[u8]) {
 }
 
 /// Takes one length-prefixed run of bytes off the front of `unread`.
-fn take_length_prefixed<'encoded>(
-    unread: &mut &'encoded [u8],
-) -> Result<&'encoded [u8], SnapshotError> {
+fn take_length_prefixed<'encoded>(unread: &mut &'encoded [u8]) -> Result<&'encoded [u8], SnapshotError> {
     if unread.len() < LENGTH_BYTES {
         return Err(SnapshotError::Malformed {
             reason: "an entry is cut off before a length",
@@ -299,8 +297,7 @@ pub fn snapshot_object_key(taken_at: Timestamp) -> String {
 #[must_use]
 pub fn snapshot_time_of(object_key: &str) -> Option<Timestamp> {
     let digits = object_key.strip_prefix(SNAPSHOT_KEY_PREFIX)?;
-    let is_a_padded_number =
-        digits.len() == 20 && digits.bytes().all(|digit| digit.is_ascii_digit());
+    let is_a_padded_number = digits.len() == 20 && digits.bytes().all(|digit| digit.is_ascii_digit());
     if !is_a_padded_number {
         return None;
     }

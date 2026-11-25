@@ -42,9 +42,7 @@ use std::time::Duration;
 use bitacora_artifact::{ArtifactError, ArtifactStore};
 use bitacora_segment::format::{SegmentHeader, decode_frames};
 use bitacora_segment::tiered::encode_tiered_segment;
-use bitacora_types::replica_api::{
-    ReadLimit, ReadRequest, ReplicaError, UploadRequest, UploadResponse,
-};
+use bitacora_types::replica_api::{ReadLimit, ReadRequest, ReplicaError, UploadRequest, UploadResponse};
 use bytes::{Bytes, BytesMut};
 use tokio::time::timeout;
 
@@ -176,11 +174,7 @@ async fn store_object(
     object: Bytes,
     pace: UploadPace,
 ) -> Result<(), ReplicaError> {
-    let stored = timeout(
-        pace.object_store_timeout,
-        artifact_store.put_object(object_key, object),
-    )
-    .await;
+    let stored = timeout(pace.object_store_timeout, artifact_store.put_object(object_key, object)).await;
     match stored {
         Ok(Ok(())) => Ok(()),
         Ok(Err(artifact_error)) => Err(object_store_failed("store", object_key, &artifact_error)),
@@ -229,11 +223,7 @@ async fn verify_stored_object(
 
 /// The error for an object store request that failed. The upload did not complete and can be repeated,
 /// which is what `Unavailable` tells the controller.
-fn object_store_failed(
-    operation: &str,
-    object_key: &str,
-    artifact_error: &ArtifactError,
-) -> ReplicaError {
+fn object_store_failed(operation: &str, object_key: &str, artifact_error: &ArtifactError) -> ReplicaError {
     ReplicaError::Unavailable {
         reason: format!("cannot {operation} object {object_key:?}: {artifact_error}"),
     }
@@ -242,9 +232,7 @@ fn object_store_failed(
 /// The error for an object store request that did not answer in time.
 fn object_store_timed_out(operation: &str, object_key: &str) -> ReplicaError {
     ReplicaError::Unavailable {
-        reason: format!(
-            "cannot {operation} object {object_key:?}: the object store did not answer in time"
-        ),
+        reason: format!("cannot {operation} object {object_key:?}: the object store did not answer in time"),
     }
 }
 

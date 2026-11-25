@@ -59,8 +59,6 @@ mod binaries;
 mod cluster;
 mod process;
 
-pub use binaries::{
-    Binaries, CONTROLLER_BINARY_VARIABLE, ETCD_BINARY_VARIABLE, REPLICA_BINARY_VARIABLE,
-};
+pub use binaries::{Binaries, CONTROLLER_BINARY_VARIABLE, ETCD_BINARY_VARIABLE, REPLICA_BINARY_VARIABLE};
 pub use cluster::{ExitedDaemon, RealCluster};
 pub use process::{ChildProcess, free_local_ports};

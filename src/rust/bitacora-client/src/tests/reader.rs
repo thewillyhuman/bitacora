@@ -66,10 +66,7 @@ async fn range_read_returns_the_committed_records_in_order() {
     let writer = open_writer(&cluster, "compute-1").await;
     append_numbered(&writer, 5).await;
     settle(HEARTBEAT_SETTLE).await;
-    let records = reader(&cluster)
-        .read_range(range(2, 4))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(2, 4)).await.expect("reads");
     assert_eq!(sequences(&records), [2, 3, 4]);
 }
 
@@ -79,10 +76,7 @@ async fn range_read_returns_the_payloads_that_were_appended() {
     let writer = open_writer(&cluster, "compute-1").await;
     append_numbered(&writer, 3).await;
     settle(HEARTBEAT_SETTLE).await;
-    let records = reader(&cluster)
-        .read_range(range(3, 3))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(3, 3)).await.expect("reads");
     assert_eq!(records[0].payload, Bytes::from("record-3"));
 }
 
@@ -92,20 +86,14 @@ async fn range_read_stops_at_the_last_committed_record() {
     let writer = open_writer(&cluster, "compute-1").await;
     append_numbered(&writer, 3).await;
     settle(HEARTBEAT_SETTLE).await;
-    let records = reader(&cluster)
-        .read_range(range(2, 100))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(2, 100)).await.expect("reads");
     assert_eq!(sequences(&records), [2, 3]);
 }
 
 #[tokio::test(start_paused = true)]
 async fn range_read_of_an_empty_stream_is_empty() {
     let cluster = Cluster::start(3).await;
-    let records = reader(&cluster)
-        .read_range(range(1, 10))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(1, 10)).await.expect("reads");
     assert_eq!(sequences(&records), Vec::<u64>::new());
 }
 
@@ -120,10 +108,7 @@ async fn range_read_crosses_segment_boundaries() {
     append_numbered(&second_writer, 3).await;
     settle(HEARTBEAT_SETTLE).await;
 
-    let records = reader(&cluster)
-        .read_range(range(1, 6))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(1, 6)).await.expect("reads");
     assert_eq!(sequences(&records), [1, 2, 3, 4, 5, 6]);
 }
 
@@ -134,10 +119,7 @@ async fn range_read_uses_another_replica_when_one_is_down() {
     append_numbered(&writer, 3).await;
     settle(HEARTBEAT_SETTLE).await;
     cluster.nodes()[0].set_reachable(false);
-    let records = reader(&cluster)
-        .read_range(range(1, 3))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(1, 3)).await.expect("reads");
     assert_eq!(sequences(&records), [1, 2, 3]);
 }
 
@@ -154,15 +136,9 @@ async fn range_read_skips_a_replica_whose_sealed_copy_is_short() {
     settle(WriterSettings::default().replica_failure_timeout + Duration::from_secs(1)).await;
     cluster.nodes()[0].set_reachable(true);
 
-    let records = reader(&cluster)
-        .read_range(range(1, 5))
-        .await
-        .expect("reads");
+    let records = reader(&cluster).read_range(range(1, 5)).await.expect("reads");
     assert_eq!(
-        (
-            sequences(&records),
-            cluster.stream().await.segments[0].sealed_end()
-        ),
+        (sequences(&records), cluster.stream().await.segments[0].sealed_end()),
         (vec![1, 2, 3, 4, 5], Some(SequenceNumber::new(5)))
     );
 }
@@ -176,10 +152,7 @@ async fn range_read_fails_when_no_replica_of_the_segment_answers() {
         node.set_reachable(false);
     }
     let read = reader(&cluster).read_range(range(1, 3)).await;
-    assert!(
-        matches!(read, Err(ReadError::Unavailable { .. })),
-        "{read:?}"
-    );
+    assert!(matches!(read, Err(ReadError::Unavailable { .. })), "{read:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -224,10 +197,7 @@ async fn read_below_the_low_water_mark_reports_where_reading_can_resume() {
 async fn reader_reports_the_low_water_mark() {
     let cluster = Cluster::start(3).await;
     truncate_below(&cluster, 4).await;
-    assert_eq!(
-        reader(&cluster).low_water_mark().await,
-        Ok(SequenceNumber::new(4))
-    );
+    assert_eq!(reader(&cluster).low_water_mark().await, Ok(SequenceNumber::new(4)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -374,10 +344,7 @@ async fn follower_continues_across_a_roll() {
     append_numbered(&writer, 3).await;
 
     assert_eq!(
-        (
-            take(&mut following, 6).await,
-            cluster.stream().await.segments.len()
-        ),
+        (take(&mut following, 6).await, cluster.stream().await.segments.len()),
         (vec![1, 2, 3, 4, 5, 6], 2)
     );
 }
@@ -420,10 +387,7 @@ async fn follower_switches_away_from_a_replica_cut_off_from_the_writer() {
         .await
         .expect("drains");
     append_numbered(&writer, 2).await;
-    assert_eq!(
-        (caught_up, take(&mut following, 2).await),
-        (vec![1, 2], vec![3, 4])
-    );
+    assert_eq!((caught_up, take(&mut following, 2).await), (vec![1, 2], vec![3, 4]));
 }
 
 #[tokio::test(start_paused = true)]
@@ -441,9 +405,7 @@ async fn follower_rides_out_a_metadata_outage() {
     let during_outage = timeout(Duration::from_secs(3), following.next()).await;
     cluster.key_value_store().set_unavailable(false);
     append_numbered(&writer, 1).await;
-    assert!(
-        before_outage == [1, 2] && during_outage.is_err() && take(&mut following, 1).await == [3]
-    );
+    assert!(before_outage == [1, 2] && during_outage.is_err() && take(&mut following, 1).await == [3]);
 }
 
 // ---- batches and known lag ----

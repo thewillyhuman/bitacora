@@ -73,8 +73,7 @@ impl Pace {
         // Two 64-bit numbers multiply without overflow in 128 bits; the nanoseconds may not, and then
         // the offset is beyond any duration anyway.
         let records_before = u128::from(send_number) * u128::from(self.records_per_send);
-        let nanoseconds = records_before.saturating_mul(NANOSECONDS_PER_SECOND)
-            / u128::from(self.records_per_second);
+        let nanoseconds = records_before.saturating_mul(NANOSECONDS_PER_SECOND) / u128::from(self.records_per_second);
         match u64::try_from(nanoseconds) {
             Ok(nanoseconds) => Duration::from_nanos(nanoseconds),
             Err(_too_long) => Duration::MAX,

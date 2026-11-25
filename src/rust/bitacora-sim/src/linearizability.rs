@@ -175,15 +175,12 @@ fn calls_by_key(events: &[TimedEvent]) -> BTreeMap<Bytes, Vec<Call>> {
                 let Some((effect, binds_at_return)) = effect_of(&call, Some(outcome)) else {
                     continue;
                 };
-                calls_by_key
-                    .entry(call.key().clone())
-                    .or_default()
-                    .push(Call {
-                        operation: *operation,
-                        invoked_at,
-                        returned_at: binds_at_return.then_some(position),
-                        effect,
-                    });
+                calls_by_key.entry(call.key().clone()).or_default().push(Call {
+                    operation: *operation,
+                    invoked_at,
+                    returned_at: binds_at_return.then_some(position),
+                    effect,
+                });
             }
             _other => {}
         }
@@ -193,15 +190,12 @@ fn calls_by_key(events: &[TimedEvent]) -> BTreeMap<Bytes, Vec<Call>> {
         let Some((effect, _binds_at_return)) = effect_of(&call, None) else {
             continue;
         };
-        calls_by_key
-            .entry(call.key().clone())
-            .or_default()
-            .push(Call {
-                operation,
-                invoked_at,
-                returned_at: None,
-                effect,
-            });
+        calls_by_key.entry(call.key().clone()).or_default().push(Call {
+            operation,
+            invoked_at,
+            returned_at: None,
+            effect,
+        });
     }
     for calls in calls_by_key.values_mut() {
         calls.sort_by_key(|call| call.invoked_at);
@@ -246,9 +240,7 @@ fn without_puts_nobody_observed(calls: Vec<Call>) -> Vec<Call> {
     let mut kept = Vec::with_capacity(calls.len());
     for call in calls {
         let is_an_unobserved_optional_put = match &call.effect {
-            Effect::Write(Some(value)) => {
-                call.returned_at.is_none() && !observed_values.contains(value)
-            }
+            Effect::Write(Some(value)) => call.returned_at.is_none() && !observed_values.contains(value),
             _other => false,
         };
         if !is_an_unobserved_optional_put {
@@ -281,8 +273,8 @@ impl Register {
             let number = match value {
                 None => 0,
                 Some(value) => {
-                    let next_number = u32::try_from(number_of_value.len() + 1)
-                        .expect("a history has far fewer than 2^32 values");
+                    let next_number =
+                        u32::try_from(number_of_value.len() + 1).expect("a history has far fewer than 2^32 values");
                     *number_of_value.entry(value.clone()).or_insert(next_number)
                 }
             };
@@ -416,9 +408,7 @@ fn judge_key(calls: &[Call], max_states: usize) -> Verdict {
             continue;
         }
         // Every candidate from this state leads nowhere: take the last call back.
-        let abandoned = steps
-            .pop()
-            .expect("the loop runs only while a step is left");
+        let abandoned = steps.pop().expect("the loop runs only while a step is left");
         if let Some(position) = abandoned.placed_call {
             placed.remove(position);
             value = abandoned.value_before;

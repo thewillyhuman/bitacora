@@ -13,12 +13,8 @@
 
 use std::collections::BTreeSet;
 
-use bitacora_meta::{
-    CopyRecord, MetaError, RECORD_SCHEMA_VERSION, RetentionPolicy, SealRecord, TieredRecord,
-};
-use bitacora_types::{
-    Epoch, ReplicaId, ReplicationSettings, SegmentId, SequenceNumber, StreamId, Timestamp,
-};
+use bitacora_meta::{CopyRecord, MetaError, RECORD_SCHEMA_VERSION, RetentionPolicy, SealRecord, TieredRecord};
+use bitacora_types::{Epoch, ReplicaId, ReplicationSettings, SegmentId, SequenceNumber, StreamId, Timestamp};
 
 use super::*;
 use crate::commands::testing::{STREAM, TestCluster};

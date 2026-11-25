@@ -154,11 +154,6 @@ fn invariants_are_named_as_in_the_design() {
 
     assert_eq!(
         names,
-        [
-            "I1 Durability",
-            "I2 Uniqueness",
-            "I3 Prefix",
-            "I4 Single writer"
-        ]
+        ["I1 Durability", "I2 Uniqueness", "I3 Prefix", "I4 Single writer"]
     );
 }

@@ -47,10 +47,7 @@ impl Model for TwoCounters {
 
     /// Both counters start at zero.
     fn initial_state(&self) -> Counters {
-        Counters {
-            first: 0,
-            second: 0,
-        }
+        Counters { first: 0, second: 0 }
     }
 
     /// A state is its own fingerprint: the toy system has no symmetry to exploit.
@@ -113,12 +110,7 @@ fn search_without_a_match_visits_every_reachable_state_once() {
 
     let outcome = search(&model, NO_LIMIT, |_counters| false);
 
-    assert_eq!(
-        outcome,
-        SearchOutcome::Exhausted {
-            states_explored: 16
-        }
-    );
+    assert_eq!(outcome, SearchOutcome::Exhausted { states_explored: 16 });
 }
 
 #[test]
@@ -140,13 +132,7 @@ fn trace_leads_from_the_initial_state_to_the_match() {
         reached = model.apply(&reached, action);
     }
 
-    assert_eq!(
-        reached,
-        Counters {
-            first: 2,
-            second: 3
-        }
-    );
+    assert_eq!(reached, Counters { first: 2, second: 3 });
 }
 
 #[test]
@@ -169,9 +155,7 @@ fn unreachable_match_exhausts_the_search() {
     let model = counters_up_to_three();
     let value_above_the_limit = 4;
 
-    let outcome = search(&model, NO_LIMIT, |counters| {
-        counters.first == value_above_the_limit
-    });
+    let outcome = search(&model, NO_LIMIT, |counters| counters.first == value_above_the_limit);
 
     assert!(matches!(outcome, SearchOutcome::Exhausted { .. }));
 }
@@ -183,12 +167,7 @@ fn search_gives_up_at_its_state_limit() {
 
     let outcome = search(&model_with_many_states, state_limit, |_counters| false);
 
-    assert_eq!(
-        outcome,
-        SearchOutcome::LimitReached {
-            states_explored: 50
-        }
-    );
+    assert_eq!(outcome, SearchOutcome::LimitReached { states_explored: 50 });
 }
 
 #[test]

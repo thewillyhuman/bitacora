@@ -187,13 +187,8 @@ impl ProtocolModel {
     pub fn check(&self, state_limit: usize) -> CheckOutcome {
         match search(self, state_limit, violates_an_invariant) {
             SearchOutcome::Exhausted { states_explored } => CheckOutcome::Holds { states_explored },
-            SearchOutcome::LimitReached { states_explored } => {
-                CheckOutcome::Inconclusive { states_explored }
-            }
-            SearchOutcome::Found {
-                states_explored,
-                trace,
-            } => {
+            SearchOutcome::LimitReached { states_explored } => CheckOutcome::Inconclusive { states_explored },
+            SearchOutcome::Found { states_explored, trace } => {
                 let violating_state = self.replay(&trace);
                 let invariant = violated_invariant(&violating_state)
                     .expect("the search stopped at a state that violates an invariant");

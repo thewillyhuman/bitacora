@@ -12,8 +12,7 @@ use thiserror::Error;
 
 use crate::disk::{Disk, DiskFile};
 use crate::format::{
-    Batch, FlushedMark, HeaderError, SEGMENT_HEADER_BYTES, ScanStop, SegmentHeader,
-    scan_valid_prefix,
+    Batch, FlushedMark, HeaderError, SEGMENT_HEADER_BYTES, ScanStop, SegmentHeader, scan_valid_prefix,
 };
 use crate::index::{IndexEntry, SparseIndex};
 
@@ -69,9 +68,7 @@ pub enum SegmentError {
         found: SequenceNumber,
     },
     /// The copy cannot be cut at the requested position.
-    #[error(
-        "cannot cut the copy at {requested_end}: it ends at {local_end} and batches are kept whole"
-    )]
+    #[error("cannot cut the copy at {requested_end}: it ends at {local_end} and batches are kept whole")]
     NotABatchBoundary {
         /// The position the caller asked to cut at.
         requested_end: SequenceNumber,
@@ -162,11 +159,7 @@ impl SegmentFile {
         // a copy that exists always has a valid header: a crash or a failed
         // flush during creation cannot leave a file that looks damaged.
         let file = disk
-            .create_file(
-                path,
-                Bytes::copy_from_slice(&header.encode()),
-                allocated_bytes,
-            )
+            .create_file(path, Bytes::copy_from_slice(&header.encode()), allocated_bytes)
             .await
             .map_err(io_error("create", path))?;
         Ok(Self {
@@ -210,11 +203,10 @@ impl SegmentFile {
             .read_at(0, SEGMENT_HEADER_BYTES)
             .await
             .map_err(io_error("read header", path))?;
-        let header =
-            SegmentHeader::decode(&header_bytes).map_err(|reason| SegmentError::InvalidHeader {
-                path: path.to_owned(),
-                reason,
-            })?;
+        let header = SegmentHeader::decode(&header_bytes).map_err(|reason| SegmentError::InvalidHeader {
+            path: path.to_owned(),
+            reason,
+        })?;
         if header.address != expected {
             return Err(SegmentError::WrongSegment {
                 path: path.to_owned(),
@@ -222,10 +214,7 @@ impl SegmentFile {
                 found: header.address,
             });
         }
-        let file_bytes = file
-            .length_bytes()
-            .await
-            .map_err(io_error("measure", path))?;
+        let file_bytes = file.length_bytes().await.map_err(io_error("measure", path))?;
 
         let mut segment = Self {
             file,
@@ -235,8 +224,7 @@ impl SegmentFile {
             allocated_bytes: file_bytes,
             growth_bytes,
             flushed_end_bytes: HEADER_END_OFFSET,
-            written_mark: FlushedMark::latest_in(header.address, &header_bytes)
-                .unwrap_or(NOTHING_FLUSHED),
+            written_mark: FlushedMark::latest_in(header.address, &header_bytes).unwrap_or(NOTHING_FLUSHED),
             local_end: header.first_sequence.preceding(),
             index: SparseIndex::new(),
         };
@@ -254,9 +242,7 @@ impl SegmentFile {
                 },
             )
             .await?;
-        let stop = region_end
-            .stop
-            .expect("the recovery visitor never stops the scan");
+        let stop = region_end.stop.expect("the recovery visitor never stops the scan");
         if region_end.offset_bytes < segment.written_mark.flushed_bytes {
             return Err(SegmentError::Corrupt {
                 path: path.to_owned(),
@@ -319,8 +305,7 @@ impl SegmentFile {
         for batch in batches {
             frames.extend_from_slice(batch.frame());
         }
-        self.grow_to_fit(self.end_offset_bytes + to_u64(total_bytes))
-            .await?;
+        self.grow_to_fit(self.end_offset_bytes + to_u64(total_bytes)).await?;
         // The mark for what earlier flushes covered rides on the flush that
         // follows this append, at no cost of its own.
         self.write_mark_if_behind().await?;
@@ -330,8 +315,7 @@ impl SegmentFile {
             .map_err(io_error("append", &self.path))?;
 
         for batch in batches {
-            self.index
-                .observe_batch(batch.first_sequence(), self.end_offset_bytes);
+            self.index.observe_batch(batch.first_sequence(), self.end_offset_bytes);
             self.end_offset_bytes += to_u64(batch.frame().len());
             self.local_end = batch.last_sequence();
         }
@@ -346,10 +330,7 @@ impl SegmentFile {
     /// be treated as suspect and never flushed again: the kernel may have
     /// dropped the unwritten pages, so a retry could falsely succeed.
     pub async fn flush(&mut self) -> Result<(), SegmentError> {
-        self.file
-            .sync_data()
-            .await
-            .map_err(io_error("flush", &self.path))?;
+        self.file.sync_data().await.map_err(io_error("flush", &self.path))?;
         self.flushed_end_bytes = self.end_offset_bytes;
         Ok(())
     }
@@ -367,10 +348,7 @@ impl SegmentFile {
             return Ok(());
         }
         self.write_mark_if_behind().await?;
-        self.file
-            .sync_data()
-            .await
-            .map_err(io_error("flush mark", &self.path))
+        self.file.sync_data().await.map_err(io_error("flush mark", &self.path))
     }
 
     /// Reads whole batch frames, starting with the batch that holds
@@ -567,12 +545,10 @@ impl SegmentFile {
     /// Returns the closest indexed place at or before `sequence` to start a
     /// scan from: an index entry, or the first batch of the file.
     fn scan_start_for(&self, sequence: SequenceNumber) -> IndexEntry {
-        self.index
-            .entry_at_or_before(sequence)
-            .unwrap_or(IndexEntry {
-                first_sequence: self.header.first_sequence,
-                offset_bytes: HEADER_END_OFFSET,
-            })
+        self.index.entry_at_or_before(sequence).unwrap_or(IndexEntry {
+            first_sequence: self.header.first_sequence,
+            offset_bytes: HEADER_END_OFFSET,
+        })
     }
 
     /// Fails unless a scan of acknowledged content ended at its limit or was
@@ -615,8 +591,7 @@ impl SegmentFile {
         let mut wanted_bytes = SCAN_CHUNK_BYTES;
         loop {
             let remaining_bytes = limit_offset_bytes.saturating_sub(offset_bytes);
-            let chunk_bytes =
-                wanted_bytes.min(usize::try_from(remaining_bytes).unwrap_or(usize::MAX));
+            let chunk_bytes = wanted_bytes.min(usize::try_from(remaining_bytes).unwrap_or(usize::MAX));
             let chunk = self
                 .file
                 .read_at(offset_bytes, chunk_bytes)
@@ -657,10 +632,7 @@ impl SegmentFile {
     }
 }
 
-fn io_error<'path>(
-    operation: &'static str,
-    path: &'path str,
-) -> impl FnOnce(io::Error) -> SegmentError + 'path {
+fn io_error<'path>(operation: &'static str, path: &'path str) -> impl FnOnce(io::Error) -> SegmentError + 'path {
     move |source| SegmentError::Io {
         operation,
         path: path.to_owned(),
@@ -826,11 +798,7 @@ mod tests {
     async fn read_returns_the_payloads_that_were_appended() {
         let segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let frames = segment
-            .read_frames(
-                SequenceNumber::new(103),
-                SequenceNumber::new(104),
-                usize::MAX,
-            )
+            .read_frames(SequenceNumber::new(103), SequenceNumber::new(104), usize::MAX)
             .await
             .expect("read");
         let records: Vec<LogRecord> = decode_frames(SEGMENT, &frames)
@@ -845,11 +813,7 @@ mod tests {
     async fn read_from_inside_a_batch_starts_with_that_whole_batch() {
         let segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let frames = segment
-            .read_frames(
-                SequenceNumber::new(104),
-                SequenceNumber::new(109),
-                usize::MAX,
-            )
+            .read_frames(SequenceNumber::new(104), SequenceNumber::new(109), usize::MAX)
             .await
             .expect("read");
         assert_eq!(sequences_in(&frames), (103..=109).collect::<Vec<_>>());
@@ -859,11 +823,7 @@ mod tests {
     async fn read_never_returns_a_batch_that_ends_past_the_limit() {
         let segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let frames = segment
-            .read_frames(
-                SequenceNumber::new(100),
-                SequenceNumber::new(107),
-                usize::MAX,
-            )
+            .read_frames(SequenceNumber::new(100), SequenceNumber::new(107), usize::MAX)
             .await
             .expect("read");
         assert_eq!(sequences_in(&frames), (100..=104).collect::<Vec<_>>());
@@ -873,11 +833,7 @@ mod tests {
     async fn read_past_the_end_is_empty() {
         let segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let frames = segment
-            .read_frames(
-                SequenceNumber::new(110),
-                SequenceNumber::new(200),
-                usize::MAX,
-            )
+            .read_frames(SequenceNumber::new(110), SequenceNumber::new(200), usize::MAX)
             .await
             .expect("read");
         assert_eq!(frames, Bytes::new());
@@ -887,11 +843,7 @@ mod tests {
     async fn read_above_the_limit_is_empty() {
         let segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let frames = segment
-            .read_frames(
-                SequenceNumber::new(105),
-                SequenceNumber::new(104),
-                usize::MAX,
-            )
+            .read_frames(SequenceNumber::new(105), SequenceNumber::new(104), usize::MAX)
             .await
             .expect("read");
         assert_eq!(frames, Bytes::new());
@@ -958,8 +910,7 @@ mod tests {
         crash_with_torn_tail(&disk, flushed_bytes, 9);
         let (reopened, stop) = reopen(&disk).await;
         assert!(
-            reopened.local_end() == SequenceNumber::new(109)
-                && matches!(stop, ScanStop::Invalid(_)),
+            reopened.local_end() == SequenceNumber::new(109) && matches!(stop, ScanStop::Invalid(_)),
             "local end {}, stop {stop:?}",
             reopened.local_end()
         );
@@ -977,10 +928,7 @@ mod tests {
         reopened.flush().await.expect("flush");
         disk.crash();
         let (after_second_crash, _stop) = reopen(&disk).await;
-        assert_eq!(
-            read_all(&after_second_crash).await,
-            (100..=111).collect::<Vec<_>>()
-        );
+        assert_eq!(read_all(&after_second_crash).await, (100..=111).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -1045,8 +993,7 @@ mod tests {
         disk.crash();
         let (reopened, stop) = reopen(&disk).await;
         assert!(
-            reopened.local_end() == SequenceNumber::new(FIRST_SEQUENCE - 1)
-                && matches!(stop, ScanStop::Invalid(_))
+            reopened.local_end() == SequenceNumber::new(FIRST_SEQUENCE - 1) && matches!(stop, ScanStop::Invalid(_))
         );
     }
 
@@ -1071,10 +1018,7 @@ mod tests {
         damage_the_first_batch(&disk);
         disk.crash();
         let (reopened, _stop) = reopen(&disk).await;
-        assert_eq!(
-            reopened.local_end(),
-            SequenceNumber::new(FIRST_SEQUENCE - 1)
-        );
+        assert_eq!(reopened.local_end(), SequenceNumber::new(FIRST_SEQUENCE - 1));
     }
 
     #[tokio::test]
@@ -1092,10 +1036,7 @@ mod tests {
     async fn truncating_below_the_mark_lowers_it() {
         let disk = MemoryDisk::new();
         let mut segment = segment_with_a_mark_over_three_batches(&disk).await;
-        segment
-            .truncate_to(SequenceNumber::new(102))
-            .await
-            .expect("truncate");
+        segment.truncate_to(SequenceNumber::new(102)).await.expect("truncate");
         disk.crash();
         let (reopened, _stop) = reopen(&disk).await;
         assert_eq!(reopened.local_end(), SequenceNumber::new(102));
@@ -1123,10 +1064,7 @@ mod tests {
     #[tokio::test]
     async fn truncating_at_a_batch_boundary_discards_what_follows() {
         let mut segment = segment_with_three_batches(&MemoryDisk::new()).await;
-        segment
-            .truncate_to(SequenceNumber::new(104))
-            .await
-            .expect("truncate");
+        segment.truncate_to(SequenceNumber::new(104)).await.expect("truncate");
         assert_eq!(read_all(&segment).await, (100..=104).collect::<Vec<_>>());
     }
 
@@ -1134,10 +1072,7 @@ mod tests {
     async fn truncation_survives_a_crash() {
         let disk = MemoryDisk::new();
         let mut segment = segment_with_three_batches(&disk).await;
-        segment
-            .truncate_to(SequenceNumber::new(102))
-            .await
-            .expect("truncate");
+        segment.truncate_to(SequenceNumber::new(102)).await.expect("truncate");
         disk.crash();
         let (reopened, _stop) = reopen(&disk).await;
         assert_eq!(reopened.local_end(), SequenceNumber::new(102));
@@ -1156,10 +1091,7 @@ mod tests {
     #[tokio::test]
     async fn truncating_at_the_current_end_changes_nothing() {
         let mut segment = segment_with_three_batches(&MemoryDisk::new()).await;
-        segment
-            .truncate_to(SequenceNumber::new(109))
-            .await
-            .expect("truncate");
+        segment.truncate_to(SequenceNumber::new(109)).await.expect("truncate");
         assert_eq!(read_all(&segment).await, (100..=109).collect::<Vec<_>>());
     }
 
@@ -1167,39 +1099,27 @@ mod tests {
     async fn truncating_inside_a_batch_is_refused() {
         let mut segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let refused = segment.truncate_to(SequenceNumber::new(106)).await;
-        assert!(matches!(
-            refused,
-            Err(SegmentError::NotABatchBoundary { .. })
-        ));
+        assert!(matches!(refused, Err(SegmentError::NotABatchBoundary { .. })));
     }
 
     #[tokio::test]
     async fn truncating_past_the_end_is_refused() {
         let mut segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let refused = segment.truncate_to(SequenceNumber::new(110)).await;
-        assert!(matches!(
-            refused,
-            Err(SegmentError::NotABatchBoundary { .. })
-        ));
+        assert!(matches!(refused, Err(SegmentError::NotABatchBoundary { .. })));
     }
 
     #[tokio::test]
     async fn truncating_below_the_segment_is_refused() {
         let mut segment = segment_with_three_batches(&MemoryDisk::new()).await;
         let refused = segment.truncate_to(SequenceNumber::new(50)).await;
-        assert!(matches!(
-            refused,
-            Err(SegmentError::NotABatchBoundary { .. })
-        ));
+        assert!(matches!(refused, Err(SegmentError::NotABatchBoundary { .. })));
     }
 
     #[tokio::test]
     async fn segment_accepts_appends_after_a_truncation() {
         let mut segment = segment_with_three_batches(&MemoryDisk::new()).await;
-        segment
-            .truncate_to(SequenceNumber::new(104))
-            .await
-            .expect("truncate");
+        segment.truncate_to(SequenceNumber::new(104)).await.expect("truncate");
         segment.append(&[batch(105, 2)]).await.expect("append");
         assert_eq!(read_all(&segment).await, (100..=106).collect::<Vec<_>>());
     }
@@ -1219,12 +1139,8 @@ mod tests {
         let mut segment = new_segment(&disk).await;
         let payload = Bytes::from(vec![0xAB; 3 * 1024]);
         for sequence in FIRST_SEQUENCE..FIRST_SEQUENCE + 2 {
-            let large_batch = Batch::encode(
-                SEGMENT,
-                SequenceNumber::new(sequence),
-                std::slice::from_ref(&payload),
-            )
-            .expect("valid batch");
+            let large_batch = Batch::encode(SEGMENT, SequenceNumber::new(sequence), std::slice::from_ref(&payload))
+                .expect("valid batch");
             segment.append(&[large_batch]).await.expect("append");
         }
         let file_bytes = disk.durable_content(PATH).expect("file exists").len();
@@ -1256,10 +1172,7 @@ mod tests {
         let disk = MemoryDisk::new();
         let segment = segment_with_three_batches(&disk).await;
         disk.corrupt_byte(PATH, SEGMENT_HEADER_BYTES + 30, 0x04);
-        assert!(matches!(
-            segment.verify().await,
-            Err(SegmentError::Corrupt { .. })
-        ));
+        assert!(matches!(segment.verify().await, Err(SegmentError::Corrupt { .. })));
     }
 
     #[tokio::test]
@@ -1268,11 +1181,7 @@ mod tests {
         let segment = segment_with_three_batches(&disk).await;
         disk.corrupt_byte(PATH, SEGMENT_HEADER_BYTES + 30, 0x04);
         let read = segment
-            .read_frames(
-                SequenceNumber::new(100),
-                SequenceNumber::new(109),
-                usize::MAX,
-            )
+            .read_frames(SequenceNumber::new(100), SequenceNumber::new(109), usize::MAX)
             .await;
         assert!(matches!(read, Err(SegmentError::Corrupt { .. })));
     }
@@ -1292,8 +1201,7 @@ mod tests {
             let payload_bytes = usize::try_from(random.between(1, 96 * 1024)).expect("small");
             let payload = Bytes::from(random.bytes(payload_bytes));
             let large_batch =
-                Batch::encode(SEGMENT, SequenceNumber::new(next_sequence), &[payload])
-                    .expect("valid batch");
+                Batch::encode(SEGMENT, SequenceNumber::new(next_sequence), &[payload]).expect("valid batch");
             segment.append(&[large_batch]).await.expect("append");
             next_sequence += 1;
         }
@@ -1314,9 +1222,6 @@ mod tests {
         }
         disk.crash();
         let (reopened, stop) = reopen(&disk).await;
-        assert_eq!(
-            (reopened.local_end().get(), stop),
-            (last_sequence, ScanStop::EndOfData)
-        );
+        assert_eq!((reopened.local_end().get(), stop), (last_sequence, ScanStop::EndOfData));
     }
 }

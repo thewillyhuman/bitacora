@@ -20,23 +20,11 @@ use super::*;
 use crate::commands::testing::{STREAM, TestCluster};
 
 /// Runs `tail` to its end and returns what it wrote, as text.
-async fn tail_output(
-    started: &TestCluster,
-    from: Option<u64>,
-    count: u64,
-    format: OutputFormat,
-) -> String {
+async fn tail_output(started: &TestCluster, from: Option<u64>, count: u64, format: OutputFormat) -> String {
     let mut written = Vec::new();
-    tail(
-        &started.cluster,
-        STREAM,
-        from,
-        Some(count),
-        format,
-        &mut written,
-    )
-    .await
-    .expect("following succeeds");
+    tail(&started.cluster, STREAM, from, Some(count), format, &mut written)
+        .await
+        .expect("following succeeds");
     String::from_utf8(written).expect("the tool writes text")
 }
 
@@ -116,15 +104,9 @@ async fn cluster_without_streams_lists_none() {
 #[tokio::test(start_paused = true)]
 async fn description_shows_the_retention_that_was_asked_for() {
     let started = TestCluster::start(3).await;
-    create(
-        &started.cluster,
-        STREAM,
-        3,
-        2,
-        Some(Duration::from_hours(1)),
-    )
-    .await
-    .expect("the stream is created");
+    create(&started.cluster, STREAM, 3, 2, Some(Duration::from_hours(1)))
+        .await
+        .expect("the stream is created");
 
     let described = describe(&started.cluster, STREAM).await.expect("describes");
 
@@ -288,14 +270,9 @@ async fn second_append_continues_where_the_first_one_stopped() {
     started.append_numbered(1, 3).await;
     started.run_controller_pass().await;
 
-    let appended = append(
-        &started.cluster,
-        STREAM,
-        vec![Bytes::from("d")],
-        TakeoverPolicy::Force,
-    )
-    .await
-    .expect("the record commits");
+    let appended = append(&started.cluster, STREAM, vec![Bytes::from("d")], TakeoverPolicy::Force)
+        .await
+        .expect("the record commits");
 
     assert_eq!(appended.first_sequence, 4);
 }
@@ -320,9 +297,7 @@ async fn read_returns_each_record_as_text_and_as_hexadecimal() {
     let started = TestCluster::with_stream(3).await;
     started.append_numbered(1, 1).await;
 
-    let found = read(&started.cluster, STREAM, None, 100)
-        .await
-        .expect("reads");
+    let found = read(&started.cluster, STREAM, None, 100).await.expect("reads");
 
     assert_eq!(
         found.records,
@@ -339,9 +314,7 @@ async fn read_starts_at_the_sequence_it_is_given() {
     let started = TestCluster::with_stream(3).await;
     started.append_numbered(1, 5).await;
 
-    let found = read(&started.cluster, STREAM, Some(4), 100)
-        .await
-        .expect("reads");
+    let found = read(&started.cluster, STREAM, Some(4), 100).await.expect("reads");
 
     assert_eq!(found.records.len(), 2);
     assert_eq!(found.records[0].sequence, 4);
@@ -352,9 +325,7 @@ async fn read_stops_after_its_count() {
     let started = TestCluster::with_stream(3).await;
     started.append_numbered(1, 5).await;
 
-    let found = read(&started.cluster, STREAM, None, 2)
-        .await
-        .expect("reads");
+    let found = read(&started.cluster, STREAM, None, 2).await.expect("reads");
 
     assert_eq!(found.records.len(), 2);
     assert_eq!(found.records[1].sequence, 2);
@@ -365,9 +336,7 @@ async fn read_of_zero_records_reads_nothing() {
     let started = TestCluster::with_stream(3).await;
     started.append_numbered(1, 5).await;
 
-    let found = read(&started.cluster, STREAM, None, 0)
-        .await
-        .expect("reads");
+    let found = read(&started.cluster, STREAM, None, 0).await.expect("reads");
 
     assert_eq!(found.records, Vec::new());
 }
@@ -376,9 +345,7 @@ async fn read_of_zero_records_reads_nothing() {
 async fn read_of_an_empty_stream_finds_nothing() {
     let started = TestCluster::with_stream(3).await;
 
-    let found = read(&started.cluster, STREAM, None, 100)
-        .await
-        .expect("reads");
+    let found = read(&started.cluster, STREAM, None, 100).await.expect("reads");
 
     assert_eq!(found.records, Vec::new());
 }
@@ -389,10 +356,7 @@ async fn read_of_a_stream_that_does_not_exist_fails() {
 
     let failed = read(&started.cluster, "no-such-stream", None, 100).await;
 
-    assert!(matches!(
-        failed,
-        Err(CommandError::Read(ReadError::Metadata(_)))
-    ));
+    assert!(matches!(failed, Err(CommandError::Read(ReadError::Metadata(_)))));
 }
 
 #[tokio::test(start_paused = true)]

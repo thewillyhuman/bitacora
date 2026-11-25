@@ -55,8 +55,7 @@
 
 use crate::rules::{Bounds, RecoveryEnd, Rules};
 use crate::state::{
-    AbandonedSegment, Appender, Breach, Epoch, FIRST_EPOCH, REPLICA_COUNT, RecoveryPhase,
-    SECOND_EPOCH, Sequence, State,
+    AbandonedSegment, Appender, Breach, Epoch, FIRST_EPOCH, REPLICA_COUNT, RecoveryPhase, SECOND_EPOCH, Sequence, State,
 };
 
 /// One step of the modelled system: something one writer or one replica does, or one message arriving.
@@ -184,12 +183,7 @@ enum Writer {
 /// * `rules` - The rules the actors follow. A broken rule can enable steps the design forbids.
 /// * `bounds` - How much the run may still do. A bound that is used up disables the steps it limits.
 /// * `actions` - Where the steps are appended. The caller clears it between states.
-pub(crate) fn enabled_actions(
-    state: &State,
-    rules: &Rules,
-    bounds: Bounds,
-    actions: &mut Vec<Action>,
-) {
+pub(crate) fn enabled_actions(state: &State, rules: &Rules, bounds: Bounds, actions: &mut Vec<Action>) {
     push_first_writer_actions(state, bounds, actions);
     push_replica_actions(state, rules, bounds, actions);
     push_recovering_writer_actions(state, rules, bounds, actions);
@@ -232,9 +226,7 @@ fn push_acknowledgements_on_their_way(
         for end in known_end + 1..=acknowledged_end {
             actions.push(match learning_writer {
                 Writer::First => Action::FirstWriterLearnsAcknowledgement { replica, end },
-                Writer::Recovering => {
-                    Action::RecoveringWriterLearnsAcknowledgement { replica, end }
-                }
+                Writer::Recovering => Action::RecoveringWriterLearnsAcknowledgement { replica, end },
             });
         }
     }
@@ -247,8 +239,7 @@ fn push_replica_actions(state: &State, rules: &Rules, bounds: Bounds, actions: &
     for replica in 0..REPLICA_COUNT {
         let mut would_lose_something_on_restart = false;
         for segment in 0..segment_count {
-            would_lose_something_on_restart |=
-                push_copy_actions(state, rules, replica, segment, actions);
+            would_lose_something_on_restart |= push_copy_actions(state, rules, replica, segment, actions);
         }
         // A restart that would change nothing is not a step: it would only add a loop to every state.
         if bounds.replicas_may_restart && would_lose_something_on_restart {
@@ -265,13 +256,7 @@ fn push_replica_actions(state: &State, rules: &Rules, bounds: Bounds, actions: &
 ///
 /// Whether a restart of the replica would change this copy: it holds records it has not flushed, or it
 /// serves readers from a durable sequence it only keeps in memory.
-fn push_copy_actions(
-    state: &State,
-    rules: &Rules,
-    replica: usize,
-    segment: usize,
-    actions: &mut Vec<Action>,
-) -> bool {
+fn push_copy_actions(state: &State, rules: &Rules, replica: usize, segment: usize, actions: &mut Vec<Action>) -> bool {
     let record = state.segment(segment);
     let copy = state.copies[replica][segment];
     let passes_the_fence = record.epoch >= copy.fenced_epoch || !rules.replicas_enforce_fencing;
@@ -291,8 +276,7 @@ fn push_copy_actions(
     if !copy.knows_seal && record.sealed_end.is_some() {
         actions.push(Action::ReplicaLearnsSeal { replica, segment });
     }
-    let serves_readers_from_memory =
-        !copy.knows_seal && copy.known_durable >= record.first_sequence;
+    let serves_readers_from_memory = !copy.knows_seal && copy.known_durable >= record.first_sequence;
     holds_unflushed_records || serves_readers_from_memory
 }
 
@@ -310,8 +294,7 @@ fn push_fence_arrivals(state: &State, replica: usize, actions: &mut Vec<Action>)
         replica,
         reply_reaches_writer: false,
     });
-    let is_writer_collecting =
-        matches!(state.recovering_writer.phase, RecoveryPhase::Fencing { .. });
+    let is_writer_collecting = matches!(state.recovering_writer.phase, RecoveryPhase::Fencing { .. });
     if is_writer_collecting {
         actions.push(Action::ReplicaIsFenced {
             replica,
@@ -322,12 +305,7 @@ fn push_fence_arrivals(state: &State, replica: usize, actions: &mut Vec<Action>)
 
 /// Appends the steps the recovering writer can take, which depend on how far it has got in the failover
 /// protocol.
-fn push_recovering_writer_actions(
-    state: &State,
-    rules: &Rules,
-    bounds: Bounds,
-    actions: &mut Vec<Action>,
-) {
+fn push_recovering_writer_actions(state: &State, rules: &Rules, bounds: Bounds, actions: &mut Vec<Action>) {
     match state.recovering_writer.phase {
         RecoveryPhase::NotStarted => {
             // Claiming is a conditional write on the epoch the writer read.
@@ -399,12 +377,7 @@ fn push_repair_actions(
 
 /// Appends the steps of a recovering writer that appends to its own segment: assign a record while its
 /// bound allows, and learn any acknowledgement on its way.
-fn push_new_writer_append_actions(
-    state: &State,
-    bounds: Bounds,
-    appender: Appender,
-    actions: &mut Vec<Action>,
-) {
+fn push_new_writer_append_actions(state: &State, bounds: Bounds, appender: Appender, actions: &mut Vec<Action>) {
     let first_sequence = state.segment(appender.segment).first_sequence;
     let records_assigned = appender.assigned_end + 1 - first_sequence;
     if records_assigned < bounds.recovering_writer_records {
@@ -488,24 +461,13 @@ fn first_writer_assigns(state: &mut State) {
 }
 
 /// An acknowledgement reaches the first writer (section 5, step 4).
-fn first_writer_learns_acknowledgement(
-    state: &mut State,
-    rules: &Rules,
-    replica: usize,
-    end: Sequence,
-) {
+fn first_writer_learns_acknowledgement(state: &mut State, rules: &Rules, replica: usize, end: Sequence) {
     let appender = state.first_writer.appender;
-    state.first_writer.appender =
-        learn_acknowledgement(state, rules, FIRST_EPOCH, appender, replica, end);
+    state.first_writer.appender = learn_acknowledgement(state, rules, FIRST_EPOCH, appender, replica, end);
 }
 
 /// An acknowledgement reaches the recovering writer, which by now appends to its own segment.
-fn recovering_writer_learns_acknowledgement(
-    state: &mut State,
-    rules: &Rules,
-    replica: usize,
-    end: Sequence,
-) {
+fn recovering_writer_learns_acknowledgement(state: &mut State, rules: &Rules, replica: usize, end: Sequence) {
     let RecoveryPhase::Writing(appender) = state.recovering_writer.phase else {
         return;
     };
@@ -555,10 +517,7 @@ fn learn_acknowledgement(
 
 /// Returns the highest position that at least `commit_quorum` replicas have acknowledged: the
 /// `commit_quorum`-th highest of the acknowledged ends.
-fn end_acknowledged_by_quorum(
-    acknowledged_ends: [Sequence; REPLICA_COUNT],
-    commit_quorum: usize,
-) -> Sequence {
+fn end_acknowledged_by_quorum(acknowledged_ends: [Sequence; REPLICA_COUNT], commit_quorum: usize) -> Sequence {
     let mut highest_first = acknowledged_ends;
     highest_first.sort_unstable_by(|left_end, right_end| right_end.cmp(left_end));
     highest_first[commit_quorum - 1]
@@ -570,13 +529,7 @@ fn end_acknowledged_by_quorum(
 /// readers up to it; a replica fenced against this writer refuses it like any other request. The model
 /// delivers it at once to every replica that would accept it: replicas can only serve more this way,
 /// never less, so a reader disagreement cannot be missed.
-fn publish_durable_sequence(
-    state: &mut State,
-    rules: &Rules,
-    writer_epoch: Epoch,
-    segment: usize,
-    durable: Sequence,
-) {
+fn publish_durable_sequence(state: &mut State, rules: &Rules, writer_epoch: Epoch, segment: usize, durable: Sequence) {
     for replica_copies in &mut state.copies {
         let copy = &mut replica_copies[segment];
         let passes_the_fence = writer_epoch >= copy.fenced_epoch || !rules.replicas_enforce_fencing;
@@ -618,13 +571,7 @@ fn first_writer_rolls(state: &mut State) {
 /// Whether the replica flushes before it acknowledges is a rule. Persisting an append from an epoch the
 /// replica is fenced against can only happen when replicas are told to ignore fencing, and is recorded as
 /// a breach.
-fn replica_persists(
-    state: &mut State,
-    rules: &Rules,
-    replica: usize,
-    segment: usize,
-    through: Sequence,
-) {
+fn replica_persists(state: &mut State, rules: &Rules, replica: usize, segment: usize, through: Sequence) {
     let writer_epoch = state.segment(segment).epoch;
     let copy = &mut state.copies[replica][segment];
     if writer_epoch < copy.fenced_epoch {
@@ -706,9 +653,7 @@ fn replica_is_fenced(state: &mut State, replica: usize, reply_reaches_writer: bo
         .expect("a fence is only sent for a target segment");
     let copy = &mut state.copies[replica][target_segment];
     copy.fenced_epoch = SECOND_EPOCH;
-    if reply_reaches_writer
-        && let RecoveryPhase::Fencing { replies } = &mut state.recovering_writer.phase
-    {
+    if reply_reaches_writer && let RecoveryPhase::Fencing { replies } = &mut state.recovering_writer.phase {
         replies[replica] = Some(copy.local_end);
     }
 }

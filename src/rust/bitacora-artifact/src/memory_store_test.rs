@@ -75,9 +75,7 @@ async fn unavailable_store_fails_writes() {
     let artifact_store = store_with_object().await;
     artifact_store.set_unavailable(true);
 
-    let written = artifact_store
-        .put_object(OBJECT_KEY, Bytes::from_static(b"lost"))
-        .await;
+    let written = artifact_store.put_object(OBJECT_KEY, Bytes::from_static(b"lost")).await;
 
     assert!(matches!(written, Err(ArtifactError::Unavailable { .. })));
 }
@@ -97,9 +95,7 @@ async fn unavailable_store_fails_listings() {
 async fn outage_leaves_the_stored_objects_as_they_were() {
     let artifact_store = store_with_object().await;
     artifact_store.set_unavailable(true);
-    let _refused_write = artifact_store
-        .put_object(OBJECT_KEY, Bytes::from_static(b"lost"))
-        .await;
+    let _refused_write = artifact_store.put_object(OBJECT_KEY, Bytes::from_static(b"lost")).await;
 
     artifact_store.set_unavailable(false);
 
@@ -114,11 +110,7 @@ async fn unresponsive_store_never_answers() {
     let artifact_store = MemoryArtifactStore::new();
     artifact_store.set_unresponsive(true);
 
-    let answer = tokio::time::timeout(
-        LONGER_THAN_ANY_ANSWER,
-        artifact_store.get_object(OBJECT_KEY),
-    )
-    .await;
+    let answer = tokio::time::timeout(LONGER_THAN_ANY_ANSWER, artifact_store.get_object(OBJECT_KEY)).await;
 
     assert!(answer.is_err(), "{answer:?}");
 }
@@ -130,11 +122,7 @@ async fn unresponsive_store_does_not_answer_even_with_a_failure() {
     artifact_store.set_unavailable(true);
     artifact_store.set_unresponsive(true);
 
-    let answer = tokio::time::timeout(
-        LONGER_THAN_ANY_ANSWER,
-        artifact_store.get_object(OBJECT_KEY),
-    )
-    .await;
+    let answer = tokio::time::timeout(LONGER_THAN_ANY_ANSWER, artifact_store.get_object(OBJECT_KEY)).await;
 
     assert!(answer.is_err(), "{answer:?}");
 }
@@ -214,9 +202,7 @@ async fn refused_range_reads_are_not_counted() {
     let artifact_store = store_with_object().await;
     let range_past_the_end = 2..9;
 
-    let _refused_range = artifact_store
-        .get_range(OBJECT_KEY, range_past_the_end)
-        .await;
+    let _refused_range = artifact_store.get_range(OBJECT_KEY, range_past_the_end).await;
 
     assert_eq!(artifact_store.served_range_reads(""), 0);
 }

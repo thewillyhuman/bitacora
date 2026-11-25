@@ -46,11 +46,7 @@ fn keys_in_bucket(bucket: u32, count: usize) -> Vec<Bytes> {
 }
 
 /// Applies `record` to the page of `bucket` and returns the pairs of the page afterwards.
-fn pairs_after(
-    bucket: u32,
-    page_before: Option<&[u8]>,
-    record: &KvRecord,
-) -> BTreeMap<Bytes, Bytes> {
+fn pairs_after(bucket: u32, page_before: Option<&[u8]>, record: &KvRecord) -> BTreeMap<Bytes, Bytes> {
     let page = KvPages
         .apply_record(&bucket, page_before, &log_record(record))
         .expect("the record is valid");
@@ -160,18 +156,10 @@ fn put_into_a_bucket_nothing_has_touched_creates_the_page() {
 fn put_of_an_existing_key_replaces_its_value() {
     let key = keys_in_bucket(3, 1).remove(0);
     let page_before = KvPages
-        .apply_record(
-            &3,
-            None,
-            &log_record(&KvRecord::put(key.clone(), bytes("red"))),
-        )
+        .apply_record(&3, None, &log_record(&KvRecord::put(key.clone(), bytes("red"))))
         .expect("the record is valid");
 
-    let pairs = pairs_after(
-        3,
-        Some(&page_before),
-        &KvRecord::put(key.clone(), bytes("blue")),
-    );
+    let pairs = pairs_after(3, Some(&page_before), &KvRecord::put(key.clone(), bytes("blue")));
 
     assert_eq!(pairs.get(&key), Some(&bytes("blue")));
     assert_eq!(pairs.len(), 1);
@@ -181,18 +169,10 @@ fn put_of_an_existing_key_replaces_its_value() {
 fn put_leaves_the_other_keys_of_the_bucket_alone() {
     let keys = keys_in_bucket(3, 2);
     let page_before = KvPages
-        .apply_record(
-            &3,
-            None,
-            &log_record(&KvRecord::put(keys[0].clone(), bytes("red"))),
-        )
+        .apply_record(&3, None, &log_record(&KvRecord::put(keys[0].clone(), bytes("red"))))
         .expect("the record is valid");
 
-    let pairs = pairs_after(
-        3,
-        Some(&page_before),
-        &KvRecord::put(keys[1].clone(), bytes("blue")),
-    );
+    let pairs = pairs_after(3, Some(&page_before), &KvRecord::put(keys[1].clone(), bytes("blue")));
 
     assert_eq!(pairs.get(&keys[0]), Some(&bytes("red")));
     assert_eq!(pairs.get(&keys[1]), Some(&bytes("blue")));
@@ -202,11 +182,7 @@ fn put_leaves_the_other_keys_of_the_bucket_alone() {
 fn delete_removes_the_key() {
     let key = keys_in_bucket(3, 1).remove(0);
     let page_before = KvPages
-        .apply_record(
-            &3,
-            None,
-            &log_record(&KvRecord::put(key.clone(), bytes("red"))),
-        )
+        .apply_record(&3, None, &log_record(&KvRecord::put(key.clone(), bytes("red"))))
         .expect("the record is valid");
 
     let pairs = pairs_after(3, Some(&page_before), &KvRecord::delete(key));
@@ -218,11 +194,7 @@ fn delete_removes_the_key() {
 fn delete_of_a_key_that_does_not_exist_changes_nothing() {
     let keys = keys_in_bucket(3, 2);
     let page_before = KvPages
-        .apply_record(
-            &3,
-            None,
-            &log_record(&KvRecord::put(keys[0].clone(), bytes("red"))),
-        )
+        .apply_record(&3, None, &log_record(&KvRecord::put(keys[0].clone(), bytes("red"))))
         .expect("the record is valid");
 
     let pairs = pairs_after(3, Some(&page_before), &KvRecord::delete(keys[1].clone()));
@@ -331,10 +303,7 @@ fn payload_that_is_not_a_record_cannot_be_applied() {
 
     let applied = KvPages.apply_record(&3, None, &not_a_record);
 
-    assert!(matches!(
-        applied,
-        Err(MaterializerError::InvalidRecord { .. })
-    ));
+    assert!(matches!(applied, Err(MaterializerError::InvalidRecord { .. })));
 }
 
 #[test]
@@ -360,11 +329,7 @@ fn key_is_looked_up_in_its_bucket_page() {
     let key = keys_in_bucket(3, 1).remove(0);
     let page = Bytes::from(
         KvPages
-            .apply_record(
-                &3,
-                None,
-                &log_record(&KvRecord::put(key.clone(), bytes("red"))),
-            )
+            .apply_record(&3, None, &log_record(&KvRecord::put(key.clone(), bytes("red"))))
             .expect("the record is valid"),
     );
 

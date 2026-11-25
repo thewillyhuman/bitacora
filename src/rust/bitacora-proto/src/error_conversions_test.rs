@@ -76,9 +76,7 @@ fn every_error_variant_survives_the_round_trip() {
 
 #[test]
 fn fullest_disk_the_domain_can_express_survives_the_round_trip() {
-    let error = ReplicaError::NoCapacity {
-        used_percent: u8::MAX,
-    };
+    let error = ReplicaError::NoCapacity { used_percent: u8::MAX };
 
     let message = wire::ReplicaError::from(error.clone());
 
@@ -99,9 +97,9 @@ fn error_without_a_kind_is_malformed() {
 
 #[test]
 fn segment_not_found_without_a_segment_is_malformed() {
-    let message = error_message(wire_error::Kind::SegmentNotFound(
-        wire_error::SegmentNotFound { segment: None },
-    ));
+    let message = error_message(wire_error::Kind::SegmentNotFound(wire_error::SegmentNotFound {
+        segment: None,
+    }));
 
     assert_eq!(
         ReplicaError::try_from(message),

@@ -124,9 +124,7 @@ impl SegmentRow {
 /// An empty table with the columns of a segment listing. The rebuild report shows its planned segments
 /// in the same table.
 pub(super) fn segment_table() -> Table {
-    Table::new(&[
-        "SEGMENT", "EPOCH", "FIRST", "END", "STATE", "COPIES", "OBJECT",
-    ])
+    Table::new(&["SEGMENT", "EPOCH", "FIRST", "END", "STATE", "COPIES", "OBJECT"])
 }
 
 impl SegmentList {
@@ -179,10 +177,7 @@ pub(super) fn segment_row(stream: &StreamRecord, segment: &SegmentRecord) -> Seg
         state: segment_state_name(segment).to_owned(),
         awaits_deletion,
         copies,
-        object_key: segment
-            .tiered
-            .as_ref()
-            .map(|tiered| tiered.object_key.clone()),
+        object_key: segment.tiered.as_ref().map(|tiered| tiered.object_key.clone()),
         object_size_bytes: segment.tiered.as_ref().map(|tiered| tiered.size_bytes),
     }
 }
@@ -197,10 +192,7 @@ pub(super) fn segment_row(stream: &StreamRecord, segment: &SegmentRecord) -> Seg
 /// # Errors
 ///
 /// Returns [`CommandError::Metadata`] if no stream has this name or the metadata store is unavailable.
-pub(crate) async fn list(
-    cluster: &Cluster,
-    stream_name: &str,
-) -> Result<SegmentList, CommandError> {
+pub(crate) async fn list(cluster: &Cluster, stream_name: &str) -> Result<SegmentList, CommandError> {
     let stream = cluster.metadata.get_stream(stream_name).await?;
     let mut segments = Vec::with_capacity(stream.segments.len());
     for segment in &stream.segments {

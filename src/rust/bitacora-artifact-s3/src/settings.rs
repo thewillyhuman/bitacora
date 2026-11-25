@@ -273,9 +273,7 @@ pub struct InvalidS3Settings {
 impl InvalidS3Settings {
     /// Builds the error from the reason the settings were refused.
     pub(crate) fn because(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
+        Self { reason: reason.into() }
     }
 }
 

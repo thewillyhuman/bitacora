@@ -20,10 +20,7 @@ use bitacora_process::undocumented_metrics;
 use super::*;
 
 /// Where the reference lies, seen from where Bazel and Cargo run the tests.
-const REFERENCE_LOCATIONS: [&str; 2] = [
-    "docs/operations/metrics.md",
-    "../../../docs/operations/metrics.md",
-];
+const REFERENCE_LOCATIONS: [&str; 2] = ["docs/operations/metrics.md", "../../../docs/operations/metrics.md"];
 
 /// Reads `docs/operations/metrics.md`.
 fn read_reference() -> String {
@@ -179,10 +176,7 @@ fn round_that_ran_no_pass_observes_no_pass_duration() {
     metrics.record_round(&failed_round(), ROUND_TOOK);
 
     assert_eq!(
-        exposition_value(
-            &registry,
-            "bitacora_controller_pass_duration_seconds_count "
-        ),
+        exposition_value(&registry, "bitacora_controller_pass_duration_seconds_count "),
         Some("0".to_owned())
     );
 }

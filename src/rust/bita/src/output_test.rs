@@ -67,10 +67,7 @@ fn named_values_are_lined_up() {
 
 #[test]
 fn unix_epoch_is_the_first_of_january_1970() {
-    assert_eq!(
-        format_timestamp(Timestamp::UNIX_EPOCH),
-        "1970-01-01T00:00:00Z"
-    );
+    assert_eq!(format_timestamp(Timestamp::UNIX_EPOCH), "1970-01-01T00:00:00Z");
 }
 
 #[test]
@@ -86,10 +83,7 @@ fn last_second_of_a_year_is_rendered() {
     // 2026-12-31T23:59:59Z.
     let last_second_of_2026 = Timestamp::from_unix_millis(1_798_761_599_000);
 
-    assert_eq!(
-        format_timestamp(last_second_of_2026),
-        "2026-12-31T23:59:59Z"
-    );
+    assert_eq!(format_timestamp(last_second_of_2026), "2026-12-31T23:59:59Z");
 }
 
 #[test]
@@ -97,10 +91,7 @@ fn first_of_march_of_a_year_that_is_no_leap_year_is_rendered() {
     // 2100 is divisible by 4 but is not a leap year: 2100-03-01T00:00:00Z.
     let first_of_march_2100 = Timestamp::from_unix_millis(4_107_542_400_000);
 
-    assert_eq!(
-        format_timestamp(first_of_march_2100),
-        "2100-03-01T00:00:00Z"
-    );
+    assert_eq!(format_timestamp(first_of_march_2100), "2100-03-01T00:00:00Z");
 }
 
 #[test]
@@ -153,10 +144,7 @@ fn exact_kibibyte_has_a_zero_decimal() {
 
 #[test]
 fn size_beyond_the_largest_unit_stays_in_it() {
-    assert_eq!(
-        format_bytes(4_096 * 1_024 * 1_024 * 1_024 * 1_024),
-        "4096.0 TiB"
-    );
+    assert_eq!(format_bytes(4_096 * 1_024 * 1_024 * 1_024 * 1_024), "4096.0 TiB");
 }
 
 #[test]

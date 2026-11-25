@@ -123,8 +123,7 @@ mod tests {
     use super::*;
 
     fn range(first: u64, last: u64) -> SequenceRange {
-        SequenceRange::new(SequenceNumber::new(first), SequenceNumber::new(last))
-            .expect("valid range")
+        SequenceRange::new(SequenceNumber::new(first), SequenceNumber::new(last)).expect("valid range")
     }
 
     #[test]
@@ -140,17 +139,13 @@ mod tests {
     #[test]
     fn range_contains_its_ends() {
         let covered = range(5, 9);
-        assert!(
-            covered.contains(SequenceNumber::new(5)) && covered.contains(SequenceNumber::new(9))
-        );
+        assert!(covered.contains(SequenceNumber::new(5)) && covered.contains(SequenceNumber::new(9)));
     }
 
     #[test]
     fn range_excludes_its_neighbours() {
         let covered = range(5, 9);
-        assert!(
-            !covered.contains(SequenceNumber::new(4)) && !covered.contains(SequenceNumber::new(10))
-        );
+        assert!(!covered.contains(SequenceNumber::new(4)) && !covered.contains(SequenceNumber::new(10)));
     }
 
     #[test]

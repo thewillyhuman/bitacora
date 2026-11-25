@@ -164,9 +164,7 @@ pub async fn serve_observability(
         .route("/healthz", get(answer_liveness))
         .route("/readyz", get(answer_readiness))
         .with_state(state);
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await
+    axum::serve(listener, router).with_graceful_shutdown(shutdown).await
 }
 
 /// Answers `/metrics` with the exposition of every registered metric.

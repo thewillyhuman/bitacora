@@ -36,22 +36,14 @@ fn sample_blobs() -> BTreeMap<Bytes, Bytes> {
         Bytes::from_static(b"page-a"),
         encode_records(&[record(100, "first"), record(150, "second")]),
     );
-    blobs_by_page.insert(
-        Bytes::from_static(b"page-b"),
-        encode_records(&[record(120, "only")]),
-    );
+    blobs_by_page.insert(Bytes::from_static(b"page-b"), encode_records(&[record(120, "only")]));
     blobs_by_page.insert(Bytes::from_static(b"page-c"), encode_records(&[]));
     blobs_by_page
 }
 
 /// A delta layer of three pages.
 fn sample_layer() -> Bytes {
-    encode_layer(
-        LayerKind::Delta,
-        FIRST_SEQUENCE,
-        LAST_SEQUENCE,
-        &sample_blobs(),
-    )
+    encode_layer(LayerKind::Delta, FIRST_SEQUENCE, LAST_SEQUENCE, &sample_blobs())
 }
 
 /// The bytes of `layer` in `byte_range`, as a range request would return them.
@@ -110,10 +102,7 @@ fn records_of_a_page_read_back_in_order() {
 
     let records = decode_records(&blob);
 
-    assert_eq!(
-        records,
-        Ok(vec![record(100, "first"), record(150, "second")])
-    );
+    assert_eq!(records, Ok(vec![record(100, "first"), record(150, "second")]));
 }
 
 #[test]
@@ -133,10 +122,7 @@ fn page_the_layer_does_not_hold_is_not_found() {
 #[test]
 fn image_layer_reads_back_its_pages() {
     let mut pages = BTreeMap::new();
-    pages.insert(
-        Bytes::from_static(b"page-a"),
-        Bytes::from_static(b"whole page"),
-    );
+    pages.insert(Bytes::from_static(b"page-a"), Bytes::from_static(b"whole page"));
     let image_at = SequenceNumber::new(500);
     let layer = encode_layer(LayerKind::Image, image_at, image_at, &pages);
 
@@ -149,12 +135,7 @@ fn image_layer_reads_back_its_pages() {
 
 #[test]
 fn layer_without_pages_is_a_header_alone() {
-    let layer = encode_layer(
-        LayerKind::Delta,
-        FIRST_SEQUENCE,
-        LAST_SEQUENCE,
-        &BTreeMap::new(),
-    );
+    let layer = encode_layer(LayerKind::Delta, FIRST_SEQUENCE, LAST_SEQUENCE, &BTreeMap::new());
 
     assert_eq!(layer.len(), LAYER_HEADER_BYTES);
     assert_eq!(read_page(&layer, b"page-a"), Ok(None));
@@ -177,10 +158,7 @@ fn every_flipped_bit_is_detected_by_a_reader_of_the_page_it_hits() {
         }
 
         // Damage to the header or the index fails every read; damage to a blob fails that page's.
-        assert!(
-            pages_read_intact < 3,
-            "damage at byte {damaged_offset} went unnoticed"
-        );
+        assert!(pages_read_intact < 3, "damage at byte {damaged_offset} went unnoticed");
     }
 }
 
@@ -212,10 +190,7 @@ fn index_of_another_size_than_the_header_says_is_refused() {
 
     let decoded = decode_index(&header, &index.slice(..index.len() - 1));
 
-    assert_eq!(
-        decoded,
-        Err(damage("its index is not the size its header says"))
-    );
+    assert_eq!(decoded, Err(damage("its index is not the size its header says")));
 }
 
 #[test]

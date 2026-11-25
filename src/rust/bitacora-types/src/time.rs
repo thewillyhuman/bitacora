@@ -92,8 +92,7 @@ impl ManualClock {
     /// Moves the clock forward by `duration`.
     pub fn advance(&self, duration: Duration) {
         let moved = self.now().plus(duration);
-        self.unix_millis
-            .store(moved.unix_millis(), Ordering::Relaxed);
+        self.unix_millis.store(moved.unix_millis(), Ordering::Relaxed);
     }
 }
 
@@ -110,19 +109,13 @@ mod tests {
     #[test]
     fn plus_moves_a_timestamp_forward() {
         let start = Timestamp::from_unix_millis(1_000);
-        assert_eq!(
-            start.plus(Duration::from_secs(10)),
-            Timestamp::from_unix_millis(11_000)
-        );
+        assert_eq!(start.plus(Duration::from_secs(10)), Timestamp::from_unix_millis(11_000));
     }
 
     #[test]
     fn plus_saturates_instead_of_overflowing() {
         let far_future = Timestamp::from_unix_millis(u64::MAX - 1);
-        assert_eq!(
-            far_future.plus(Duration::MAX),
-            Timestamp::from_unix_millis(u64::MAX)
-        );
+        assert_eq!(far_future.plus(Duration::MAX), Timestamp::from_unix_millis(u64::MAX));
     }
 
     #[test]
@@ -160,8 +153,7 @@ mod tests {
 
     #[test]
     fn timestamps_serialize_as_plain_numbers() {
-        let serialized =
-            serde_json::to_string(&Timestamp::from_unix_millis(1_500)).expect("serializable");
+        let serialized = serde_json::to_string(&Timestamp::from_unix_millis(1_500)).expect("serializable");
         assert_eq!(serialized, "1500");
     }
 }

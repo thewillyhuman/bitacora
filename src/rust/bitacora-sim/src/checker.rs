@@ -180,10 +180,7 @@ fn observe(events: &[TimedEvent], violations: &mut Vec<Violation>) -> Observatio
                     append.outcome = Some(outcome.clone());
                 }
             }
-            Event::ReaderStarted {
-                session,
-                from_sequence,
-            } => {
+            Event::ReaderStarted { session, from_sequence } => {
                 next_of_session.insert(*session, *from_sequence);
             }
             Event::RecordRead {
@@ -191,10 +188,7 @@ fn observe(events: &[TimedEvent], violations: &mut Vec<Violation>) -> Observatio
                 sequence,
                 payload,
             } => {
-                let expected = next_of_session
-                    .get(session)
-                    .copied()
-                    .unwrap_or(SequenceNumber::FIRST);
+                let expected = next_of_session.get(session).copied().unwrap_or(SequenceNumber::FIRST);
                 if *sequence != expected {
                     violations.push(Violation::ReaderOutOfOrder {
                         session: *session,
@@ -214,9 +208,7 @@ fn observe(events: &[TimedEvent], violations: &mut Vec<Violation>) -> Observatio
                     }
                     Some(_) => {}
                     None => {
-                        observations
-                            .stream
-                            .insert(*sequence, (payload.clone(), *session));
+                        observations.stream.insert(*sequence, (payload.clone(), *session));
                     }
                 }
             }
@@ -306,10 +298,7 @@ fn hold_commits_against_reads(
 }
 
 /// Along the stream, the committing epoch never decreases (I4).
-fn require_epochs_in_order(
-    committed: &BTreeMap<SequenceNumber, (u64, Epoch)>,
-    violations: &mut Vec<Violation>,
-) {
+fn require_epochs_in_order(committed: &BTreeMap<SequenceNumber, (u64, Epoch)>, violations: &mut Vec<Violation>) {
     let mut newest: Option<(SequenceNumber, Epoch)> = None;
     for (sequence, (_operation, epoch)) in committed {
         match newest {
@@ -340,10 +329,9 @@ pub fn check_audit(events: &[TimedEvent], audit_session: u64) -> Vec<Violation> 
     let mut committed: Vec<(u64, SequenceNumber)> = Vec::new();
     for timed in events {
         match &timed.event {
-            Event::ReaderStarted {
-                session,
-                from_sequence,
-            } if *session == audit_session => audited_from = *from_sequence,
+            Event::ReaderStarted { session, from_sequence } if *session == audit_session => {
+                audited_from = *from_sequence;
+            }
             Event::RecordRead {
                 session,
                 sequence,
@@ -364,13 +352,8 @@ pub fn check_audit(events: &[TimedEvent], audit_session: u64) -> Vec<Violation> 
     committed
         .into_iter()
         .filter(|(_operation, sequence)| *sequence >= audited_from)
-        .filter(|(operation, sequence)| {
-            audited.get(sequence) != payload_by_operation.get(operation)
-        })
-        .map(|(operation, sequence)| Violation::CommittedRecordMissing {
-            operation,
-            sequence,
-        })
+        .filter(|(operation, sequence)| audited.get(sequence) != payload_by_operation.get(operation))
+        .map(|(operation, sequence)| Violation::CommittedRecordMissing { operation, sequence })
         .collect()
 }
 

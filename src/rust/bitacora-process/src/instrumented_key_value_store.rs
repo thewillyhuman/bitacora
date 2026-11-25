@@ -39,9 +39,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bitacora_meta::{
-    Condition, KeyValueStore, Mutation, StoreUnavailable, TransactionOutcome, VersionedValue,
-};
+use bitacora_meta::{Condition, KeyValueStore, Mutation, StoreUnavailable, TransactionOutcome, VersionedValue};
 
 use crate::metrics::{Gauge, MetricsRegistry, RequestMetrics};
 
@@ -102,20 +100,13 @@ impl InstrumentedKeyValueStore {
         is_available.set_flag(true);
         Self {
             store,
-            metrics: RequestMetrics::register(
-                registry,
-                "metadata_store",
-                "Requests to the metadata store",
-            ),
+            metrics: RequestMetrics::register(registry, "metadata_store", "Requests to the metadata store"),
             is_available,
         }
     }
 
     /// Remembers whether the request that just finished was answered, and passes its outcome on.
-    fn note_availability<Answer>(
-        &self,
-        outcome: Result<Answer, StoreUnavailable>,
-    ) -> Result<Answer, StoreUnavailable> {
+    fn note_availability<Answer>(&self, outcome: Result<Answer, StoreUnavailable>) -> Result<Answer, StoreUnavailable> {
         self.is_available.set_flag(outcome.is_ok());
         outcome
     }
@@ -131,10 +122,7 @@ impl KeyValueStore for InstrumentedKeyValueStore {
         self.note_availability(outcome)
     }
 
-    async fn list(
-        &self,
-        key_prefix: &str,
-    ) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
+    async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
         let outcome = self
             .metrics
             .observe("list", self.store.list(key_prefix), kind_of_store_failure)

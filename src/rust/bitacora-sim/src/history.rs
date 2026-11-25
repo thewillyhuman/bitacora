@@ -216,10 +216,7 @@ impl History {
             recorded.next_session += 1;
             recorded.next_session
         };
-        self.record(Event::ReaderStarted {
-            session,
-            from_sequence,
-        });
+        self.record(Event::ReaderStarted { session, from_sequence });
         session
     }
 
@@ -234,11 +231,7 @@ impl History {
 
     /// Records that the low-water mark passed a registered materializer's
     /// committed checkpoint.
-    pub fn truncated_past_checkpoint(
-        &self,
-        checkpoint: SequenceNumber,
-        low_water_mark: SequenceNumber,
-    ) {
+    pub fn truncated_past_checkpoint(&self, checkpoint: SequenceNumber, low_water_mark: SequenceNumber) {
         self.record(Event::TruncatedPastCheckpoint {
             checkpoint,
             low_water_mark,

@@ -61,8 +61,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bitacora::{
-    BitacoraClient, OpenError, ReadError, SequenceNumber, SequenceRange, StreamOptions,
-    StreamWriter, TakeoverPolicy,
+    BitacoraClient, OpenError, ReadError, SequenceNumber, SequenceRange, StreamOptions, StreamWriter, TakeoverPolicy,
 };
 use bytes::Bytes;
 use thiserror::Error;
@@ -310,9 +309,7 @@ pub(crate) async fn create_missing_streams(
         if admin.describe_stream(&stream_name).await.is_ok() {
             continue;
         }
-        let created = admin
-            .create_stream(&stream_name, StreamOptions::default())
-            .await;
+        let created = admin.create_stream(&stream_name, StreamOptions::default()).await;
         if let Err(reason) = created {
             return Err(WorkloadError::CannotCreate {
                 stream: stream_name,
@@ -398,9 +395,7 @@ async fn run_append_workload(
     if let Ok(shared) = Arc::try_unwrap(shared)
         && let Err(close_error) = shared.writer.close().await
     {
-        failure = failure.or(Some(format!(
-            "the writer did not close cleanly: {close_error}"
-        )));
+        failure = failure.or(Some(format!("the writer did not close cleanly: {close_error}")));
     }
     let appends = latencies.count();
     let records = appends * records_per_append;
@@ -425,14 +420,9 @@ async fn run_append_worker(shared: Arc<SharedAppendState>) -> WorkerMeasurement 
         if shared.send_limit.is_some_and(|limit| send_number >= limit) {
             break;
         }
-        let due_at = shared
-            .pace
-            .map(|pace| shared.started_at + pace.due_after(send_number));
+        let due_at = shared.pace.map(|pace| shared.started_at + pace.due_after(send_number));
         let starts_at = due_at.unwrap_or_else(Instant::now).max(Instant::now());
-        if shared
-            .deadline
-            .is_some_and(|deadline| starts_at >= deadline)
-        {
+        if shared.deadline.is_some_and(|deadline| starts_at >= deadline) {
             break;
         }
         if let Some(due_at) = due_at {
@@ -506,8 +496,8 @@ pub(crate) async fn run_read_workload(
             break;
         }
         let last_sequence = next_sequence.advanced_by(records_wanted - 1);
-        let range = SequenceRange::new(next_sequence, last_sequence)
-            .expect("the last sequence is not before the first");
+        let range =
+            SequenceRange::new(next_sequence, last_sequence).expect("the last sequence is not before the first");
         let found = match reader.read_range(range).await {
             Ok(found) => found,
             Err(read_error) => {

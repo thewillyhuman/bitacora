@@ -137,9 +137,7 @@ pub struct InvalidEtcdSettings {
 impl InvalidEtcdSettings {
     /// Builds the error from the reason the settings were refused.
     pub(crate) fn because(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
+        Self { reason: reason.into() }
     }
 }
 
@@ -163,10 +161,7 @@ mod tests {
 
         let verdict = settings.validate();
 
-        assert_eq!(
-            verdict,
-            Err(InvalidEtcdSettings::because("there is no endpoint"))
-        );
+        assert_eq!(verdict, Err(InvalidEtcdSettings::because("there is no endpoint")));
     }
 
     #[test]

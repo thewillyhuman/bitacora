@@ -67,11 +67,7 @@ async fn open_store_in(root_directory: &TempDir) -> LocalArtifactStore {
 }
 
 /// Stores `contents` under `object_key`.
-async fn store_object(
-    artifact_store: &LocalArtifactStore,
-    object_key: &str,
-    contents: &'static [u8],
-) {
+async fn store_object(artifact_store: &LocalArtifactStore, object_key: &str, contents: &'static [u8]) {
     artifact_store
         .put_object(object_key, Bytes::from_static(contents))
         .await
@@ -84,10 +80,7 @@ async fn store_object(
 /// The file and its directory are made to look last touched `untouched_for` ago. Returns the path of the
 /// file.
 fn plant_leftover(root_directory: &TempDir, untouched_for: Duration) -> PathBuf {
-    let leftover_directory = root_directory
-        .path()
-        .join(SCRATCH_DIRECTORY_NAME)
-        .join("crashed-store");
+    let leftover_directory = root_directory.path().join(SCRATCH_DIRECTORY_NAME).join("crashed-store");
     let leftover_file = leftover_directory.join("put-7");
     fs::create_dir_all(&leftover_directory).expect("the leftover's directory is planted");
     fs::write(&leftover_file, b"half an object").expect("the leftover is planted");
@@ -254,10 +247,7 @@ async fn stores_on_one_root_putting_at_the_same_moment_lose_nothing() {
         .await
         .expect("the directory can be listed");
 
-    assert_eq!(
-        stored_objects.len(),
-        STORES_PUTTING_AT_ONCE * OBJECTS_PER_PUTTING_STORE
-    );
+    assert_eq!(stored_objects.len(), STORES_PUTTING_AT_ONCE * OBJECTS_PER_PUTTING_STORE);
 }
 
 /// A store that wrote nothing for a day looks like a leftover to another store that opens the root, which
@@ -330,10 +320,7 @@ async fn object_cannot_be_stored_where_a_directory_is() {
     let opened = open_store().await;
     store_object(&opened.artifact_store, "a/b", b"x").await;
 
-    let refused = opened
-        .artifact_store
-        .put_object("a", Bytes::from_static(b"y"))
-        .await;
+    let refused = opened.artifact_store.put_object("a", Bytes::from_static(b"y")).await;
 
     assert!(matches!(refused, Err(ArtifactError::Unavailable { .. })));
 }

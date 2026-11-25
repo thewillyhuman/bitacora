@@ -30,12 +30,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora_client::{
-    AppendError, BitacoraClient, ClientSettings, RecordStream, StreamWriter, TakeoverPolicy,
-    WriterSettings,
+    AppendError, BitacoraClient, ClientSettings, RecordStream, StreamWriter, TakeoverPolicy, WriterSettings,
 };
-use bitacora_meta::{
-    MemoryKeyValueStore, MetadataStore, RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy,
-};
+use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy};
 use bitacora_proto::{GrpcConnectorSettings, GrpcReplicaConnector};
 use bitacora_replica::{Replica, ReplicaSettings};
 use bitacora_segment::{Disk, MemoryDisk};
@@ -158,10 +155,7 @@ impl GrpcCluster {
 /// # Returns
 ///
 /// The replica's registration, with the address it is served at.
-async fn serve_a_replica(
-    replica_id: &ReplicaId,
-    connector: &GrpcReplicaConnector,
-) -> ReplicaRecord {
+async fn serve_a_replica(replica_id: &ReplicaId, connector: &GrpcReplicaConnector) -> ReplicaRecord {
     let disk = MemoryDisk::new();
     let settings = ReplicaSettings {
         preallocated_segment_bytes: 1024,
@@ -177,10 +171,7 @@ async fn serve_a_replica(
     .await
     .expect("the replica opens on a working disk");
     let address = serve_on_loopback(Arc::new(replica), replica_id.clone()).await;
-    let space = disk
-        .space()
-        .await
-        .expect("a memory disk always reports its space");
+    let space = disk.space().await.expect("a memory disk always reports its space");
     ReplicaRecord {
         schema_version: RECORD_SCHEMA_VERSION,
         replica_id: replica_id.clone(),
@@ -233,14 +224,8 @@ async fn reader_follows_what_the_writer_commits() {
     let writer = cluster.open_writer("compute-1").await;
     let mut following = cluster.follow_from_the_start().await;
 
-    writer
-        .append(record("first"))
-        .await
-        .expect("the record commits");
-    writer
-        .append(record("second"))
-        .await
-        .expect("the record commits");
+    writer.append(record("first")).await.expect("the record commits");
+    writer.append(record("second")).await.expect("the record commits");
     let payloads = next_payloads(&mut following, 2).await;
 
     assert_eq!(payloads, ["first", "second"]);
@@ -301,8 +286,5 @@ async fn reader_follows_the_log_across_a_takeover() {
 
     let payloads = next_payloads(&mut following, 2).await;
 
-    assert_eq!(
-        payloads,
-        ["from the first writer", "from the second writer"]
-    );
+    assert_eq!(payloads, ["from the first writer", "from the second writer"]);
 }

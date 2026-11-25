@@ -27,9 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora_artifact::MemoryArtifactStore;
-use bitacora_client::{
-    BitacoraClient, ClientSettings, StreamWriter, TakeoverPolicy, WriterSettings,
-};
+use bitacora_client::{BitacoraClient, ClientSettings, StreamWriter, TakeoverPolicy, WriterSettings};
 use bitacora_controller::{Controller, ControllerSettings, PassReport};
 use bitacora_meta::{CheckpointRecord, RetentionPolicy, StreamRecord};
 use bitacora_testkit::Cluster;
@@ -64,12 +62,7 @@ impl Harness {
         let cluster = Cluster::start(3).await;
         cluster
             .metadata()
-            .create_stream(
-                STREAM,
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("a fresh metadata store accepts a stream");
         cluster

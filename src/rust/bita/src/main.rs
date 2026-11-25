@@ -84,10 +84,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(io_error) => {
             eprintln!("bita: cannot start: {io_error}");
@@ -132,15 +129,8 @@ async fn run_and_print(arguments: &Arguments, cluster: &Cluster) -> Result<(), S
     // Not locked: the handle is held across waits for the cluster, and a lock could not be.
     let mut standard_output = std::io::stdout();
     if let Command::Stream(StreamCommand::Tail { name, from, count }) = &arguments.command {
-        let followed = commands::stream::tail(
-            cluster,
-            name,
-            *from,
-            *count,
-            arguments.output,
-            &mut standard_output,
-        )
-        .await;
+        let followed =
+            commands::stream::tail(cluster, name, *from, *count, arguments.output, &mut standard_output).await;
         return match followed {
             Ok(_written_records) => Ok(()),
             Err(command_error) => Err(command_error.to_string()),
@@ -148,9 +138,7 @@ async fn run_and_print(arguments: &Arguments, cluster: &Cluster) -> Result<(), S
     }
 
     let standard_input_records = match &arguments.command {
-        Command::Stream(StreamCommand::Append { records, .. }) if records.is_empty() => {
-            read_standard_input_records()?
-        }
+        Command::Stream(StreamCommand::Append { records, .. }) if records.is_empty() => read_standard_input_records()?,
         _every_other_command => Vec::new(),
     };
     let output = match commands::run(&arguments.command, cluster, standard_input_records).await {

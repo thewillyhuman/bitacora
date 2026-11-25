@@ -45,11 +45,7 @@ impl Cluster {
 
     /// A client whose writers identify as `writer_identity` and use
     /// `settings` for everything else.
-    pub(crate) fn client_with(
-        &self,
-        writer_identity: &str,
-        settings: &WriterSettings,
-    ) -> BitacoraClient {
+    pub(crate) fn client_with(&self, writer_identity: &str, settings: &WriterSettings) -> BitacoraClient {
         BitacoraClient::new(
             self.metadata().clone(),
             self.connector(),
@@ -82,10 +78,7 @@ impl Cluster {
     }
 
     pub(crate) async fn stream(&self) -> StreamRecord {
-        self.metadata()
-            .get_stream(STREAM)
-            .await
-            .expect("the stream exists")
+        self.metadata().get_stream(STREAM).await.expect("the stream exists")
     }
 
     /// The address of segment `segment_id` of [`STREAM`].

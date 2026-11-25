@@ -87,8 +87,7 @@ fn endpoints_alone_get_the_default_key_prefix_and_no_object_store() {
 fn endpoints_from_the_environment_are_split_at_commas() {
     let environment = environment_with(ETCD_ENDPOINTS_VARIABLE, "http://a:2379, http://b:2379,");
 
-    let config =
-        resolve_cluster_config(&ClusterArguments::default(), &environment).expect("resolves");
+    let config = resolve_cluster_config(&ClusterArguments::default(), &environment).expect("resolves");
 
     assert_eq!(config.etcd_endpoints, ["http://a:2379", "http://b:2379"]);
 }
@@ -111,8 +110,7 @@ fn key_prefix_from_the_environment_is_used() {
     let mut environment = environment_with(ETCD_ENDPOINTS_VARIABLE, "http://a:2379");
     environment.insert(ETCD_KEY_PREFIX_VARIABLE.to_owned(), "/staging/".to_owned());
 
-    let config =
-        resolve_cluster_config(&ClusterArguments::default(), &environment).expect("resolves");
+    let config = resolve_cluster_config(&ClusterArguments::default(), &environment).expect("resolves");
 
     assert_eq!(config.etcd_key_prefix, "/staging/");
 }
@@ -135,8 +133,7 @@ fn key_prefix_option_wins_over_the_environment() {
 fn configuration_file_is_read() {
     let (_directory, path) = config_file(FULL_CONFIG);
 
-    let config = resolve_cluster_config(&arguments_with_config(&path), &empty_environment())
-        .expect("resolves");
+    let config = resolve_cluster_config(&arguments_with_config(&path), &empty_environment()).expect("resolves");
 
     assert_eq!(config.etcd_endpoints, ["http://file:2379"]);
     assert_eq!(config.etcd_key_prefix, "/from-file/");
@@ -153,8 +150,7 @@ fn configuration_file_named_by_the_environment_is_read() {
     let (_directory, path) = config_file(FULL_CONFIG);
     let environment = environment_with(CONFIG_VARIABLE, path.to_str().expect("a text path"));
 
-    let config =
-        resolve_cluster_config(&ClusterArguments::default(), &environment).expect("resolves");
+    let config = resolve_cluster_config(&ClusterArguments::default(), &environment).expect("resolves");
 
     assert_eq!(config.etcd_endpoints, ["http://file:2379"]);
 }
@@ -164,8 +160,7 @@ fn config_option_wins_over_the_config_variable() {
     let (_directory, path) = config_file(FULL_CONFIG);
     let environment = environment_with(CONFIG_VARIABLE, "/no/such/file.toml");
 
-    let config =
-        resolve_cluster_config(&arguments_with_config(&path), &environment).expect("resolves");
+    let config = resolve_cluster_config(&arguments_with_config(&path), &environment).expect("resolves");
 
     assert_eq!(config.etcd_endpoints, ["http://file:2379"]);
 }
@@ -206,10 +201,7 @@ fn missing_configuration_file_is_refused() {
 
     let resolved = resolve_cluster_config(&arguments, &empty_environment());
 
-    assert!(matches!(
-        resolved,
-        Err(ClusterConfigError::UnreadableFile { .. })
-    ));
+    assert!(matches!(resolved, Err(ClusterConfigError::UnreadableFile { .. })));
 }
 
 #[test]
@@ -218,10 +210,7 @@ fn file_that_is_not_toml_is_refused() {
 
     let resolved = resolve_cluster_config(&arguments_with_config(&path), &empty_environment());
 
-    assert!(matches!(
-        resolved,
-        Err(ClusterConfigError::InvalidFile { .. })
-    ));
+    assert!(matches!(resolved, Err(ClusterConfigError::InvalidFile { .. })));
 }
 
 #[test]
@@ -230,10 +219,7 @@ fn file_with_a_misspelled_setting_is_refused() {
 
     let resolved = resolve_cluster_config(&arguments_with_config(&path), &empty_environment());
 
-    assert!(matches!(
-        resolved,
-        Err(ClusterConfigError::InvalidFile { .. })
-    ));
+    assert!(matches!(resolved, Err(ClusterConfigError::InvalidFile { .. })));
 }
 
 #[test]

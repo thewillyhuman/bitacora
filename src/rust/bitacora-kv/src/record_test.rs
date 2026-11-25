@@ -21,9 +21,7 @@ fn sample_record() -> KvRecord {
                 key: bytes("colour"),
                 value: bytes("red"),
             },
-            KvOperation::Delete {
-                key: bytes("shape"),
-            },
+            KvOperation::Delete { key: bytes("shape") },
         ],
     }
 }
@@ -103,9 +101,7 @@ fn payload_of_another_format_version_is_refused() {
 fn empty_payload_is_refused() {
     assert_eq!(
         KvRecord::decode(&Bytes::new()),
-        Err(KvRecordError::Malformed {
-            reason: "it is empty"
-        })
+        Err(KvRecordError::Malformed { reason: "it is empty" })
     );
 }
 

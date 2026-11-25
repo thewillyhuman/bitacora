@@ -375,12 +375,7 @@ fn write_file(path: &Path, text: &str) {
 /// # Panics
 ///
 /// Panics if etcd exits while starting or is not healthy within [`STARTUP_ALLOWANCE`].
-async fn start_etcd(
-    binary: &Path,
-    root: &Path,
-    client_endpoint: &str,
-    peer_port: u16,
-) -> ChildProcess {
+async fn start_etcd(binary: &Path, root: &Path, client_endpoint: &str, peer_port: u16) -> ChildProcess {
     let peer_endpoint = format!("http://127.0.0.1:{peer_port}");
     let mut command = Command::new(binary);
     command
@@ -413,11 +408,7 @@ async fn start_etcd(
         if answer.is_ok_and(|answer| answer.status == 200) {
             return etcd;
         }
-        assert!(
-            !etcd.has_exited(),
-            "etcd exited while starting:\n{}",
-            etcd.log()
-        );
+        assert!(!etcd.has_exited(), "etcd exited while starting:\n{}", etcd.log());
         assert!(
             Instant::now() < deadline,
             "etcd was not healthy within {STARTUP_ALLOWANCE:?}:\n{}",

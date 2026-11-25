@@ -338,9 +338,7 @@ pub(crate) fn loopback_listener() -> TcpListener {
 
 /// Returns the port `listener` is bound to.
 pub(crate) fn port_of(listener: &TcpListener) -> u16 {
-    let address = listener
-        .local_addr()
-        .expect("a bound listener has an address");
+    let address = listener.local_addr().expect("a bound listener has an address");
     address.port()
 }
 

@@ -182,11 +182,7 @@ impl ArtifactNamespace {
     /// * `stream_id` - The stream the materializer follows.
     /// * `materializer` - The materializer's name, as registered on the stream.
     #[must_use]
-    pub fn read_only(
-        store: Arc<dyn ArtifactStore>,
-        stream_id: StreamId,
-        materializer: &str,
-    ) -> Self {
+    pub fn read_only(store: Arc<dyn ArtifactStore>, stream_id: StreamId, materializer: &str) -> Self {
         Self {
             store,
             prefix: namespace_prefix(stream_id, materializer),
@@ -213,11 +209,7 @@ impl ArtifactNamespace {
     /// for a label that cannot be part of a key, or [`MaterializerError::ArtifactStore`] if the store
     /// failed. After a failure the artifact may or may not exist; it is an orphan either way, because its
     /// key was never returned.
-    pub async fn put_artifact(
-        &self,
-        label: &str,
-        contents: Bytes,
-    ) -> Result<String, MaterializerError> {
+    pub async fn put_artifact(&self, label: &str, contents: Bytes) -> Result<String, MaterializerError> {
         let Some(writer) = &self.writer else {
             return Err(MaterializerError::ReadOnly);
         };
@@ -228,9 +220,7 @@ impl ArtifactNamespace {
         }
         let artifact_number = writer.next_artifact_number.fetch_add(1, Ordering::Relaxed);
         let artifact_key = format!("{:020}/{artifact_number:010}-{label}", writer.fencing_token);
-        self.store
-            .put_object(&self.object_key(&artifact_key), contents)
-            .await?;
+        self.store.put_object(&self.object_key(&artifact_key), contents).await?;
         Ok(artifact_key)
     }
 
@@ -245,10 +235,7 @@ impl ArtifactNamespace {
     ///
     /// Returns [`MaterializerError::ArtifactStore`] if the artifact does not exist or the store failed.
     pub async fn get_artifact(&self, artifact_key: &str) -> Result<Bytes, MaterializerError> {
-        let contents = self
-            .store
-            .get_object(&self.object_key(artifact_key))
-            .await?;
+        let contents = self.store.get_object(&self.object_key(artifact_key)).await?;
         Ok(contents)
     }
 
@@ -268,10 +255,7 @@ impl ArtifactNamespace {
         artifact_key: &str,
         byte_range: Range<u64>,
     ) -> Result<Bytes, MaterializerError> {
-        let contents = self
-            .store
-            .get_range(&self.object_key(artifact_key), byte_range)
-            .await?;
+        let contents = self.store.get_range(&self.object_key(artifact_key), byte_range).await?;
         Ok(contents)
     }
 

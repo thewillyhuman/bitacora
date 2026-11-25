@@ -247,10 +247,7 @@ struct SharedCatalog {
 impl SharedCatalog {
     /// A copy of the catalog as it is now.
     fn snapshot(&self) -> Vec<CatalogEntry> {
-        self.entries
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.entries.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Replaces the catalog.
@@ -280,9 +277,8 @@ impl CatalogView {
     /// `None` if the record is below the first artifact or was not sealed into one yet.
     #[must_use]
     pub fn entry_covering(&self, sequence: SequenceNumber) -> Option<CatalogEntry> {
-        let covers_the_record = |entry: &CatalogEntry| {
-            entry.covered_range.first() <= sequence && sequence <= entry.covered_range.last()
-        };
+        let covers_the_record =
+            |entry: &CatalogEntry| entry.covered_range.first() <= sequence && sequence <= entry.covered_range.last();
         self.shared.snapshot().into_iter().find(covers_the_record)
     }
 }
@@ -312,10 +308,7 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
     }
 
     /// Seals what the builder holds into one more catalog entry, if it holds anything.
-    async fn seal_pending(
-        &mut self,
-        artifacts: &ArtifactNamespace,
-    ) -> Result<(), MaterializerError> {
+    async fn seal_pending(&mut self, artifacts: &ArtifactNamespace) -> Result<(), MaterializerError> {
         let Some(first_pending_sequence) = self.first_pending_sequence else {
             return Ok(());
         };
@@ -333,10 +326,7 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
     }
 
     /// Merges the oldest run of same-tier neighbours into one artifact, if there is such a run.
-    async fn compact_once(
-        &mut self,
-        artifacts: &ArtifactNamespace,
-    ) -> Result<(), MaterializerError> {
+    async fn compact_once(&mut self, artifacts: &ArtifactNamespace) -> Result<(), MaterializerError> {
         let mut entries = self.shared.snapshot();
         let policy = self.builder.compaction_policy();
         let Some((run_start, run_end)) = oldest_run_to_merge(&entries, policy) else {
@@ -362,10 +352,7 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
 
 /// The positions, start included and end excluded, of the oldest `merge_fan_in` neighbouring entries
 /// that are all in the same size tier.
-fn oldest_run_to_merge(
-    entries: &[CatalogEntry],
-    policy: CompactionPolicy,
-) -> Option<(usize, usize)> {
+fn oldest_run_to_merge(entries: &[CatalogEntry], policy: CompactionPolicy) -> Option<(usize, usize)> {
     let merge_fan_in = policy.merge_fan_in.max(2);
     let mut run_start = 0;
     for position in 1..=entries.len() {
@@ -401,9 +388,7 @@ fn encode_catalog(entries: &[CatalogEntry]) -> Bytes {
         details.put_u64_le(entry.covered_range.first().get());
         details.put_u64_le(entry.covered_range.last().get());
         details.put_u64_le(entry.artifact.size_bytes);
-        details.put_u32_le(
-            u32::try_from(entry.artifact.artifact_key.len()).expect("an artifact key is short"),
-        );
+        details.put_u32_le(u32::try_from(entry.artifact.artifact_key.len()).expect("an artifact key is short"));
         details.put_slice(entry.artifact.artifact_key.as_bytes());
     }
     details.freeze()
@@ -482,9 +467,7 @@ pub fn decode_catalog(details: &Bytes) -> Result<Vec<CatalogEntry>, Materializer
 impl<B: ArtifactBuilder> Materializer for ArtifactCatalog<B> {
     /// Hands the records to the builder and remembers where the unsealed ones start.
     fn apply_records(&mut self, committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
-        let (Some(first_record), Some(last_record)) =
-            (committed_records.first(), committed_records.last())
-        else {
+        let (Some(first_record), Some(last_record)) = (committed_records.first(), committed_records.last()) else {
             return Ok(());
         };
         self.builder.add_records(committed_records)?;

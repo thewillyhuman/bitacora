@@ -36,11 +36,7 @@ pub struct StreamReader {
 }
 
 impl StreamReader {
-    pub(crate) fn new(
-        context: Arc<ClientContext>,
-        settings: ReaderSettings,
-        stream_name: &str,
-    ) -> Self {
+    pub(crate) fn new(context: Arc<ClientContext>, settings: ReaderSettings, stream_name: &str) -> Self {
         Self {
             context,
             settings,
@@ -82,10 +78,7 @@ impl StreamReader {
     ///
     /// Returns [`ReadError::Metadata`] if the stream does not exist or the
     /// metadata store cannot be reached.
-    pub async fn follow_from(
-        &self,
-        from_sequence: SequenceNumber,
-    ) -> Result<RecordStream, ReadError> {
+    pub async fn follow_from(&self, from_sequence: SequenceNumber) -> Result<RecordStream, ReadError> {
         Ok(RecordStream {
             cursor: Cursor::open(self, from_sequence).await?,
             buffered_records: VecDeque::new(),
@@ -139,19 +132,12 @@ impl RecordStream {
                     // When there was no replica to ask, for example between
                     // two writers, nothing has waited yet: pause here, or
                     // the follower would poll the metadata store in a loop.
-                    let still_to_wait = self
-                        .cursor
-                        .settings
-                        .retry_interval
-                        .saturating_sub(asked_at.elapsed());
+                    let still_to_wait = self.cursor.settings.retry_interval.saturating_sub(asked_at.elapsed());
                     if !still_to_wait.is_zero() {
                         sleep(still_to_wait).await;
                     }
                 }
-                Err(
-                    fatal @ (ReadError::Truncated { .. }
-                    | ReadError::Metadata(MetaError::StreamNotFound { .. })),
-                ) => {
+                Err(fatal @ (ReadError::Truncated { .. } | ReadError::Metadata(MetaError::StreamNotFound { .. }))) => {
                     self.has_ended = true;
                     return Some(Err(fatal));
                 }
@@ -253,11 +239,7 @@ struct Cursor {
 
 impl Cursor {
     async fn open(reader: &StreamReader, from_sequence: SequenceNumber) -> Result<Self, ReadError> {
-        let stream = reader
-            .context
-            .metadata
-            .get_stream(&reader.stream_name)
-            .await?;
+        let stream = reader.context.metadata.get_stream(&reader.stream_name).await?;
         Ok(Self {
             context: Arc::clone(&reader.context),
             settings: reader.settings.clone(),
@@ -413,15 +395,9 @@ impl Cursor {
     /// Reads the records at the cursor's position from the object store
     /// and moves past them. Fails with the reason if the object store
     /// cannot serve them.
-    async fn fetch_tiered(
-        &mut self,
-        segment: &SegmentRecord,
-        tiered: &TieredRecord,
-    ) -> Result<Vec<LogRecord>, String> {
+    async fn fetch_tiered(&mut self, segment: &SegmentRecord, tiered: &TieredRecord) -> Result<Vec<LogRecord>, String> {
         let Some(artifact_store) = self.context.artifact_store.clone() else {
-            return Err(
-                "the segment is in the object store, and this client was given none".to_owned(),
-            );
+            return Err("the segment is in the object store, and this client was given none".to_owned());
         };
         let Some(sealed_end) = segment.sealed_end() else {
             return Err("the segment is recorded as tiered but not as sealed".to_owned());
@@ -462,10 +438,7 @@ impl Cursor {
             }
         };
         let Some(last_record) = records.last() else {
-            return Err(format!(
-                "the object holds no record at {}",
-                self.next_sequence
-            ));
+            return Err(format!("the object holds no record at {}", self.next_sequence));
         };
         self.next_sequence = last_record.sequence.next();
         Ok(records)
@@ -488,8 +461,7 @@ impl Cursor {
             wait_for_records,
             limit: ReadLimit::DurableSequence,
         };
-        let longest_answer_time =
-            self.settings.request_timeout + wait_for_records.unwrap_or_default();
+        let longest_answer_time = self.settings.request_timeout + wait_for_records.unwrap_or_default();
         let response = match timeout(longest_answer_time, replica.client.read(request)).await {
             Ok(Ok(response)) => response,
             Ok(Err(replica_error)) => return ReplicaAnswer::Failed(replica_error.to_string()),
@@ -526,10 +498,7 @@ impl Cursor {
 
     /// Returns handles to the replicas of `segment`, connecting when the
     /// cursor moves to another segment.
-    async fn replicas_of(
-        &mut self,
-        segment: &SegmentRecord,
-    ) -> Result<Vec<ConnectedReplica>, ReadError> {
+    async fn replicas_of(&mut self, segment: &SegmentRecord) -> Result<Vec<ConnectedReplica>, ReadError> {
         if let Some((connected_segment_id, replicas)) = &self.connected_segment
             && *connected_segment_id == segment.segment_id
             && replicas
@@ -539,12 +508,10 @@ impl Cursor {
         {
             return Ok(replicas.clone());
         }
-        let is_another_segment =
-            self.connected_segment
-                .as_ref()
-                .is_none_or(|(connected_segment_id, _replicas)| {
-                    *connected_segment_id != segment.segment_id
-                });
+        let is_another_segment = self
+            .connected_segment
+            .as_ref()
+            .is_none_or(|(connected_segment_id, _replicas)| *connected_segment_id != segment.segment_id);
         if is_another_segment {
             self.preferred_replica = 0;
         }

@@ -89,11 +89,7 @@ pub async fn check(artifact_store: &dyn ArtifactStore) {
 
 /// Stores `contents` under `object_key`, panicking if the store refuses: every rule needs its objects in
 /// place before it can check anything.
-async fn store_object(
-    artifact_store: &dyn ArtifactStore,
-    object_key: &str,
-    contents: &'static [u8],
-) {
+async fn store_object(artifact_store: &dyn ArtifactStore, object_key: &str, contents: &'static [u8]) {
     artifact_store
         .put_object(object_key, Bytes::from_static(contents))
         .await
@@ -125,21 +121,13 @@ async fn missing_object_is_reported_as_not_found(artifact_store: &dyn ArtifactSt
     let range_read = artifact_store.get_range(missing_key, 0..1).await;
 
     assert_eq!(whole_read, not_found, "a missing object must be NotFound");
-    assert_eq!(
-        range_read, not_found,
-        "a range of a missing object must be NotFound"
-    );
+    assert_eq!(range_read, not_found, "a range of a missing object must be NotFound");
 }
 
 /// Rule: storing under an existing key replaces the whole object. The second object is shorter than the
 /// first on purpose: a backend that overwrote in place would leave the first one's tail behind.
 async fn put_replaces_an_existing_object(artifact_store: &dyn ArtifactStore) {
-    store_object(
-        artifact_store,
-        "contract/replaced",
-        b"first version, longer",
-    )
-    .await;
+    store_object(artifact_store, "contract/replaced", b"first version, longer").await;
     store_object(artifact_store, "contract/replaced", b"second").await;
 
     let read_back = artifact_store.get_object("contract/replaced").await;
@@ -179,9 +167,7 @@ async fn range_reads_return_exactly_the_bytes_asked_for(artifact_store: &dyn Art
 async fn range_outside_the_object_is_refused(artifact_store: &dyn ArtifactStore) {
     let one_byte_past_the_end = 5..RANGED_OBJECT_BYTES + 1;
 
-    let refused = artifact_store
-        .get_range(RANGED_OBJECT_KEY, one_byte_past_the_end)
-        .await;
+    let refused = artifact_store.get_range(RANGED_OBJECT_KEY, one_byte_past_the_end).await;
 
     assert!(
         matches!(
@@ -259,9 +245,7 @@ async fn deleting_a_missing_object_succeeds(artifact_store: &dyn ArtifactStore) 
 /// `InvalidKey` before anything is stored.
 async fn invalid_keys_are_refused(artifact_store: &dyn ArtifactStore) {
     for invalid_key in ["", "/absolute", "a/../escape", "trailing/"] {
-        let refused = artifact_store
-            .put_object(invalid_key, Bytes::from_static(b"x"))
-            .await;
+        let refused = artifact_store.put_object(invalid_key, Bytes::from_static(b"x")).await;
 
         assert!(
             matches!(refused, Err(ArtifactError::InvalidKey { .. })),
@@ -277,9 +261,5 @@ async fn empty_object_is_a_real_object(artifact_store: &dyn ArtifactStore) {
 
     let read_back = artifact_store.get_object("contract/empty").await;
 
-    assert_eq!(
-        read_back,
-        Ok(Bytes::new()),
-        "an empty object must exist and be empty"
-    );
+    assert_eq!(read_back, Ok(Bytes::new()), "an empty object must exist and be empty");
 }

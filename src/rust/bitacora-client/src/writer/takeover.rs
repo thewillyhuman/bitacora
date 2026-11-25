@@ -143,18 +143,14 @@ async fn recover_segment(
 ) -> Result<(), OpenError> {
     let address = segment.address(stream.stream_id);
     let replicas = context.connect_copies(&segment.copies).await?;
-    let needed = replicas
-        .len()
-        .saturating_sub(stream.replication.write_quorum())
-        + 1;
+    let needed = replicas.len().saturating_sub(stream.replication.write_quorum()) + 1;
     let empty_end = segment.first_sequence.preceding();
 
     let recovery_end = loop {
         // Steps 3 and 4: fence, and wait for N - W + 1 replies. Any
         // committed record is on at least W replicas, so at least one
         // responder holds it.
-        let responders =
-            fence_replicas(settings, &replicas, address, epoch, needed, empty_end).await?;
+        let responders = fence_replicas(settings, &replicas, address, epoch, needed, empty_end).await?;
         if responders.len() >= needed {
             // Step 5: the recovery end is the highest local end among the
             // responders, unless one of them already knows the segment's
@@ -277,20 +273,14 @@ async fn repair_tail(
     epoch: Epoch,
     recovery_end: SequenceNumber,
 ) -> Result<(), ReplicaError> {
-    let Some(longest) = responders
-        .iter()
-        .find(|responder| responder.local_end >= recovery_end)
-    else {
+    let Some(longest) = responders.iter().find(|responder| responder.local_end >= recovery_end) else {
         // Only possible when the end came from a replica that knows the
         // seal but lost the tail: the seal already happened, and repair of
         // sealed segments is the controller's job.
         return Ok(());
     };
     let address = segment.address(stream.stream_id);
-    for short in responders
-        .iter()
-        .filter(|responder| responder.local_end < recovery_end)
-    {
+    for short in responders.iter().filter(|responder| responder.local_end < recovery_end) {
         let mut copied_end = short.local_end;
         while copied_end < recovery_end {
             let read = with_timeout(
@@ -300,9 +290,7 @@ async fn repair_tail(
                     from_sequence: copied_end.next(),
                     max_bytes: settings.max_request_bytes,
                     wait_for_records: None,
-                    limit: ReadLimit::LocalEnd {
-                        recovery_epoch: epoch,
-                    },
+                    limit: ReadLimit::LocalEnd { recovery_epoch: epoch },
                 }),
             )
             .await?;
@@ -380,9 +368,7 @@ async fn with_timeout<Response>(
 /// Maps a lost epoch race to its own error and passes everything else on.
 fn lost_race_or_metadata(meta_error: MetaError) -> OpenError {
     match meta_error {
-        MetaError::Fenced { current_epoch, .. } => {
-            OpenError::TakenByAnotherWriter { current_epoch }
-        }
+        MetaError::Fenced { current_epoch, .. } => OpenError::TakenByAnotherWriter { current_epoch },
         other => OpenError::Metadata(other),
     }
 }

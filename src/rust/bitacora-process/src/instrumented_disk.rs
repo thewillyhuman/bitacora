@@ -73,11 +73,7 @@ struct DiskMetrics {
 
 impl DiskMetrics {
     /// Counts one failed call of `operation` if `outcome` is an error, and passes `outcome` on.
-    fn count_failure<Value>(
-        &self,
-        operation: &'static str,
-        outcome: io::Result<Value>,
-    ) -> io::Result<Value> {
+    fn count_failure<Value>(&self, operation: &'static str, outcome: io::Result<Value>) -> io::Result<Value> {
         if outcome.is_err() {
             self.operation_failures
                 .get_or_create(&[(OPERATION_LABEL, operation)])
@@ -147,16 +143,12 @@ impl InstrumentedDisk {
             operation_failures.clone(),
         );
         let metrics = DiskMetrics {
-            flush_duration: registry.duration_histogram(
-                "disk_flush_duration",
-                "How long making written data durable took",
-            ),
+            flush_duration: registry
+                .duration_histogram("disk_flush_duration", "How long making written data durable took"),
             written_bytes: registry.bytes_counter("disk_written", "Bytes handed to the disk"),
             operation_failures,
-            capacity_bytes: registry
-                .bytes_gauge("disk_capacity", "Total size of the disk, as last reported"),
-            free_bytes: registry
-                .bytes_gauge("disk_free", "Unused part of the disk, as last reported"),
+            capacity_bytes: registry.bytes_gauge("disk_capacity", "Total size of the disk, as last reported"),
+            free_bytes: registry.bytes_gauge("disk_free", "Unused part of the disk, as last reported"),
         };
         Self { disk, metrics }
     }
@@ -179,10 +171,7 @@ impl Disk for InstrumentedDisk {
         preallocated_bytes: u64,
     ) -> io::Result<Box<dyn DiskFile>> {
         let initial_bytes = initial_content.len() as u64;
-        let created = self
-            .disk
-            .create_file(path, initial_content, preallocated_bytes)
-            .await;
+        let created = self.disk.create_file(path, initial_content, preallocated_bytes).await;
         let file = self.metrics.count_failure("create_file", created)?;
         self.metrics.written_bytes.add(initial_bytes);
         Ok(self.instrument_file(file))
@@ -190,17 +179,14 @@ impl Disk for InstrumentedDisk {
 
     async fn open_file(&self, path: &str) -> io::Result<Box<dyn DiskFile>> {
         let opened = self.disk.open_file(path).await;
-        let file = self
-            .metrics
-            .count_failure_unless_absent("open_file", opened)?;
+        let file = self.metrics.count_failure_unless_absent("open_file", opened)?;
         Ok(self.instrument_file(file))
     }
 
     async fn write_file_atomically(&self, path: &str, contents: Bytes) -> io::Result<()> {
         let written_bytes = contents.len() as u64;
         let written = self.disk.write_file_atomically(path, contents).await;
-        self.metrics
-            .count_failure("write_file_atomically", written)?;
+        self.metrics.count_failure("write_file_atomically", written)?;
         self.metrics.written_bytes.add(written_bytes);
         Ok(())
     }
@@ -228,9 +214,7 @@ impl Disk for InstrumentedDisk {
     async fn space(&self) -> io::Result<DiskSpace> {
         let measured = self.disk.space().await;
         let space = self.metrics.count_failure("space", measured)?;
-        self.metrics
-            .capacity_bytes
-            .set_unsigned(space.capacity_bytes);
+        self.metrics.capacity_bytes.set_unsigned(space.capacity_bytes);
         self.metrics.free_bytes.set_unsigned(space.free_bytes);
         Ok(space)
     }

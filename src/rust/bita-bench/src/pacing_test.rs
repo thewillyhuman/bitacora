@@ -35,30 +35,21 @@ fn rate_that_does_not_divide_a_second_does_not_drift() {
     // Three sends later exactly one second has passed, although a third of a second is not a whole
     // number of nanoseconds.
     assert_eq!(three_per_second.due_after(3), Duration::from_secs(1));
-    assert_eq!(
-        three_per_second.due_after(3_000_000),
-        Duration::from_secs(1_000_000)
-    );
+    assert_eq!(three_per_second.due_after(3_000_000), Duration::from_secs(1_000_000));
 }
 
 #[test]
 fn offset_within_an_uneven_interval_is_rounded_down() {
     let three_per_second = Pace::new(3, 1);
 
-    assert_eq!(
-        three_per_second.due_after(1),
-        Duration::from_nanos(333_333_333)
-    );
+    assert_eq!(three_per_second.due_after(1), Duration::from_nanos(333_333_333));
 }
 
 #[test]
 fn send_number_too_large_for_naive_arithmetic_is_scheduled() {
     let slow = Pace::new(1, 1);
 
-    assert_eq!(
-        slow.due_after(10_000_000_000),
-        Duration::from_secs(10_000_000_000)
-    );
+    assert_eq!(slow.due_after(10_000_000_000), Duration::from_secs(10_000_000_000));
 }
 
 #[test]

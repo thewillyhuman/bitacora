@@ -45,8 +45,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::arguments::{
-    Command, ControllerCommand, MetadataCommand, ReplicaCommand, SegmentCommand, SnapshotCommand,
-    StreamCommand,
+    Command, ControllerCommand, MetadataCommand, ReplicaCommand, SegmentCommand, SnapshotCommand, StreamCommand,
 };
 use crate::cluster::Cluster;
 use crate::output::OutputFormat;
@@ -259,31 +258,24 @@ pub(crate) async fn run(
     standard_input_records: Vec<Bytes>,
 ) -> Result<CommandOutput, CommandError> {
     match command {
-        Command::Stream(stream_command) => {
-            run_stream_command(stream_command, cluster, standard_input_records).await
-        }
+        Command::Stream(stream_command) => run_stream_command(stream_command, cluster, standard_input_records).await,
         Command::Replica(replica_command) => run_replica_command(replica_command, cluster).await,
-        Command::Segment(SegmentCommand::List { stream }) => Ok(CommandOutput::SegmentList(
-            segment::list(cluster, stream).await?,
-        )),
-        Command::Controller(ControllerCommand::Status) => Ok(CommandOutput::ControllerStatus(
-            controller::status(cluster).await?,
-        )),
-        Command::Metadata(metadata_command) => {
-            run_metadata_command(metadata_command, cluster).await
+        Command::Segment(SegmentCommand::List { stream }) => {
+            Ok(CommandOutput::SegmentList(segment::list(cluster, stream).await?))
         }
+        Command::Controller(ControllerCommand::Status) => {
+            Ok(CommandOutput::ControllerStatus(controller::status(cluster).await?))
+        }
+        Command::Metadata(metadata_command) => run_metadata_command(metadata_command, cluster).await,
     }
 }
 
 /// Runs one `bita metadata` command.
-async fn run_metadata_command(
-    command: &MetadataCommand,
-    cluster: &Cluster,
-) -> Result<CommandOutput, CommandError> {
+async fn run_metadata_command(command: &MetadataCommand, cluster: &Cluster) -> Result<CommandOutput, CommandError> {
     match command {
-        MetadataCommand::Snapshot(SnapshotCommand::List) => Ok(CommandOutput::SnapshotList(
-            metadata::list_snapshots(cluster).await?,
-        )),
+        MetadataCommand::Snapshot(SnapshotCommand::List) => {
+            Ok(CommandOutput::SnapshotList(metadata::list_snapshots(cluster).await?))
+        }
         MetadataCommand::Restore {
             snapshot,
             force,
@@ -315,35 +307,24 @@ async fn run_stream_command(
             write_quorum,
             keep_sealed_for,
         } => {
-            let created =
-                stream::create(cluster, name, *replicas, *write_quorum, *keep_sealed_for).await?;
+            let created = stream::create(cluster, name, *replicas, *write_quorum, *keep_sealed_for).await?;
             Ok(CommandOutput::StreamSummary(created))
         }
         StreamCommand::List => Ok(CommandOutput::StreamList(stream::list(cluster).await?)),
-        StreamCommand::Describe { name } => Ok(CommandOutput::StreamDetails(
-            stream::describe(cluster, name).await?,
-        )),
+        StreamCommand::Describe { name } => Ok(CommandOutput::StreamDetails(stream::describe(cluster, name).await?)),
         StreamCommand::Delete { name, yes } => Ok(CommandOutput::Acknowledgement(
             stream::delete(cluster, name, *yes).await?,
         )),
         StreamCommand::TruncateBefore { name, sequence } => Ok(CommandOutput::Acknowledgement(
             stream::truncate_before(cluster, name, *sequence).await?,
         )),
-        StreamCommand::RegisterMaterializer { name, materializer } => {
-            Ok(CommandOutput::Materializer(
-                stream::register_materializer(cluster, name, materializer).await?,
-            ))
-        }
-        StreamCommand::UnregisterMaterializer { name, materializer } => {
-            Ok(CommandOutput::Acknowledgement(
-                stream::unregister_materializer(cluster, name, materializer).await?,
-            ))
-        }
-        StreamCommand::Append {
-            name,
-            records,
-            force,
-        } => {
+        StreamCommand::RegisterMaterializer { name, materializer } => Ok(CommandOutput::Materializer(
+            stream::register_materializer(cluster, name, materializer).await?,
+        )),
+        StreamCommand::UnregisterMaterializer { name, materializer } => Ok(CommandOutput::Acknowledgement(
+            stream::unregister_materializer(cluster, name, materializer).await?,
+        )),
+        StreamCommand::Append { name, records, force } => {
             let mut payloads = standard_input_records;
             for record in records {
                 payloads.push(Bytes::from(record.clone()));
@@ -361,17 +342,13 @@ async fn run_stream_command(
             stream::read(cluster, name, *from, *count).await?,
         )),
         StreamCommand::Tail { .. } => Err(CommandError::NothingToDo {
-            reason: "stream tail prints as it goes and is not run as a command with a result"
-                .to_owned(),
+            reason: "stream tail prints as it goes and is not run as a command with a result".to_owned(),
         }),
     }
 }
 
 /// Runs one `bita replica` command.
-async fn run_replica_command(
-    command: &ReplicaCommand,
-    cluster: &Cluster,
-) -> Result<CommandOutput, CommandError> {
+async fn run_replica_command(command: &ReplicaCommand, cluster: &Cluster) -> Result<CommandOutput, CommandError> {
     match command {
         ReplicaCommand::List => Ok(CommandOutput::ReplicaList(replica::list(cluster).await?)),
         ReplicaCommand::Status { replica_id } => Ok(CommandOutput::ReplicaReport(

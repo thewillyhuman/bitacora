@@ -187,9 +187,8 @@ pub(crate) fn encode_layer(
         blob_offset += blob.len() as u64;
     }
 
-    let mut layer = BytesMut::with_capacity(
-        usize::try_from(blob_offset).expect("a layer that was just built fits in memory"),
-    );
+    let mut layer =
+        BytesMut::with_capacity(usize::try_from(blob_offset).expect("a layer that was just built fits in memory"));
     layer.put_slice(&LAYER_MAGIC);
     layer.put_u32_le(LAYER_FORMAT_VERSION);
     layer.put_u8(kind.code());
@@ -261,10 +260,7 @@ pub(crate) fn decode_header(layer_start: &[u8]) -> Result<LayerHeader, LayerDama
 /// # Errors
 ///
 /// Returns [`LayerDamage`] if the bytes are not the index the header describes.
-pub(crate) fn decode_index(
-    header: &LayerHeader,
-    index: &Bytes,
-) -> Result<BTreeMap<Bytes, LayerEntry>, LayerDamage> {
+pub(crate) fn decode_index(header: &LayerHeader, index: &Bytes) -> Result<BTreeMap<Bytes, LayerEntry>, LayerDamage> {
     if index.len() != header.index_bytes as usize {
         return Err(damage("its index is not the size its header says"));
     }

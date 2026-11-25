@@ -196,17 +196,9 @@ pub enum ConnectError {
 /// # Ok(())
 /// # }
 /// ```
-pub async fn connect(
-    config: &ClusterConfig,
-    settings: ClientSettings,
-) -> Result<BitacoraClient, ConnectError> {
+pub async fn connect(config: &ClusterConfig, settings: ClientSettings) -> Result<BitacoraClient, ConnectError> {
     let metadata = connect_metadata(config).await?;
-    let client = BitacoraClient::new(
-        metadata,
-        replica_connector(),
-        Arc::new(SystemClock),
-        settings,
-    );
+    let client = BitacoraClient::new(metadata, replica_connector(), Arc::new(SystemClock), settings);
     match open_object_store(&config.object_store).await? {
         Some(object_store) => Ok(client.with_artifact_store(object_store)),
         None => Ok(client),
@@ -246,9 +238,7 @@ pub async fn connect_metadata(config: &ClusterConfig) -> Result<MetadataStore, C
 ///
 /// Returns [`ConnectError::InvalidMetadataStore`] if the etcd settings can never work. An etcd that is
 /// down is not an error here; requests to the store fail until it is back.
-pub async fn connect_key_value_store(
-    config: &ClusterConfig,
-) -> Result<Arc<dyn KeyValueStore>, ConnectError> {
+pub async fn connect_key_value_store(config: &ClusterConfig) -> Result<Arc<dyn KeyValueStore>, ConnectError> {
     let mut etcd_settings = EtcdSettings::new(config.etcd_endpoints.clone());
     etcd_settings.key_prefix.clone_from(&config.etcd_key_prefix);
     let key_value_store = EtcdKeyValueStore::connect(etcd_settings).await?;
@@ -268,9 +258,7 @@ pub async fn connect_key_value_store(
 /// * [`ConnectError::InvalidObjectStore`] if the S3 settings can never work. An S3 service that is down,
 ///   a missing bucket and wrong credentials are not errors here: opening sends nothing, and requests to
 ///   the store fail until the problem is fixed.
-pub async fn open_object_store(
-    config: &ObjectStoreConfig,
-) -> Result<Option<Arc<dyn ArtifactStore>>, ConnectError> {
+pub async fn open_object_store(config: &ObjectStoreConfig) -> Result<Option<Arc<dyn ArtifactStore>>, ConnectError> {
     match config {
         ObjectStoreConfig::None => Ok(None),
         ObjectStoreConfig::LocalDirectory { path } => {

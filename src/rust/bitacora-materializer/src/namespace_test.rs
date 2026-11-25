@@ -37,10 +37,7 @@ async fn stored_artifact_is_read_back() {
         .await
         .expect("the artifact is stored");
 
-    assert_eq!(
-        artifacts.get_artifact(&artifact_key).await,
-        Ok(contents("state"))
-    );
+    assert_eq!(artifacts.get_artifact(&artifact_key).await, Ok(contents("state")));
 }
 
 #[tokio::test]
@@ -106,10 +103,7 @@ async fn runner_with_another_token_cannot_overwrite_an_artifact() {
         .await
         .expect("the artifact is stored");
 
-    assert_eq!(
-        current_runner.get_artifact(&kept_key).await,
-        Ok(contents("current"))
-    );
+    assert_eq!(current_runner.get_artifact(&kept_key).await, Ok(contents("current")));
 }
 
 #[tokio::test]
@@ -144,16 +138,13 @@ async fn another_materializer_does_not_see_the_artifact() {
         .put_artifact("snapshot", contents("state"))
         .await
         .expect("the artifact is stored");
-    let other_materializer =
-        ArtifactNamespace::read_only(Arc::new(store.clone()), STREAM, "other-materializer");
+    let other_materializer = ArtifactNamespace::read_only(Arc::new(store.clone()), STREAM, "other-materializer");
 
     let read = other_materializer.get_artifact(&artifact_key).await;
 
     assert!(matches!(
         read,
-        Err(MaterializerError::ArtifactStore(
-            ArtifactError::NotFound { .. }
-        ))
+        Err(MaterializerError::ArtifactStore(ArtifactError::NotFound { .. }))
     ));
 }
 
@@ -164,16 +155,13 @@ async fn another_stream_does_not_see_the_artifact() {
         .put_artifact("snapshot", contents("state"))
         .await
         .expect("the artifact is stored");
-    let other_stream =
-        ArtifactNamespace::read_only(Arc::new(store.clone()), StreamId::new(8), "word-count");
+    let other_stream = ArtifactNamespace::read_only(Arc::new(store.clone()), StreamId::new(8), "word-count");
 
     let read = other_stream.get_artifact(&artifact_key).await;
 
     assert!(matches!(
         read,
-        Err(MaterializerError::ArtifactStore(
-            ArtifactError::NotFound { .. }
-        ))
+        Err(MaterializerError::ArtifactStore(ArtifactError::NotFound { .. }))
     ));
 }
 
@@ -186,10 +174,7 @@ async fn read_only_view_reads_artifacts() {
         .expect("the artifact is stored");
     let follower = ArtifactNamespace::read_only(Arc::new(store.clone()), STREAM, "word-count");
 
-    assert_eq!(
-        follower.get_artifact(&artifact_key).await,
-        Ok(contents("state"))
-    );
+    assert_eq!(follower.get_artifact(&artifact_key).await, Ok(contents("state")));
 }
 
 #[tokio::test]

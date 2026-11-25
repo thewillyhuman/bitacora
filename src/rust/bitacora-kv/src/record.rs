@@ -122,9 +122,7 @@ impl KvRecord {
     /// that is current.
     #[must_use]
     pub const fn barrier() -> Self {
-        Self {
-            operations: Vec::new(),
-        }
+        Self { operations: Vec::new() }
     }
 
     /// A record that sets one key.
@@ -186,9 +184,7 @@ impl KvRecord {
     /// older format version.
     pub fn decode(payload: &Bytes) -> Result<Self, KvRecordError> {
         let mut unread = payload.clone();
-        let version = unread
-            .try_get_u8()
-            .map_err(|_cut_short| malformed("it is empty"))?;
+        let version = unread.try_get_u8().map_err(|_cut_short| malformed("it is empty"))?;
         if version != RECORD_FORMAT_VERSION {
             return Err(KvRecordError::UnsupportedVersion { found: version });
         }
@@ -197,9 +193,7 @@ impl KvRecord {
             .map_err(|_cut_short| malformed("it is cut short"))?;
         let mut operations = Vec::new();
         for _operation in 0..operation_count {
-            let kind = unread
-                .try_get_u8()
-                .map_err(|_cut_short| malformed("it is cut short"))?;
+            let kind = unread.try_get_u8().map_err(|_cut_short| malformed("it is cut short"))?;
             let key = read_length_prefixed(&mut unread)?;
             let operation = match kind {
                 KIND_PUT => KvOperation::Put {

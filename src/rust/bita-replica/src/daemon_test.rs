@@ -32,9 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
 use super::*;
-use crate::test_support::{
-    SEALED_END, append_of, descriptor, open_replica, small_segments, write_sealed_segment,
-};
+use crate::test_support::{SEALED_END, append_of, descriptor, open_replica, small_segments, write_sealed_segment};
 
 /// Far longer than anything here takes; a test that waits this long has found a hang.
 const GENEROUS_WAIT: Duration = Duration::from_secs(30);
@@ -93,9 +91,7 @@ impl RunningDaemon {
             .await
             .expect("a loopback port can be bound");
         let grpc_address = grpc.local_addr().expect("a bound socket has an address");
-        let observability_address = observability
-            .local_addr()
-            .expect("a bound socket has an address");
+        let observability_address = observability.local_addr().expect("a bound socket has an address");
         let settings = ReplicaDaemonSettings {
             proposed_replica_id: replica_id("replica-a"),
             data_directory: "/unused/by/these/tests".into(),
@@ -128,15 +124,7 @@ impl RunningDaemon {
                 Err(_sender_dropped) => ShutdownSignal::Terminate,
             }
         };
-        let running = tokio::spawn(run(
-            settings,
-            environment,
-            Listeners {
-                grpc,
-                observability,
-            },
-            shutdown,
-        ));
+        let running = tokio::spawn(run(settings, environment, Listeners { grpc, observability }, shutdown));
         // The identity of the data directory wins over the proposed one, so ask the disk.
         let remote = GrpcReplicaConnector::new(GrpcConnectorSettings::default())
             .connect(&identity_on(&stores.disk).await, &grpc_address.to_string());
@@ -183,10 +171,7 @@ impl RunningDaemon {
     }
 
     /// Waits until the registry holds a record that `is_expected` accepts, and returns it.
-    async fn wait_for_registration(
-        &self,
-        is_expected: fn(&ReplicaRecord) -> bool,
-    ) -> ReplicaRecord {
+    async fn wait_for_registration(&self, is_expected: fn(&ReplicaRecord) -> bool) -> ReplicaRecord {
         let metadata = self.metadata();
         let deadline = Instant::now() + GENEROUS_WAIT;
         loop {
@@ -233,9 +218,7 @@ async fn identity_on(disk: &MemoryDisk) -> ReplicaId {
         .await
         .expect("an in-memory disk can be read");
     match stored_identity {
-        Some(identity) => {
-            replica_id(std::str::from_utf8(&identity).expect("an identifier is text"))
-        }
+        Some(identity) => replica_id(std::str::from_utf8(&identity).expect("an identifier is text")),
         None => replica_id("replica-a"),
     }
 }
@@ -413,10 +396,7 @@ async fn stopped_daemon_no_longer_answers_requests() {
     daemon.terminate().await.expect("a clean stop");
 
     let status = remote.status().await;
-    assert!(
-        matches!(status, Err(ReplicaError::Unavailable { .. })),
-        "{status:?}"
-    );
+    assert!(matches!(status, Err(ReplicaError::Unavailable { .. })), "{status:?}");
 }
 
 /// After a failed flush the durable content of the file is unknown, so the replica must stop.
@@ -431,10 +411,7 @@ async fn refused_flush_stops_the_daemon_with_an_error() {
         .expect("the daemon stops by itself")
         .expect("the daemon does not panic");
 
-    assert!(
-        matches!(stopped, Err(DaemonError::StorageFailed { .. })),
-        "{stopped:?}"
-    );
+    assert!(matches!(stopped, Err(DaemonError::StorageFailed { .. })), "{stopped:?}");
 }
 
 #[tokio::test]

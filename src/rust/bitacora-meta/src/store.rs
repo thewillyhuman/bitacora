@@ -8,21 +8,16 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use bitacora_types::{
-    Epoch, ReplicaId, ReplicationSettings, SegmentId, SequenceNumber, StreamId, Timestamp,
-};
+use bitacora_types::{Epoch, ReplicaId, ReplicationSettings, SegmentId, SequenceNumber, StreamId, Timestamp};
 use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::key_value::{
-    Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome,
-};
+use crate::key_value::{Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome};
 use crate::records::{
-    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord,
-    RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
-    WriterLease,
+    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
+    RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, WriterLease,
 };
 use crate::snapshot::{MetadataSnapshot, SnapshotEntry};
 
@@ -86,9 +81,7 @@ pub enum MetaError {
         name: String,
     },
     /// A stream or materializer name cannot be used in a key.
-    #[error(
-        "invalid name {name:?}: use 1 to {MAX_NAME_LENGTH_BYTES} ASCII letters, digits, '.', '_' or '-'"
-    )]
+    #[error("invalid name {name:?}: use 1 to {MAX_NAME_LENGTH_BYTES} ASCII letters, digits, '.', '_' or '-'")]
     InvalidName {
         /// The rejected name.
         name: String,
@@ -183,9 +176,7 @@ impl MetadataStore {
         let stream_key = stream_key(name);
         for _attempt in 0..MAX_UPDATE_ATTEMPTS {
             if self.key_value_store.get(&stream_key).await?.is_some() {
-                return Err(MetaError::StreamAlreadyExists {
-                    name: name.to_owned(),
-                });
+                return Err(MetaError::StreamAlreadyExists { name: name.to_owned() });
             }
             let counter = self.key_value_store.get(STREAM_ID_COUNTER_KEY).await?;
             let (last_stream_id, counter_condition) = match &counter {
@@ -228,10 +219,7 @@ impl MetadataStore {
                             key: stream_key.clone(),
                         },
                     ],
-                    vec![
-                        put(STREAM_ID_COUNTER_KEY, &stream_id),
-                        put(&stream_key, &record),
-                    ],
+                    vec![put(STREAM_ID_COUNTER_KEY, &stream_id), put(&stream_key, &record)],
                 )
                 .await?;
             if outcome == TransactionOutcome::Applied {
@@ -418,12 +406,7 @@ impl MetadataStore {
     /// # Errors
     ///
     /// Returns [`MetaError::Fenced`] if `epoch` is no longer current.
-    pub async fn renew_lease(
-        &self,
-        name: &str,
-        epoch: Epoch,
-        lease_expires_at: Timestamp,
-    ) -> Result<(), MetaError> {
+    pub async fn renew_lease(&self, name: &str, epoch: Epoch, lease_expires_at: Timestamp) -> Result<(), MetaError> {
         self.update_stream(name, |record| {
             require_epoch(record, epoch)?;
             if let Some(lease) = &mut record.writer {
@@ -486,11 +469,7 @@ impl MetadataStore {
     /// [`MetaError::NoStandbySegment`] if the controller has not placed the
     /// next segment yet, or [`MetaError::InvalidState`] if the last segment
     /// is still open under an older epoch.
-    pub async fn open_segment(
-        &self,
-        name: &str,
-        epoch: Epoch,
-    ) -> Result<(StreamRecord, SegmentRecord), MetaError> {
+    pub async fn open_segment(&self, name: &str, epoch: Epoch) -> Result<(StreamRecord, SegmentRecord), MetaError> {
         self.update_stream(name, |record| {
             require_epoch(record, epoch)?;
             open_next_segment(record, epoch)
@@ -516,9 +495,7 @@ impl MetadataStore {
         self.update_stream(name, |record| {
             require_epoch(record, epoch)?;
             let was_rolled_already = record.last_segment().is_some_and(|last_segment| {
-                last_segment.segment_id == segment_id.next()
-                    && last_segment.epoch == epoch
-                    && last_segment.is_open()
+                last_segment.segment_id == segment_id.next() && last_segment.epoch == epoch && last_segment.is_open()
             });
             if !was_rolled_already {
                 seal_last_segment(record, segment_id, sealed_end, sealed_at)?;
@@ -587,11 +564,7 @@ impl MetadataStore {
     /// # Errors
     ///
     /// Returns [`MetaError::StreamNotFound`] if the stream does not exist.
-    pub async fn unregister_materializer(
-        &self,
-        stream_name: &str,
-        materializer: &str,
-    ) -> Result<(), MetaError> {
+    pub async fn unregister_materializer(&self, stream_name: &str, materializer: &str) -> Result<(), MetaError> {
         let stream_key = stream_key(stream_name);
         for _attempt in 0..MAX_UPDATE_ATTEMPTS {
             let (mut record, revision) = self.read_stream(stream_name).await?;
@@ -671,10 +644,7 @@ impl MetadataStore {
             }
             if checkpoint < record.checkpoint {
                 return Err(MetaError::InvalidState {
-                    reason: format!(
-                        "checkpoint cannot move back from {} to {checkpoint}",
-                        record.checkpoint
-                    ),
+                    reason: format!("checkpoint cannot move back from {} to {checkpoint}", record.checkpoint),
                 });
             }
             record.checkpoint = checkpoint;
@@ -691,11 +661,7 @@ impl MetadataStore {
     /// # Errors
     ///
     /// Returns [`MetaError::MaterializerNotRegistered`] if it is unknown.
-    pub async fn get_checkpoint(
-        &self,
-        stream_id: StreamId,
-        materializer: &str,
-    ) -> Result<CheckpointRecord, MetaError> {
+    pub async fn get_checkpoint(&self, stream_id: StreamId, materializer: &str) -> Result<CheckpointRecord, MetaError> {
         Ok(self.read_checkpoint(stream_id, materializer).await?.0)
     }
 
@@ -704,10 +670,7 @@ impl MetadataStore {
     /// # Errors
     ///
     /// Fails if the store is unavailable or holds an undecodable record.
-    pub async fn list_checkpoints(
-        &self,
-        stream_id: StreamId,
-    ) -> Result<Vec<CheckpointRecord>, MetaError> {
+    pub async fn list_checkpoints(&self, stream_id: StreamId) -> Result<Vec<CheckpointRecord>, MetaError> {
         self.key_value_store
             .list(&format!("{CHECKPOINT_KEY_PREFIX}{stream_id}/"))
             .await?
@@ -725,10 +688,7 @@ impl MetadataStore {
     /// Fails if the store is unavailable.
     pub async fn put_replica(&self, replica: &ReplicaRecord) -> Result<(), MetaError> {
         self.key_value_store
-            .transact(
-                Vec::new(),
-                vec![put(&replica_key(&replica.replica_id), replica)],
-            )
+            .transact(Vec::new(), vec![put(&replica_key(&replica.replica_id), replica)])
             .await?;
         Ok(())
     }
@@ -778,12 +738,7 @@ impl MetadataStore {
     /// # Errors
     ///
     /// Fails if the store is unavailable or holds an undecodable record.
-    pub async fn try_lead(
-        &self,
-        candidate: &str,
-        now: Timestamp,
-        expires_at: Timestamp,
-    ) -> Result<bool, MetaError> {
+    pub async fn try_lead(&self, candidate: &str, now: Timestamp, expires_at: Timestamp) -> Result<bool, MetaError> {
         let mut claim = LeaderRecord {
             holder: candidate.to_owned(),
             expires_at,
@@ -878,11 +833,7 @@ impl MetadataStore {
     /// [`RestoreMode::IntoEmptyStore`] and the store holds a key, or gets
     /// one from somebody else while the restore runs. Fails if the store is
     /// unavailable.
-    pub async fn restore(
-        &self,
-        snapshot: &MetadataSnapshot,
-        mode: RestoreMode,
-    ) -> Result<RestoreOutcome, MetaError> {
+    pub async fn restore(&self, snapshot: &MetadataSnapshot, mode: RestoreMode) -> Result<RestoreOutcome, MetaError> {
         let existing_entries = self.key_value_store.list("").await?;
         if mode == RestoreMode::IntoEmptyStore && !existing_entries.is_empty() {
             return Err(MetaError::InvalidState {
@@ -920,14 +871,10 @@ impl MetadataStore {
                     }
                 }
             }
-            let outcome = self
-                .key_value_store
-                .transact(conditions, batch.to_vec())
-                .await?;
+            let outcome = self.key_value_store.transact(conditions, batch.to_vec()).await?;
             if outcome == TransactionOutcome::ConditionFailed {
                 return Err(MetaError::InvalidState {
-                    reason: "somebody else wrote to the metadata store while it was restored"
-                        .to_owned(),
+                    reason: "somebody else wrote to the metadata store while it was restored".to_owned(),
                 });
             }
         }
@@ -1021,10 +968,7 @@ impl MetadataStore {
                             key: deleted_key.clone(),
                         },
                     ],
-                    vec![
-                        put(STREAM_ID_COUNTER_KEY, &raised_counter),
-                        put(&stream_key, record),
-                    ],
+                    vec![put(STREAM_ID_COUNTER_KEY, &raised_counter), put(&stream_key, record)],
                 )
                 .await?;
             if outcome == TransactionOutcome::Applied {
@@ -1039,9 +983,7 @@ impl MetadataStore {
     async fn read_stream(&self, name: &str) -> Result<(StreamRecord, Revision), MetaError> {
         let stream_key = stream_key(name);
         let Some(stored) = self.key_value_store.get(&stream_key).await? else {
-            return Err(MetaError::StreamNotFound {
-                name: name.to_owned(),
-            });
+            return Err(MetaError::StreamNotFound { name: name.to_owned() });
         };
         Ok((decode(&stream_key, &stored.value)?, stored.revision))
     }
@@ -1100,12 +1042,9 @@ fn replica_key(replica_id: &ReplicaId) -> String {
 }
 
 fn validate_name(name: &str) -> Result<(), MetaError> {
-    let is_allowed =
-        |character: char| character.is_ascii_alphanumeric() || "._-".contains(character);
+    let is_allowed = |character: char| character.is_ascii_alphanumeric() || "._-".contains(character);
     if name.is_empty() || name.len() > MAX_NAME_LENGTH_BYTES || !name.chars().all(is_allowed) {
-        return Err(MetaError::InvalidName {
-            name: name.to_owned(),
-        });
+        return Err(MetaError::InvalidName { name: name.to_owned() });
     }
     Ok(())
 }
@@ -1165,14 +1104,12 @@ fn seal_last_segment(
                 existing_seal.end
             ),
         }),
-        None if sealed_end < last_segment.first_sequence.preceding() => {
-            Err(MetaError::InvalidState {
-                reason: format!(
-                    "segment {segment_id} starts at {} and cannot end at {sealed_end}",
-                    last_segment.first_sequence
-                ),
-            })
-        }
+        None if sealed_end < last_segment.first_sequence.preceding() => Err(MetaError::InvalidState {
+            reason: format!(
+                "segment {segment_id} starts at {} and cannot end at {sealed_end}",
+                last_segment.first_sequence
+            ),
+        }),
         None => {
             last_segment.sealed = Some(SealRecord {
                 end: sealed_end,
@@ -1242,10 +1179,7 @@ mod tests {
 
     fn new_store() -> (MetadataStore, MemoryKeyValueStore) {
         let key_value_store = MemoryKeyValueStore::new();
-        (
-            MetadataStore::new(Arc::new(key_value_store.clone())),
-            key_value_store,
-        )
+        (MetadataStore::new(Arc::new(key_value_store.clone())), key_value_store)
     }
 
     /// A store with stream "orders", standby placed, no writer yet.
@@ -1322,12 +1256,7 @@ mod tests {
     async fn creating_a_stream_twice_fails() {
         let store = store_with_stream().await;
         let second_attempt = store
-            .create_stream(
-                STREAM,
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await;
         assert_eq!(
             second_attempt,
@@ -1340,19 +1269,9 @@ mod tests {
     #[tokio::test]
     async fn names_that_would_break_keys_are_refused() {
         let (store, _key_value_store) = new_store();
-        for name in [
-            "",
-            "a/b",
-            "with space",
-            &"n".repeat(MAX_NAME_LENGTH_BYTES + 1),
-        ] {
+        for name in ["", "a/b", "with space", &"n".repeat(MAX_NAME_LENGTH_BYTES + 1)] {
             let created = store
-                .create_stream(
-                    name,
-                    ReplicationSettings::DEFAULT,
-                    RetentionPolicy::default(),
-                    None,
-                )
+                .create_stream(name, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
                 .await;
             assert!(
                 matches!(created, Err(MetaError::InvalidName { .. })),
@@ -1398,10 +1317,7 @@ mod tests {
     async fn deleted_stream_takes_its_checkpoints_with_it() {
         let store = store_with_stream().await;
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         store.delete_stream(STREAM).await.expect("deleted");
         assert_eq!(
             (
@@ -1418,10 +1334,7 @@ mod tests {
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
         store.delete_stream(STREAM).await.expect("deleted");
         let noted = store.list_deleted_streams().await.expect("list");
-        store
-            .forget_deleted_stream(stream_id)
-            .await
-            .expect("forgotten");
+        store.forget_deleted_stream(stream_id).await.expect("forgotten");
         assert_eq!(
             (noted, store.list_deleted_streams().await),
             (
@@ -1440,12 +1353,7 @@ mod tests {
         let old_stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
         store.delete_stream(STREAM).await.expect("deleted");
         let recreated = store
-            .create_stream(
-                STREAM,
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("the name is free again");
         assert_ne!(recreated.stream_id, old_stream_id);
@@ -1455,12 +1363,7 @@ mod tests {
     async fn update_that_changes_nothing_writes_nothing() {
         let (store, key_value_store) = new_store();
         store
-            .create_stream(
-                STREAM,
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("stream is created");
         let revision_before = key_value_store
@@ -1468,10 +1371,7 @@ mod tests {
             .await
             .expect("get")
             .map(|stored| stored.revision);
-        store
-            .update_stream(STREAM, |_record| Ok(()))
-            .await
-            .expect("update");
+        store.update_stream(STREAM, |_record| Ok(())).await.expect("update");
         let revision_after = key_value_store
             .get("streams/orders")
             .await
@@ -1484,10 +1384,7 @@ mod tests {
     async fn update_fails_when_the_store_is_unavailable() {
         let (store, key_value_store) = new_store();
         key_value_store.set_unavailable(true);
-        assert!(matches!(
-            store.get_stream(STREAM).await,
-            Err(MetaError::Unavailable(_))
-        ));
+        assert!(matches!(store.get_stream(STREAM).await, Err(MetaError::Unavailable(_))));
     }
 
     // ---- epochs and leases ----
@@ -1518,9 +1415,7 @@ mod tests {
             .claim_epoch(STREAM, Epoch::ZERO, "compute-1", LEASE_EXPIRY)
             .await
             .expect("epoch is claimed");
-        let late_claim = store
-            .claim_epoch(STREAM, Epoch::ZERO, "compute-2", LEASE_EXPIRY)
-            .await;
+        let late_claim = store.claim_epoch(STREAM, Epoch::ZERO, "compute-2", LEASE_EXPIRY).await;
         assert_eq!(
             late_claim,
             Err(MetaError::Fenced {
@@ -1552,10 +1447,7 @@ mod tests {
             .await
             .expect("lease is renewed");
         let record = store.get_stream(STREAM).await.expect("stream exists");
-        assert_eq!(
-            record.writer.map(|lease| lease.expires_at),
-            Some(extended_expiry)
-        );
+        assert_eq!(record.writer.map(|lease| lease.expires_at), Some(extended_expiry));
     }
 
     #[tokio::test]
@@ -1582,11 +1474,7 @@ mod tests {
             .open_segment(STREAM, Epoch::new(1))
             .await
             .expect("segment is opened");
-        let opened_on: Vec<ReplicaId> = opened
-            .copies
-            .iter()
-            .map(|copy| copy.replica_id.clone())
-            .collect();
+        let opened_on: Vec<ReplicaId> = opened.copies.iter().map(|copy| copy.replica_id.clone()).collect();
         assert!(
             opened.segment_id == SegmentId::FIRST
                 && opened.first_sequence == SequenceNumber::FIRST
@@ -1604,10 +1492,7 @@ mod tests {
             .open_segment(STREAM, Epoch::new(1))
             .await
             .expect("segment is returned");
-        assert_eq!(
-            (record.segments.len(), reopened.segment_id),
-            (1, SegmentId::FIRST)
-        );
+        assert_eq!((record.segments.len(), reopened.segment_id), (1, SegmentId::FIRST));
     }
 
     #[tokio::test]
@@ -1713,13 +1598,7 @@ mod tests {
     async fn segment_can_be_sealed_empty() {
         let store = store_with_open_segment().await;
         let record = store
-            .seal_segment(
-                STREAM,
-                Epoch::new(1),
-                SegmentId::FIRST,
-                SequenceNumber::ZERO,
-                SEALED_AT,
-            )
+            .seal_segment(STREAM, Epoch::new(1), SegmentId::FIRST, SequenceNumber::ZERO, SEALED_AT)
             .await
             .expect("segment is sealed");
         assert_eq!(record.next_segment_first_sequence(), SequenceNumber::FIRST);
@@ -1748,10 +1627,7 @@ mod tests {
                 SEALED_AT,
             )
             .await;
-        assert!(matches!(
-            seal_below_start,
-            Err(MetaError::InvalidState { .. })
-        ));
+        assert!(matches!(seal_below_start, Err(MetaError::InvalidState { .. })));
     }
 
     #[tokio::test]
@@ -1820,9 +1696,7 @@ mod tests {
             )
             .await;
         let record = store.get_stream(STREAM).await.expect("stream exists");
-        assert!(
-            matches!(roll, Err(MetaError::NoStandbySegment { .. })) && record.segments[0].is_open()
-        );
+        assert!(matches!(roll, Err(MetaError::NoStandbySegment { .. })) && record.segments[0].is_open());
     }
 
     #[tokio::test]
@@ -1925,10 +1799,7 @@ mod tests {
             })
             .await
             .expect("mark is set");
-        let checkpoint = store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        let checkpoint = store.register_materializer(STREAM, "pages").await.expect("registered");
         assert_eq!(
             (checkpoint.checkpoint, checkpoint.fencing_token),
             (SequenceNumber::new(499), 0)
@@ -1939,10 +1810,7 @@ mod tests {
     async fn registering_twice_keeps_the_existing_checkpoint() {
         let store = store_with_stream().await;
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         let token = store
             .acquire_checkpoint(stream_id, "pages")
             .await
@@ -1952,20 +1820,14 @@ mod tests {
             .commit_checkpoint(stream_id, "pages", token, SequenceNumber::new(40), None)
             .await
             .expect("committed");
-        let again = store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        let again = store.register_materializer(STREAM, "pages").await.expect("registered");
         assert_eq!(again.checkpoint, SequenceNumber::new(40));
     }
 
     #[tokio::test]
     async fn registration_is_recorded_on_the_stream() {
         let store = store_with_stream().await;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         let record = store.get_stream(STREAM).await.expect("stream exists");
         assert!(record.materializers.contains("pages"));
     }
@@ -1974,10 +1836,7 @@ mod tests {
     async fn unregistered_materializer_no_longer_has_a_checkpoint() {
         let store = store_with_stream().await;
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         store
             .unregister_materializer(STREAM, "pages")
             .await
@@ -2001,16 +1860,10 @@ mod tests {
     async fn each_acquisition_raises_the_fencing_token() {
         let store = store_with_stream().await;
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         let mut tokens = Vec::new();
         for _runner in 0..2 {
-            let acquired = store
-                .acquire_checkpoint(stream_id, "pages")
-                .await
-                .expect("acquired");
+            let acquired = store.acquire_checkpoint(stream_id, "pages").await.expect("acquired");
             tokens.push(acquired.fencing_token);
         }
         assert_eq!(tokens, [1, 2]);
@@ -2020,19 +1873,13 @@ mod tests {
     async fn superseded_runner_cannot_commit() {
         let store = store_with_stream().await;
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         let old_token = store
             .acquire_checkpoint(stream_id, "pages")
             .await
             .expect("acquired")
             .fencing_token;
-        store
-            .acquire_checkpoint(stream_id, "pages")
-            .await
-            .expect("acquired");
+        store.acquire_checkpoint(stream_id, "pages").await.expect("acquired");
         let stale_commit = store
             .commit_checkpoint(stream_id, "pages", old_token, SequenceNumber::new(40), None)
             .await;
@@ -2049,10 +1896,7 @@ mod tests {
     async fn committed_checkpoint_is_read_back_with_its_manifest() {
         let store = store_with_stream().await;
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         let token = store
             .acquire_checkpoint(stream_id, "pages")
             .await
@@ -2068,16 +1912,10 @@ mod tests {
             )
             .await
             .expect("committed");
-        let checkpoint = store
-            .get_checkpoint(stream_id, "pages")
-            .await
-            .expect("registered");
+        let checkpoint = store.get_checkpoint(stream_id, "pages").await.expect("registered");
         assert_eq!(
             (checkpoint.checkpoint, checkpoint.manifest),
-            (
-                SequenceNumber::new(40),
-                Some("pages/manifest-40".to_owned())
-            )
+            (SequenceNumber::new(40), Some("pages/manifest-40".to_owned()))
         );
     }
 
@@ -2085,10 +1923,7 @@ mod tests {
     async fn checkpoint_cannot_move_backwards() {
         let store = store_with_stream().await;
         let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
-        store
-            .register_materializer(STREAM, "pages")
-            .await
-            .expect("registered");
+        store.register_materializer(STREAM, "pages").await.expect("registered");
         let token = store
             .acquire_checkpoint(stream_id, "pages")
             .await
@@ -2158,20 +1993,11 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_replaces_the_previous_registration() {
         let (store, _key_value_store) = new_store();
-        store
-            .put_replica(&replica("replica-a", 0))
-            .await
-            .expect("put");
-        store
-            .put_replica(&replica("replica-a", 3_000))
-            .await
-            .expect("put");
+        store.put_replica(&replica("replica-a", 0)).await.expect("put");
+        store.put_replica(&replica("replica-a", 3_000)).await.expect("put");
         let listed = store.list_replicas().await.expect("list");
         assert_eq!(
-            listed
-                .iter()
-                .map(|record| record.heartbeat_at)
-                .collect::<Vec<_>>(),
+            listed.iter().map(|record| record.heartbeat_at).collect::<Vec<_>>(),
             [Timestamp::from_unix_millis(3_000)]
         );
     }
@@ -2179,10 +2005,7 @@ mod tests {
     #[tokio::test]
     async fn removed_replica_is_no_longer_listed() {
         let (store, _key_value_store) = new_store();
-        store
-            .put_replica(&replica("replica-a", 0))
-            .await
-            .expect("put");
+        store.put_replica(&replica("replica-a", 0)).await.expect("put");
         store
             .remove_replica(&ReplicaId::new("replica-a").expect("valid identifier"))
             .await
@@ -2198,10 +2021,7 @@ mod tests {
     #[tokio::test]
     async fn first_candidate_becomes_the_leader() {
         let (store, _key_value_store) = new_store();
-        assert_eq!(
-            store.try_lead("controller-1", NOW, LEADERSHIP_EXPIRY).await,
-            Ok(true)
-        );
+        assert_eq!(store.try_lead("controller-1", NOW, LEADERSHIP_EXPIRY).await, Ok(true));
     }
 
     #[tokio::test]
@@ -2244,11 +2064,7 @@ mod tests {
             .expect("store is available");
         let renewed_at = Timestamp::from_unix_millis(4_000);
         store
-            .try_lead(
-                "controller-1",
-                renewed_at,
-                Timestamp::from_unix_millis(9_000),
-            )
+            .try_lead("controller-1", renewed_at, Timestamp::from_unix_millis(9_000))
             .await
             .expect("store is available");
         assert_eq!(leading_since(&store).await, Some(NOW));
@@ -2262,11 +2078,7 @@ mod tests {
             .await
             .expect("store is available");
         store
-            .try_lead(
-                "controller-2",
-                LEADERSHIP_EXPIRY,
-                Timestamp::from_unix_millis(11_000),
-            )
+            .try_lead("controller-2", LEADERSHIP_EXPIRY, Timestamp::from_unix_millis(11_000))
             .await
             .expect("store is available");
         assert_eq!(leading_since(&store).await, Some(LEADERSHIP_EXPIRY));
@@ -2281,11 +2093,7 @@ mod tests {
             .expect("store is available");
         let after_the_lapse = Timestamp::from_unix_millis(20_000);
         store
-            .try_lead(
-                "controller-1",
-                after_the_lapse,
-                Timestamp::from_unix_millis(25_000),
-            )
+            .try_lead("controller-1", after_the_lapse, Timestamp::from_unix_millis(25_000))
             .await
             .expect("store is available");
         assert_eq!(leading_since(&store).await, Some(after_the_lapse));
@@ -2338,19 +2146,8 @@ mod tests {
             .await
             .expect("materializer is registered");
         let snapshot = store.snapshot(NOW).await.expect("store is available");
-        let keys: Vec<&str> = snapshot
-            .entries
-            .iter()
-            .map(|entry| entry.key.as_str())
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                "checkpoints/1/pages",
-                "counters/stream-id",
-                "streams/orders"
-            ]
-        );
+        let keys: Vec<&str> = snapshot.entries.iter().map(|entry| entry.key.as_str()).collect();
+        assert_eq!(keys, ["checkpoints/1/pages", "counters/stream-id", "streams/orders"]);
     }
 
     #[tokio::test]
@@ -2373,10 +2170,7 @@ mod tests {
     async fn snapshot_fails_while_the_store_is_unavailable() {
         let (store, key_value_store) = new_store();
         key_value_store.set_unavailable(true);
-        assert!(matches!(
-            store.snapshot(NOW).await,
-            Err(MetaError::Unavailable(_))
-        ));
+        assert!(matches!(store.snapshot(NOW).await, Err(MetaError::Unavailable(_))));
     }
 
     // ---- restore ----
@@ -2422,9 +2216,7 @@ mod tests {
     async fn restore_reports_how_many_keys_it_wrote() {
         let snapshot = snapshot_of_a_used_store().await;
         let (restored, _key_value_store) = new_store();
-        let outcome = restored
-            .restore(&snapshot, RestoreMode::IntoEmptyStore)
-            .await;
+        let outcome = restored.restore(&snapshot, RestoreMode::IntoEmptyStore).await;
         assert_eq!(
             outcome,
             Ok(RestoreOutcome {
@@ -2438,9 +2230,7 @@ mod tests {
     async fn restore_into_a_store_that_holds_keys_is_refused() {
         let snapshot = snapshot_of_a_used_store().await;
         let used_store = store_with_stream().await;
-        let refused = used_store
-            .restore(&snapshot, RestoreMode::IntoEmptyStore)
-            .await;
+        let refused = used_store.restore(&snapshot, RestoreMode::IntoEmptyStore).await;
         assert!(matches!(refused, Err(MetaError::InvalidState { .. })));
     }
 
@@ -2449,9 +2239,7 @@ mod tests {
         let snapshot = snapshot_of_a_used_store().await;
         let used_store = store_with_stream().await;
         let before = used_store.snapshot(NOW).await.expect("store is available");
-        let _refused = used_store
-            .restore(&snapshot, RestoreMode::IntoEmptyStore)
-            .await;
+        let _refused = used_store.restore(&snapshot, RestoreMode::IntoEmptyStore).await;
         assert_eq!(used_store.snapshot(NOW).await, Ok(before));
     }
 
@@ -2461,12 +2249,7 @@ mod tests {
         let (used_store, _key_value_store) = new_store();
         for name in ["audit", "payments"] {
             used_store
-                .create_stream(
-                    name,
-                    ReplicationSettings::DEFAULT,
-                    RetentionPolicy::default(),
-                    None,
-                )
+                .create_stream(name, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
                 .await
                 .expect("stream is created");
         }
@@ -2485,17 +2268,10 @@ mod tests {
         let snapshot = snapshot_of_a_used_store().await;
         let (used_store, _key_value_store) = new_store();
         used_store
-            .create_stream(
-                "audit",
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream("audit", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("stream is created");
-        let outcome = used_store
-            .restore(&snapshot, RestoreMode::ReplaceEverything)
-            .await;
+        let outcome = used_store.restore(&snapshot, RestoreMode::ReplaceEverything).await;
         // The counter is in both; only the other stream's record goes.
         assert_eq!(
             outcome,
@@ -2536,12 +2312,7 @@ mod tests {
     async fn rebuilt_stream(name: &str, stream_id: u64) -> StreamRecord {
         let (scratch, _key_value_store) = new_store();
         let mut record = scratch
-            .create_stream(
-                name,
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream(name, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("stream is created");
         record.stream_id = StreamId::new(stream_id);
@@ -2553,10 +2324,7 @@ mod tests {
     async fn adopted_stream_is_read_back_as_it_was_given() {
         let (store, _key_value_store) = new_store();
         let record = rebuilt_stream("orders", 7).await;
-        store
-            .adopt_stream(&record)
-            .await
-            .expect("stream is adopted");
+        store.adopt_stream(&record).await.expect("stream is adopted");
         assert_eq!(store.get_stream("orders").await, Ok(record));
     }
 
@@ -2568,12 +2336,7 @@ mod tests {
             .await
             .expect("stream is adopted");
         let created = store
-            .create_stream(
-                "audit",
-                ReplicationSettings::DEFAULT,
-                RetentionPolicy::default(),
-                None,
-            )
+            .create_stream("audit", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
             .await
             .expect("stream is created");
         assert_eq!(created.stream_id, StreamId::new(8));
@@ -2606,10 +2369,7 @@ mod tests {
     async fn adoption_replaces_the_record_of_the_same_stream() {
         let store = store_with_stream().await;
         let rebuilt = rebuilt_stream(STREAM, 1).await;
-        store
-            .adopt_stream(&rebuilt)
-            .await
-            .expect("stream is adopted");
+        store.adopt_stream(&rebuilt).await.expect("stream is adopted");
         assert_eq!(
             store.get_stream(STREAM).await.map(|stream| stream.epoch),
             Ok(Epoch::new(9))
@@ -2633,10 +2393,7 @@ mod tests {
     #[tokio::test]
     async fn adoption_of_a_stream_recorded_as_deleted_is_refused() {
         let store = store_with_stream().await;
-        store
-            .delete_stream(STREAM)
-            .await
-            .expect("stream is deleted");
+        store.delete_stream(STREAM).await.expect("stream is deleted");
         let refused = store.adopt_stream(&rebuilt_stream("orders", 1).await).await;
         assert!(matches!(refused, Err(MetaError::InvalidState { .. })));
     }
@@ -2657,10 +2414,7 @@ mod tests {
             .try_lead("controller-1", NOW, LEADERSHIP_EXPIRY)
             .await
             .expect("store is available");
-        assert_eq!(
-            store.try_lead("controller-2", NOW, LEADERSHIP_EXPIRY).await,
-            Ok(false)
-        );
+        assert_eq!(store.try_lead("controller-2", NOW, LEADERSHIP_EXPIRY).await, Ok(false));
     }
 
     #[tokio::test]
@@ -2687,11 +2441,7 @@ mod tests {
             .expect("store is available");
         assert_eq!(
             store
-                .try_lead(
-                    "controller-2",
-                    LEADERSHIP_EXPIRY,
-                    Timestamp::from_unix_millis(11_000)
-                )
+                .try_lead("controller-2", LEADERSHIP_EXPIRY, Timestamp::from_unix_millis(11_000))
                 .await,
             Ok(true)
         );

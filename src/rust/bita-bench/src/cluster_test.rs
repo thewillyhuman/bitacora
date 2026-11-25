@@ -24,8 +24,7 @@ fn config_file(content: &str) -> (TempDir, PathBuf) {
 }
 
 /// A configuration file that names one endpoint and a key prefix.
-const FILE_CONFIG: &str =
-    "etcd_endpoints = [\"http://file:2379\"]\netcd_key_prefix = \"/from-file/\"\n";
+const FILE_CONFIG: &str = "etcd_endpoints = [\"http://file:2379\"]\netcd_key_prefix = \"/from-file/\"\n";
 
 #[test]
 fn endpoints_given_as_options_are_used_with_the_default_prefix() {
@@ -52,8 +51,7 @@ fn options_replace_what_the_file_says() {
     let (_directory, path) = config_file(FILE_CONFIG);
     let endpoints = ["http://option:2379".to_owned()];
 
-    let config =
-        resolve_cluster_config(Some(&path), &endpoints, Some("/option/")).expect("resolves");
+    let config = resolve_cluster_config(Some(&path), &endpoints, Some("/option/")).expect("resolves");
 
     assert_eq!(config.etcd_endpoints, endpoints);
     assert_eq!(config.etcd_key_prefix, "/option/");
@@ -70,10 +68,7 @@ fn no_file_and_no_endpoint_is_refused() {
 fn missing_configuration_file_is_refused() {
     let resolved = resolve_cluster_config(Some(Path::new("/no/such/file.toml")), &[], None);
 
-    assert!(matches!(
-        resolved,
-        Err(ClusterConfigError::UnreadableFile { .. })
-    ));
+    assert!(matches!(resolved, Err(ClusterConfigError::UnreadableFile { .. })));
 }
 
 #[test]
@@ -82,10 +77,7 @@ fn file_with_a_misspelled_setting_is_refused() {
 
     let resolved = resolve_cluster_config(Some(&path), &[], None);
 
-    assert!(matches!(
-        resolved,
-        Err(ClusterConfigError::InvalidFile { .. })
-    ));
+    assert!(matches!(resolved, Err(ClusterConfigError::InvalidFile { .. })));
 }
 
 #[test]

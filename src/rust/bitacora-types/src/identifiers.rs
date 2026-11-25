@@ -61,11 +61,7 @@ impl SegmentId {
     /// once per nanosecond would take five centuries to reach.
     #[must_use]
     pub const fn next(self) -> Self {
-        Self(
-            self.0
-                .checked_add(1)
-                .expect("segment identifiers exhausted"),
-        )
+        Self(self.0.checked_add(1).expect("segment identifiers exhausted"))
     }
 }
 
@@ -89,10 +85,7 @@ impl SegmentAddress {
     /// Addresses segment `segment_id` of stream `stream_id`.
     #[must_use]
     pub const fn new(stream_id: StreamId, segment_id: SegmentId) -> Self {
-        Self {
-            stream_id,
-            segment_id,
-        }
+        Self { stream_id, segment_id }
     }
 }
 
@@ -189,11 +182,7 @@ impl SequenceNumber {
     /// Panics if the sequence space is exhausted; see [`SequenceNumber::next`].
     #[must_use]
     pub const fn advanced_by(self, record_count: u64) -> Self {
-        Self(
-            self.0
-                .checked_add(record_count)
-                .expect("sequence numbers exhausted"),
-        )
+        Self(self.0.checked_add(record_count).expect("sequence numbers exhausted"))
     }
 
     /// Returns the position right before this one.
@@ -234,9 +223,7 @@ pub enum InvalidReplicaId {
         limit_bytes: usize,
     },
     /// The identifier contains a character that is unsafe in a metadata key.
-    #[error(
-        "replica identifier contains {character:?}; use ASCII letters, digits, '.', '_' or '-'"
-    )]
+    #[error("replica identifier contains {character:?}; use ASCII letters, digits, '.', '_' or '-'")]
     ForbiddenCharacter {
         /// The first rejected character.
         character: char,
@@ -273,8 +260,7 @@ impl ReplicaId {
                 limit_bytes: Self::MAX_LENGTH_BYTES,
             });
         }
-        let is_allowed =
-            |character: char| character.is_ascii_alphanumeric() || "._-".contains(character);
+        let is_allowed = |character: char| character.is_ascii_alphanumeric() || "._-".contains(character);
         if let Some(character) = identifier.chars().find(|character| !is_allowed(*character)) {
             return Err(InvalidReplicaId::ForbiddenCharacter { character });
         }
@@ -319,10 +305,7 @@ mod tests {
 
     #[test]
     fn advancing_moves_forward_by_the_record_count() {
-        assert_eq!(
-            SequenceNumber::new(10).advanced_by(5),
-            SequenceNumber::new(15)
-        );
+        assert_eq!(SequenceNumber::new(10).advanced_by(5), SequenceNumber::new(15));
     }
 
     #[test]

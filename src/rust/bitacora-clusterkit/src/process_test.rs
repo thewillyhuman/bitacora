@@ -58,11 +58,7 @@ async fn standard_output_of_a_child_goes_to_its_log() {
 
     child.wait_for_exit(GENEROUS_WAIT).await;
 
-    assert!(
-        child.log().contains("to-standard-output"),
-        "{}",
-        child.log()
-    );
+    assert!(child.log().contains("to-standard-output"), "{}", child.log());
 }
 
 #[tokio::test]

@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use bitacora_artifact::ArtifactStore;
 use bitacora_segment::{Disk, DiskSpace};
 use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadLimit, ReadRequest,
-    ReadResponse, RepairRequest, RepairResponse, ReplicaApi, ReplicaConnector, ReplicaError,
-    ReplicaStatus, SealRequest, SealResponse, SegmentStatus, UploadRequest, UploadResponse,
+    AppendRequest, AppendResponse, FenceRequest, FenceResponse, ReadLimit, ReadRequest, ReadResponse, RepairRequest,
+    RepairResponse, ReplicaApi, ReplicaConnector, ReplicaError, ReplicaStatus, SealRequest, SealResponse,
+    SegmentStatus, UploadRequest, UploadResponse,
 };
 use bitacora_types::{ReplicaId, SegmentAddress, SegmentId, StreamId};
 use bytes::Bytes;
@@ -126,9 +126,7 @@ impl Replica {
         // behind. It holds nothing that is not elsewhere.
         for path in &stored_paths {
             if path.ends_with(REPAIR_SUFFIX) {
-                disk.remove_file(path)
-                    .await
-                    .map_err(storage_error("clean"))?;
+                disk.remove_file(path).await.map_err(storage_error("clean"))?;
             }
         }
         let stored_addresses: Vec<SegmentAddress> = {
@@ -146,18 +144,8 @@ impl Replica {
             tasks: JoinSet::new(),
         };
         for address in stored_addresses {
-            let copy = SegmentCopy::load(
-                address,
-                Arc::clone(&disk),
-                settings.preallocated_segment_bytes,
-            )
-            .await;
-            let handle = SegmentHandle::spawn(
-                address,
-                copy,
-                &mut registry.tasks,
-                Arc::clone(&on_write_failure),
-            );
+            let copy = SegmentCopy::load(address, Arc::clone(&disk), settings.preallocated_segment_bytes).await;
+            let handle = SegmentHandle::spawn(address, copy, &mut registry.tasks, Arc::clone(&on_write_failure));
             registry.handles_by_address.insert(address, handle);
         }
         tracing::info!(
@@ -217,17 +205,11 @@ impl Replica {
     pub async fn scrub_sealed_segments(&self) -> Result<usize, ReplicaError> {
         let mut damaged_count = 0;
         for handle in self.all_handles() {
-            let is_sealed = handle
-                .status()
-                .await?
-                .is_some_and(|status| status.sealed_end.is_some());
+            let is_sealed = handle.status().await?.is_some_and(|status| status.sealed_end.is_some());
             if is_sealed {
                 handle.verify().await?;
             }
-            let is_damaged = handle
-                .status()
-                .await?
-                .is_some_and(|status| status.is_damaged);
+            let is_damaged = handle.status().await?.is_some_and(|status| status.is_damaged);
             damaged_count += usize::from(is_damaged);
         }
         Ok(damaged_count)
@@ -240,18 +222,11 @@ impl Replica {
     }
 
     fn all_handles(&self) -> Vec<SegmentHandle> {
-        self.lock_registry()
-            .handles_by_address
-            .values()
-            .cloned()
-            .collect()
+        self.lock_registry().handles_by_address.values().cloned().collect()
     }
 
     fn existing_handle(&self, address: SegmentAddress) -> Option<SegmentHandle> {
-        self.lock_registry()
-            .handles_by_address
-            .get(&address)
-            .cloned()
+        self.lock_registry().handles_by_address.get(&address).cloned()
     }
 
     fn fail_if_stopped(&self) -> Result<(), ReplicaError> {
@@ -278,12 +253,7 @@ impl Replica {
             Arc::clone(&self.disk),
             self.settings.preallocated_segment_bytes,
         );
-        let handle = SegmentHandle::spawn(
-            address,
-            copy,
-            &mut registry.tasks,
-            Arc::clone(&self.on_write_failure),
-        );
+        let handle = SegmentHandle::spawn(address, copy, &mut registry.tasks, Arc::clone(&self.on_write_failure));
         registry.handles_by_address.insert(address, handle.clone());
         Ok(handle)
     }
@@ -311,9 +281,7 @@ impl Replica {
             .last_space_measurement
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .filter(|(measured_at, _space)| {
-                now.duration_since(*measured_at) < self.settings.space_refresh_interval
-            });
+            .filter(|(measured_at, _space)| now.duration_since(*measured_at) < self.settings.space_refresh_interval);
         if let Some((_measured_at, space)) = recent_measurement {
             return Ok(space);
         }
@@ -328,20 +296,16 @@ impl Replica {
 
 /// Reads the identity stored on `disk`, or stores `proposed_replica_id` if
 /// the disk has none.
-async fn adopt_identity(
-    disk: &dyn Disk,
-    proposed_replica_id: ReplicaId,
-) -> Result<ReplicaId, ReplicaError> {
+async fn adopt_identity(disk: &dyn Disk, proposed_replica_id: ReplicaId) -> Result<ReplicaId, ReplicaError> {
     let stored_identity = disk
         .read_file(REPLICA_ID_PATH)
         .await
         .map_err(storage_error("read identity"))?;
     if let Some(stored_identity) = stored_identity {
-        let identity_text = String::from_utf8(stored_identity.to_vec()).map_err(|utf8_error| {
-            ReplicaError::Storage {
+        let identity_text =
+            String::from_utf8(stored_identity.to_vec()).map_err(|utf8_error| ReplicaError::Storage {
                 reason: format!("{REPLICA_ID_PATH} is not text: {utf8_error}"),
-            }
-        })?;
+            })?;
         return ReplicaId::new(identity_text).map_err(|invalid| ReplicaError::Storage {
             reason: format!("{REPLICA_ID_PATH} is invalid: {invalid}"),
         });
@@ -389,27 +353,19 @@ impl ReplicaApi for Replica {
                 segment: request.segment,
             });
         };
-        if let (Some(requested_wait), ReadLimit::DurableSequence) =
-            (request.wait_for_records, request.limit)
-        {
+        if let (Some(requested_wait), ReadLimit::DurableSequence) = (request.wait_for_records, request.limit) {
             let longest_wait = requested_wait.min(self.settings.longest_read_wait);
-            handle
-                .wait_until_readable(request.from_sequence, longest_wait)
-                .await;
+            handle.wait_until_readable(request.from_sequence, longest_wait).await;
         }
         handle.read(request).await
     }
 
     async fn fence(&self, request: FenceRequest) -> Result<FenceResponse, ReplicaError> {
-        self.handle_or_spawn(request.segment)?
-            .fence(request.epoch)
-            .await
+        self.handle_or_spawn(request.segment)?.fence(request.epoch).await
     }
 
     async fn seal(&self, request: SealRequest) -> Result<SealResponse, ReplicaError> {
-        self.handle_or_spawn(request.segment)?
-            .seal(request.sealed_end)
-            .await
+        self.handle_or_spawn(request.segment)?.seal(request.sealed_end).await
     }
 
     async fn repair_segment(&self, request: RepairRequest) -> Result<RepairResponse, ReplicaError> {
@@ -630,10 +586,7 @@ mod tests {
     #[tokio::test]
     async fn appended_records_are_readable_once_durable() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 104))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 104)).await.expect("append");
         let response = replica.read(read_from(100, None)).await.expect("read");
         assert_eq!(sequences_in(&response), [100, 101, 102, 103, 104]);
     }
@@ -651,10 +604,7 @@ mod tests {
     async fn restarted_replica_still_holds_its_segments() {
         let disk = MemoryDisk::new();
         let replica = open_replica(&disk, "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         replica
             .fence(FenceRequest {
                 segment: OTHER_SEGMENT,
@@ -694,10 +644,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn waiting_read_returns_as_soon_as_records_become_durable() {
         let replica = Arc::new(open_replica(&MemoryDisk::new(), "replica-a").await);
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let waiting_reader = {
             let replica = Arc::clone(&replica);
             tokio::spawn(async move {
@@ -725,10 +672,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn waiting_read_gives_up_empty_after_its_wait() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let started_at = Instant::now();
         let response = replica
             .read(read_from(100, Some(Duration::from_secs(2))))
@@ -743,10 +687,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn waiting_read_is_capped_by_the_replica() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let started_at = Instant::now();
         replica
             .read(read_from(100, Some(Duration::from_secs(3_600))))
@@ -758,10 +699,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn waiting_read_at_the_end_of_a_sealed_segment_returns_at_once() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         replica
             .seal(SealRequest {
                 segment: SEGMENT,
@@ -787,10 +725,7 @@ mod tests {
     async fn replica_on_a_disk_with(capacity_bytes: u64, used_bytes: u64) -> Replica {
         let disk = MemoryDisk::with_capacity(capacity_bytes);
         let replica = open_replica(&disk, "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         disk.create_file("ballast", Bytes::new(), used_bytes)
             .await
             .expect("ballast");
@@ -822,10 +757,7 @@ mod tests {
     #[tokio::test]
     async fn draining_replica_refuses_appends_but_serves_reads() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 104))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 104)).await.expect("append");
         replica.drain().await.expect("drain");
         let append = replica.append(append_to(SEGMENT, 105, 1, 0)).await;
         let read = replica.read(read_from(100, None)).await;
@@ -837,20 +769,11 @@ mod tests {
     #[tokio::test]
     async fn deleted_segment_is_gone() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 104))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 104)).await.expect("append");
         replica.delete_segment(SEGMENT).await.expect("delete");
         assert_eq!(
-            (
-                replica.list_segments().await,
-                replica.read(read_from(100, None)).await
-            ),
-            (
-                Ok(Vec::new()),
-                Err(ReplicaError::SegmentNotFound { segment: SEGMENT })
-            )
+            (replica.list_segments().await, replica.read(read_from(100, None)).await),
+            (Ok(Vec::new()), Err(ReplicaError::SegmentNotFound { segment: SEGMENT }))
         );
     }
 
@@ -863,10 +786,7 @@ mod tests {
     #[tokio::test]
     async fn deleted_segment_can_be_written_again() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         replica.delete_segment(SEGMENT).await.expect("delete");
         let response = replica.append(append_to(SEGMENT, 100, 2, 0)).await;
         assert_eq!(
@@ -880,10 +800,7 @@ mod tests {
     #[tokio::test]
     async fn status_reports_identity_space_and_segments() {
         let replica = open_replica(&MemoryDisk::with_capacity(1_000_000), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let status = replica.status().await.expect("status");
         assert!(
             status.replica_id.as_str() == "replica-a"
@@ -900,10 +817,7 @@ mod tests {
     #[tokio::test]
     async fn listed_copy_with_a_file_reports_what_its_header_says() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let listed = replica.list_segments().await.expect("list");
         assert_eq!(
             listed[0].descriptor,
@@ -933,18 +847,12 @@ mod tests {
     async fn reported_header_survives_a_restart() {
         let disk = MemoryDisk::new();
         let replica = open_replica(&disk, "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let before_the_restart = replica.list_segments().await.expect("list");
         replica.stop();
         let restarted = open_replica(&disk, "replica-a").await;
         let after_the_restart = restarted.list_segments().await.expect("list");
-        assert_eq!(
-            after_the_restart[0].descriptor,
-            before_the_restart[0].descriptor
-        );
+        assert_eq!(after_the_restart[0].descriptor, before_the_restart[0].descriptor);
     }
 
     // ---- integrity ----
@@ -953,10 +861,7 @@ mod tests {
     async fn scrub_finds_a_corrupted_sealed_copy() {
         let disk = MemoryDisk::new();
         let replica = open_replica(&disk, "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         replica
             .seal(SealRequest {
                 segment: SEGMENT,
@@ -964,21 +869,14 @@ mod tests {
             })
             .await
             .expect("seal");
-        disk.corrupt_byte(
-            "7/3.seg",
-            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
-            0x20,
-        );
+        disk.corrupt_byte("7/3.seg", bitacora_segment::format::SEGMENT_HEADER_BYTES + 30, 0x20);
         assert_eq!(replica.scrub_sealed_segments().await, Ok(1));
     }
 
     #[tokio::test]
     async fn scrub_of_intact_copies_finds_nothing() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         replica
             .seal(SealRequest {
                 segment: SEGMENT,
@@ -1008,10 +906,7 @@ mod tests {
         )
         .await
         .expect("replica opens");
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
 
         disk.fail_flushes(true);
         let failed = replica.append(append_to(SEGMENT, 105, 1, 0)).await;
@@ -1034,14 +929,8 @@ mod tests {
     /// `sealed_end`, and a connector that reaches it at [`SOURCE_ADDRESS`].
     async fn sealed_source(sealed_end: u64) -> (Arc<Replica>, Arc<dyn ReplicaConnector>) {
         let source = Arc::new(open_replica(&MemoryDisk::new(), "source").await);
-        source
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
-        source
-            .append(append_to(SEGMENT, 105, 5, 0))
-            .await
-            .expect("append");
+        source.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
+        source.append(append_to(SEGMENT, 105, 5, 0)).await.expect("append");
         source
             .seal(SealRequest {
                 segment: SEGMENT,
@@ -1131,10 +1020,7 @@ mod tests {
     async fn repair_completes_a_short_copy_in_place() {
         let (_source, connector) = sealed_source(109).await;
         let target = open_target(&MemoryDisk::new(), connector).await;
-        target
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        target.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         target.repair_segment(repair_to(109)).await.expect("repair");
         assert_eq!(copy_of(&target).await, (Some(109), Some(109), false));
     }
@@ -1143,14 +1029,8 @@ mod tests {
     async fn repair_replaces_a_copy_with_an_uncommitted_tail() {
         let (_source, connector) = sealed_source(104).await;
         let target = open_target(&MemoryDisk::new(), connector).await;
-        target
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
-        target
-            .append(append_to(SEGMENT, 105, 5, 0))
-            .await
-            .expect("append");
+        target.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
+        target.append(append_to(SEGMENT, 105, 5, 0)).await.expect("append");
         target.repair_segment(repair_to(104)).await.expect("repair");
         assert_eq!(copy_of(&target).await, (Some(104), Some(104), false));
     }
@@ -1160,10 +1040,7 @@ mod tests {
         let (_source, connector) = sealed_source(109).await;
         let disk = MemoryDisk::new();
         let target = open_target(&disk, connector).await;
-        target
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        target.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         target
             .seal(SealRequest {
                 segment: SEGMENT,
@@ -1171,11 +1048,7 @@ mod tests {
             })
             .await
             .expect("seal");
-        disk.corrupt_byte(
-            "7/3.seg",
-            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
-            0x20,
-        );
+        disk.corrupt_byte("7/3.seg", bitacora_segment::format::SEGMENT_HEADER_BYTES + 30, 0x20);
         target.scrub_sealed_segments().await.expect("scrubs");
         let was_damaged = copy_of(&target).await.2;
         target.repair_segment(repair_to(109)).await.expect("repair");
@@ -1189,10 +1062,7 @@ mod tests {
     /// with a bit flipped in its first batch that the scrubber has found.
     async fn damaged_target(disk: &MemoryDisk, connector: Arc<dyn ReplicaConnector>) -> Replica {
         let target = open_target(disk, connector).await;
-        target
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        target.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         target
             .seal(SealRequest {
                 segment: SEGMENT,
@@ -1200,11 +1070,7 @@ mod tests {
             })
             .await
             .expect("seal");
-        disk.corrupt_byte(
-            "7/3.seg",
-            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
-            0x20,
-        );
+        disk.corrupt_byte("7/3.seg", bitacora_segment::format::SEGMENT_HEADER_BYTES + 30, 0x20);
         target.scrub_sealed_segments().await.expect("scrubs");
         target
     }
@@ -1246,10 +1112,7 @@ mod tests {
         let _failed = target.repair_segment(repair_to(109)).await;
 
         let stored_paths = disk.list_files().await.expect("list");
-        assert!(
-            !stored_paths.contains(&"7/3.seg.repair".to_owned()),
-            "{stored_paths:?}"
-        );
+        assert!(!stored_paths.contains(&"7/3.seg.repair".to_owned()), "{stored_paths:?}");
     }
 
     #[tokio::test]
@@ -1261,10 +1124,7 @@ mod tests {
         target.repair_segment(repair_to(109)).await.expect("repair");
 
         let stored_paths = disk.list_files().await.expect("list");
-        assert!(
-            !stored_paths.contains(&"7/3.seg.repair".to_owned()),
-            "{stored_paths:?}"
-        );
+        assert!(!stored_paths.contains(&"7/3.seg.repair".to_owned()), "{stored_paths:?}");
     }
 
     #[tokio::test]
@@ -1287,15 +1147,9 @@ mod tests {
         let (_source, connector) = sealed_source(109).await;
         let disk = MemoryDisk::new();
         let target = open_target(&disk, connector).await;
-        target
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        target.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         // A heartbeat that makes the records readable.
-        target
-            .append(append_to(SEGMENT, 105, 0, 104))
-            .await
-            .expect("heartbeat");
+        target.append(append_to(SEGMENT, 105, 0, 104)).await.expect("heartbeat");
         let later_epoch = Epoch::new(EPOCH.get() + 4);
         target
             .fence(FenceRequest {
@@ -1304,11 +1158,7 @@ mod tests {
             })
             .await
             .expect("fence");
-        disk.corrupt_byte(
-            "7/3.seg",
-            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
-            0x20,
-        );
+        disk.corrupt_byte("7/3.seg", bitacora_segment::format::SEGMENT_HEADER_BYTES + 30, 0x20);
         // Reading the damaged batch is what makes the replica notice.
         let _read_of_the_damage = target.read(read_from(100, None)).await;
         let was_damaged = copy_of(&target).await.2;
@@ -1329,20 +1179,14 @@ mod tests {
         let (_source, connector) = sealed_source(109).await;
         let disk = MemoryDisk::new();
         let target = open_target(&disk, connector).await;
-        target
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        target.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let copy_before = disk.durable_content("7/3.seg");
         disk.fail_flushes(true);
         let _refused_append = target.append(append_to(SEGMENT, 105, 5, 0)).await;
 
         let repaired = target.repair_segment(repair_to(109)).await;
 
-        assert!(
-            matches!(repaired, Err(ReplicaError::Storage { .. })),
-            "{repaired:?}"
-        );
+        assert!(matches!(repaired, Err(ReplicaError::Storage { .. })), "{repaired:?}");
         assert_eq!(disk.durable_content("7/3.seg"), copy_before);
     }
 
@@ -1350,10 +1194,7 @@ mod tests {
     async fn copy_whose_disk_refused_a_write_serves_its_flushed_records_after_a_restart() {
         let disk = MemoryDisk::new();
         let target = open_target(&disk, no_peers()).await;
-        target
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        target.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         disk.fail_flushes(true);
         let _refused_append = target.append(append_to(SEGMENT, 105, 5, 0)).await;
         target.stop();
@@ -1419,10 +1260,7 @@ mod tests {
         let (_source, connector) = sealed_source(109).await;
         let target = open_target(&MemoryDisk::new(), connector).await;
         target.drain().await.expect("drains");
-        assert_eq!(
-            target.repair_segment(repair_to(109)).await,
-            Err(ReplicaError::Draining)
-        );
+        assert_eq!(target.repair_segment(repair_to(109)).await, Err(ReplicaError::Draining));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1454,10 +1292,7 @@ mod tests {
     #[tokio::test]
     async fn stopped_replica_refuses_every_request() {
         let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 104))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 104)).await.expect("append");
         replica.stop();
         let append = replica.append(append_to(SEGMENT, 105, 1, 0)).await;
         let read = replica.read(read_from(100, None)).await;
@@ -1473,10 +1308,7 @@ mod tests {
     async fn stopped_replica_leaves_flushed_records_for_the_next_start() {
         let disk = MemoryDisk::new();
         let replica = open_replica(&disk, "replica-a").await;
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         replica.stop();
         disk.crash();
         let restarted = open_replica(&disk, "replica-a").await;
@@ -1493,17 +1325,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn request_waiting_on_a_stopped_replica_fails_instead_of_hanging() {
         let replica = Arc::new(open_replica(&MemoryDisk::new(), "replica-a").await);
-        replica
-            .append(append_to(SEGMENT, 100, 5, 0))
-            .await
-            .expect("append");
+        replica.append(append_to(SEGMENT, 100, 5, 0)).await.expect("append");
         let waiting_reader = {
             let replica = Arc::clone(&replica);
-            tokio::spawn(async move {
-                replica
-                    .read(read_from(100, Some(Duration::from_secs(10))))
-                    .await
-            })
+            tokio::spawn(async move { replica.read(read_from(100, Some(Duration::from_secs(10)))).await })
         };
         tokio::time::sleep(Duration::from_millis(50)).await;
         replica.stop();
@@ -1516,10 +1341,7 @@ mod tests {
     #[test]
     fn segment_and_state_paths_name_the_same_segment() {
         assert_eq!(
-            (
-                parse_segment_path("7/3.seg"),
-                parse_segment_path("7/3.state")
-            ),
+            (parse_segment_path("7/3.seg"), parse_segment_path("7/3.state")),
             (Some(SEGMENT), Some(SEGMENT))
         );
     }

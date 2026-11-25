@@ -39,12 +39,11 @@
 mod cluster;
 
 pub use bitacora_client::{
-    AppendError, BitacoraClient, ClientSettings, OpenError, ReadError, ReaderSettings,
-    RecordStream, StreamAdmin, StreamDescription, StreamOptions, StreamReader, StreamWriter,
-    TakeoverPolicy, WriterSettings,
+    AppendError, BitacoraClient, ClientSettings, OpenError, ReadError, ReaderSettings, RecordStream, StreamAdmin,
+    StreamDescription, StreamOptions, StreamReader, StreamWriter, TakeoverPolicy, WriterSettings,
 };
 pub use bitacora_types::{LogRecord, SequenceNumber, SequenceRange};
 pub use cluster::{
-    ClusterConfig, ConnectError, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig, connect,
-    connect_key_value_store, connect_metadata, open_object_store, replica_connector,
+    ClusterConfig, ConnectError, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig, connect, connect_key_value_store,
+    connect_metadata, open_object_store, replica_connector,
 };

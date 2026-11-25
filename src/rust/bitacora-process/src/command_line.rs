@@ -105,9 +105,7 @@ pub enum UsageError {
 ///     })
 /// );
 /// ```
-pub fn parse_command_line(
-    arguments: impl IntoIterator<Item = String>,
-) -> Result<CommandLine, UsageError> {
+pub fn parse_command_line(arguments: impl IntoIterator<Item = String>) -> Result<CommandLine, UsageError> {
     let arguments: Vec<String> = arguments.into_iter().collect();
     for argument in &arguments {
         if argument == "--help" || argument == "-h" {

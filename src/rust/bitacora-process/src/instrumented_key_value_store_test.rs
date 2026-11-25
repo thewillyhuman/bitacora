@@ -18,15 +18,10 @@ use bytes::Bytes;
 use super::*;
 
 /// An in-memory store, the same store instrumented, and the registry it records in.
-fn instrumented_memory_store() -> (
-    MemoryKeyValueStore,
-    InstrumentedKeyValueStore,
-    MetricsRegistry,
-) {
+fn instrumented_memory_store() -> (MemoryKeyValueStore, InstrumentedKeyValueStore, MetricsRegistry) {
     let registry = MetricsRegistry::new();
     let memory_store = MemoryKeyValueStore::new();
-    let instrumented_store =
-        InstrumentedKeyValueStore::new(Arc::new(memory_store.clone()), &registry);
+    let instrumented_store = InstrumentedKeyValueStore::new(Arc::new(memory_store.clone()), &registry);
     (memory_store, instrumented_store, registry)
 }
 
@@ -75,10 +70,7 @@ async fn read_through_the_decorator_returns_what_the_wrapped_store_holds() {
 
     let read_through_the_decorator = instrumented_store.get("streams/orders").await;
 
-    assert_eq!(
-        read_through_the_decorator,
-        memory_store.get("streams/orders").await
-    );
+    assert_eq!(read_through_the_decorator, memory_store.get("streams/orders").await);
 }
 
 #[tokio::test(start_paused = true)]
@@ -91,10 +83,7 @@ async fn listing_through_the_decorator_returns_what_the_wrapped_store_holds() {
 
     let listed_through_the_decorator = instrumented_store.list("streams/").await;
 
-    assert_eq!(
-        listed_through_the_decorator,
-        memory_store.list("streams/").await
-    );
+    assert_eq!(listed_through_the_decorator, memory_store.list("streams/").await);
 }
 
 #[tokio::test(start_paused = true)]
@@ -104,10 +93,7 @@ async fn get_is_counted_under_its_name() {
     let _read = instrumented_store.get("streams/orders").await;
 
     assert_eq!(
-        exposition_value(
-            &registry,
-            "bitacora_metadata_store_requests_total{operation=\"get\"} "
-        ),
+        exposition_value(&registry, "bitacora_metadata_store_requests_total{operation=\"get\"} "),
         Some("1".to_owned())
     );
 }
@@ -119,10 +105,7 @@ async fn list_is_counted_under_its_name() {
     let _listed = instrumented_store.list("streams/").await;
 
     assert_eq!(
-        exposition_value(
-            &registry,
-            "bitacora_metadata_store_requests_total{operation=\"list\"} "
-        ),
+        exposition_value(&registry, "bitacora_metadata_store_requests_total{operation=\"list\"} "),
         Some("1".to_owned())
     );
 }

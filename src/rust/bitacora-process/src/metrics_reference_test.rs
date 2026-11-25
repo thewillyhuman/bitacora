@@ -23,15 +23,11 @@ use bitacora_types::replica_api::UnreachableReplica;
 
 use super::*;
 use crate::{
-    InstrumentedArtifactStore, InstrumentedDisk, InstrumentedKeyValueStore, InstrumentedReplica,
-    MetricsRegistry,
+    InstrumentedArtifactStore, InstrumentedDisk, InstrumentedKeyValueStore, InstrumentedReplica, MetricsRegistry,
 };
 
 /// Where the reference lies, seen from where Bazel and Cargo run the tests.
-const REFERENCE_LOCATIONS: [&str; 2] = [
-    "docs/operations/metrics.md",
-    "../../../docs/operations/metrics.md",
-];
+const REFERENCE_LOCATIONS: [&str; 2] = ["docs/operations/metrics.md", "../../../docs/operations/metrics.md"];
 
 /// Reads `docs/operations/metrics.md`.
 fn read_reference() -> String {
@@ -119,12 +115,9 @@ fn empty_registry_has_nothing_undocumented() {
 fn every_metric_of_the_decorators_is_in_the_reference() {
     let registry = MetricsRegistry::new();
     let _disk = InstrumentedDisk::new(Arc::new(MemoryDisk::new()), &registry);
-    let _replica =
-        InstrumentedReplica::new(Arc::new(UnreachableReplica::new("never called")), &registry);
-    let _metadata_store =
-        InstrumentedKeyValueStore::new(Arc::new(MemoryKeyValueStore::new()), &registry);
-    let _object_store =
-        InstrumentedArtifactStore::new(Arc::new(MemoryArtifactStore::new()), &registry);
+    let _replica = InstrumentedReplica::new(Arc::new(UnreachableReplica::new("never called")), &registry);
+    let _metadata_store = InstrumentedKeyValueStore::new(Arc::new(MemoryKeyValueStore::new()), &registry);
+    let _object_store = InstrumentedArtifactStore::new(Arc::new(MemoryArtifactStore::new()), &registry);
 
     let undocumented = undocumented_metrics(&registry.encode(), &read_reference());
 

@@ -34,9 +34,7 @@ pub(crate) async fn put(
     key: &str,
     value: &'static [u8],
 ) -> Result<TransactionOutcome, StoreUnavailable> {
-    store
-        .transact(Vec::new(), vec![put_mutation(key, value)])
-        .await
+    store.transact(Vec::new(), vec![put_mutation(key, value)]).await
 }
 
 /// Returns the mutation that writes `value` under `key`.
@@ -49,9 +47,7 @@ pub(crate) fn put_mutation(key: &str, value: &'static [u8]) -> Mutation {
 
 /// Returns the mutation that removes `key`.
 pub(crate) fn delete_mutation(key: &str) -> Mutation {
-    Mutation::Delete {
-        key: key.to_owned(),
-    }
+    Mutation::Delete { key: key.to_owned() }
 }
 
 /// Reads the revision `key` has now.

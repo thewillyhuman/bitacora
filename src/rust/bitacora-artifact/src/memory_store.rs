@@ -285,9 +285,7 @@ impl MemoryArtifactStore {
     /// A poisoned lock is taken anyway: every critical section is a single map operation or the write of
     /// one field, so a panic elsewhere cannot have left the state half changed.
     fn lock_artifacts(&self) -> MutexGuard<'_, MemoryArtifacts> {
-        self.artifacts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.artifacts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Locks the store's state for one operation of the interface, after applying the fault switches.
@@ -320,9 +318,7 @@ impl ArtifactStore for MemoryArtifactStore {
     async fn put_object(&self, object_key: &str, contents: Bytes) -> Result<(), ArtifactError> {
         validate_key(object_key)?;
         let mut artifacts = self.lock_when_available().await?;
-        artifacts
-            .objects_by_key
-            .insert(object_key.to_owned(), contents);
+        artifacts.objects_by_key.insert(object_key.to_owned(), contents);
         Ok(())
     }
 
@@ -339,11 +335,7 @@ impl ArtifactStore for MemoryArtifactStore {
     }
 
     /// Reads the whole object and cuts the range out of it, counting the read if it returned bytes.
-    async fn get_range(
-        &self,
-        object_key: &str,
-        byte_range: Range<u64>,
-    ) -> Result<Bytes, ArtifactError> {
+    async fn get_range(&self, object_key: &str, byte_range: Range<u64>) -> Result<Bytes, ArtifactError> {
         let contents = self.get_object(object_key).await?;
         let range_contents = slice_range(object_key, &contents, &byte_range)?;
         *self

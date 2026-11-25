@@ -134,12 +134,8 @@ impl Fixture {
         last_checkpoint: Option<CheckpointManifest>,
         next_sequence: u64,
     ) -> Self {
-        let artifacts = ArtifactNamespace::for_runner(
-            Arc::new(artifact_store.clone()),
-            STREAM,
-            "sequencer",
-            fencing_token,
-        );
+        let artifacts =
+            ArtifactNamespace::for_runner(Arc::new(artifact_store.clone()), STREAM, "sequencer", fencing_token);
         let catalog = ArtifactCatalog::restore_from_checkpoint(last_checkpoint, &artifacts)
             .await
             .expect("the checkpoint is restorable");
@@ -203,10 +199,7 @@ impl Fixture {
     fn ranges(&self) -> Vec<(u64, u64)> {
         let mut ranges = Vec::new();
         for entry in self.view.entries() {
-            ranges.push((
-                entry.covered_range.first().get(),
-                entry.covered_range.last().get(),
-            ));
+            ranges.push((entry.covered_range.first().get(), entry.covered_range.last().get()));
         }
         ranges
     }
@@ -265,10 +258,7 @@ async fn sealed_artifact_holds_exactly_the_records_of_its_range() {
 
     fixture.checkpoint().await;
 
-    assert_eq!(
-        fixture.sequences_in_the_artifacts().await,
-        sequences_through(5)
-    );
+    assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(5));
 }
 
 #[tokio::test]
@@ -351,10 +341,7 @@ async fn crash_before_the_first_commit_replays_everything_into_a_gapless_catalog
     replayed.checkpoint().await;
 
     assert_eq!(replayed.ranges(), [(1, 6)]);
-    assert_eq!(
-        replayed.sequences_in_the_artifacts().await,
-        sequences_through(6)
-    );
+    assert_eq!(replayed.sequences_in_the_artifacts().await, sequences_through(6));
 }
 
 #[tokio::test]
@@ -371,10 +358,7 @@ async fn crash_after_an_uncommitted_checkpoint_replays_into_a_gapless_catalog() 
     replayed.checkpoint().await;
 
     assert_eq!(replayed.ranges(), [(1, 5), (6, 12)]);
-    assert_eq!(
-        replayed.sequences_in_the_artifacts().await,
-        sequences_through(12)
-    );
+    assert_eq!(replayed.sequences_in_the_artifacts().await, sequences_through(12));
 }
 
 #[tokio::test]
@@ -388,10 +372,7 @@ async fn crash_with_records_never_sealed_replays_them() {
     replayed.apply(4, 0);
     replayed.checkpoint().await;
 
-    assert_eq!(
-        replayed.sequences_in_the_artifacts().await,
-        sequences_through(9)
-    );
+    assert_eq!(replayed.sequences_in_the_artifacts().await, sequences_through(9));
 }
 
 #[tokio::test]
@@ -439,10 +420,7 @@ async fn merged_artifact_holds_the_records_of_all_its_inputs_in_order() {
 
     fixture.seal_one_small_artifact().await;
 
-    assert_eq!(
-        fixture.sequences_in_the_artifacts().await,
-        sequences_through(3)
-    );
+    assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(3));
 }
 
 #[tokio::test]
@@ -454,11 +432,7 @@ async fn manifest_after_a_merge_no_longer_names_the_inputs() {
     let merged_manifest = fixture.seal_one_small_artifact().await;
 
     assert_eq!(merged_manifest.artifact_keys.len(), 1);
-    assert!(
-        !merged_manifest
-            .artifact_keys
-            .contains(&first_manifest.artifact_keys[0])
-    );
+    assert!(!merged_manifest.artifact_keys.contains(&first_manifest.artifact_keys[0]));
 }
 
 #[tokio::test]
@@ -469,10 +443,7 @@ async fn inputs_of_a_merge_stay_in_the_store_for_the_framework_to_delete() {
 
     fixture.seal_one_small_artifact().await;
 
-    let input = fixture
-        .artifacts
-        .get_artifact(&first_manifest.artifact_keys[0])
-        .await;
+    let input = fixture.artifacts.get_artifact(&first_manifest.artifact_keys[0]).await;
     assert!(input.is_ok());
 }
 
@@ -517,10 +488,7 @@ async fn merged_artifacts_are_merged_again_once_enough_of_them_exist() {
     fixture.checkpoint().await;
 
     assert_eq!(fixture.ranges(), [(1, 9)]);
-    assert_eq!(
-        fixture.sequences_in_the_artifacts().await,
-        sequences_through(9)
-    );
+    assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(9));
 }
 
 #[tokio::test]
@@ -643,10 +611,7 @@ async fn seal_that_fails_keeps_the_records_for_the_next_checkpoint() {
 
     assert!(failed.is_err_and(|error| error.is_transient()));
     assert_eq!(fixture.ranges(), [(1, 7)]);
-    assert_eq!(
-        fixture.sequences_in_the_artifacts().await,
-        sequences_through(7)
-    );
+    assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(7));
 }
 
 // ---- under the runner ----
@@ -671,13 +636,10 @@ impl RunningCatalog {
             checkpoint_after: Duration::from_secs(10),
             ..RunnerSettings::for_materializer(MATERIALIZER)
         };
-        let runner = MaterializerRunner::<ArtifactCatalog<Sequencer>>::start(
-            harness.dependencies(),
-            STREAM_NAME,
-            settings,
-        )
-        .await
-        .expect("the runner starts");
+        let runner =
+            MaterializerRunner::<ArtifactCatalog<Sequencer>>::start(harness.dependencies(), STREAM_NAME, settings)
+                .await
+                .expect("the runner starts");
         Self {
             progress: runner.progress(),
             view: runner.materializer().view(),
@@ -689,8 +651,7 @@ impl RunningCatalog {
     async fn committed(&mut self, sequence: u64) {
         timeout(
             PATIENCE,
-            self.progress
-                .wait_until_committed(SequenceNumber::new(sequence)),
+            self.progress.wait_until_committed(SequenceNumber::new(sequence)),
         )
         .await
         .expect("the checkpoint is committed in time")

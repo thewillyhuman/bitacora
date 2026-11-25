@@ -23,8 +23,8 @@ use bytes::Bytes;
 use tokio::time::Instant;
 
 use crate::s3_server::{
-    ACCESS_KEY, BUCKET, S3Server, SECRET_KEY, free_local_port, fresh_namespace, loopback_listener,
-    open_store, port_of, s3_server_binary, shared_s3_server,
+    ACCESS_KEY, BUCKET, S3Server, SECRET_KEY, free_local_port, fresh_namespace, loopback_listener, open_store, port_of,
+    s3_server_binary, shared_s3_server,
 };
 
 /// A request timeout short enough that a test of a silent server ends quickly, and long enough that a
@@ -56,9 +56,7 @@ fn store_at(endpoint: &str, request_timeout: Duration) -> S3ArtifactStore {
 /// # Panics
 ///
 /// Panics when `outcome` is anything else: the test expected an outage.
-fn unavailable_reason<Response: std::fmt::Debug>(
-    outcome: Result<Response, ArtifactError>,
-) -> String {
+fn unavailable_reason<Response: std::fmt::Debug>(outcome: Result<Response, ArtifactError>) -> String {
     match outcome {
         Err(ArtifactError::Unavailable { reason }) => reason,
         other => panic!("expected an unavailable error, got {other:?}"),
@@ -137,8 +135,8 @@ async fn wrong_secret_key_is_unavailable() {
         return;
     };
     let wrong_secret = S3Credentials::new(ACCESS_KEY, "not-the-secret-key");
-    let store = S3ArtifactStore::open_with_credentials(&server.settings(), &wrong_secret)
-        .expect("the settings are valid");
+    let store =
+        S3ArtifactStore::open_with_credentials(&server.settings(), &wrong_secret).expect("the settings are valid");
 
     let outcome = store.list_prefix("").await;
 
@@ -151,8 +149,8 @@ async fn unknown_access_key_is_unavailable() {
         return;
     };
     let unknown_account = S3Credentials::new("nobody-knows-this-key", SECRET_KEY);
-    let store = S3ArtifactStore::open_with_credentials(&server.settings(), &unknown_account)
-        .expect("the settings are valid");
+    let store =
+        S3ArtifactStore::open_with_credentials(&server.settings(), &unknown_account).expect("the settings are valid");
 
     let outcome = store.put_object("a", Bytes::from_static(b"x")).await;
 
@@ -167,11 +165,8 @@ async fn wrong_credentials_never_store_anything() {
     let mut settings = server.settings();
     settings.key_prefix = fresh_namespace();
     let wrong_secret = S3Credentials::new(ACCESS_KEY, "not-the-secret-key");
-    let intruder = S3ArtifactStore::open_with_credentials(&settings, &wrong_secret)
-        .expect("the settings are valid");
-    let _refused = intruder
-        .put_object("a", Bytes::from_static(b"should not land"))
-        .await;
+    let intruder = S3ArtifactStore::open_with_credentials(&settings, &wrong_secret).expect("the settings are valid");
+    let _refused = intruder.put_object("a", Bytes::from_static(b"should not land")).await;
 
     let listed = open_store(&settings).list_prefix("").await;
 

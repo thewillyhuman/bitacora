@@ -74,10 +74,9 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 
 use crate::response_conversions::{
-    append_response_from_wire, delete_segment_response_from_wire, drain_response_from_wire,
-    fence_response_from_wire, list_segments_response_from_wire, read_response_from_wire,
-    repair_segment_response_from_wire, seal_response_from_wire, status_response_from_wire,
-    upload_segment_response_from_wire,
+    append_response_from_wire, delete_segment_response_from_wire, drain_response_from_wire, fence_response_from_wire,
+    list_segments_response_from_wire, read_response_from_wire, repair_segment_response_from_wire,
+    seal_response_from_wire, status_response_from_wire, upload_segment_response_from_wire,
 };
 use crate::v1 as wire;
 use crate::v1::replica_admin_client::ReplicaAdminClient;
@@ -227,10 +226,7 @@ impl ReplicaConnector for GrpcReplicaConnector {
 ///
 /// Returns the transport's error if `address` is not a `host:port`. No
 /// name is resolved and nothing is dialled here.
-fn endpoint_of(
-    address: &str,
-    settings: &GrpcConnectorSettings,
-) -> Result<Endpoint, tonic::transport::Error> {
+fn endpoint_of(address: &str, settings: &GrpcConnectorSettings) -> Result<Endpoint, tonic::transport::Error> {
     let endpoint = Endpoint::from_shared(format!("http://{address}"))?;
     Ok(endpoint.connect_timeout(settings.connect_timeout))
 }
@@ -267,10 +263,7 @@ impl ChannelCache {
         // A panic while the lock is held cannot leave the map half
         // changed: an entry is either inserted or not. So a poisoned lock
         // is still good to use.
-        let mut channels_by_address = self
-            .channels_by_address
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut channels_by_address = self.channels_by_address.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(channel) = channels_by_address.get(address) {
             return channel.clone();
         }
@@ -377,10 +370,7 @@ fn describe_status(status: &Status) -> String {
 #[async_trait]
 impl ReplicaApi for GrpcReplica {
     /// Sends the append to `ReplicaData.Append`.
-    async fn append(
-        &self,
-        request: domain::AppendRequest,
-    ) -> Result<domain::AppendResponse, ReplicaError> {
+    async fn append(&self, request: domain::AppendRequest) -> Result<domain::AppendResponse, ReplicaError> {
         let wire_request = self.request_for_this_replica(wire::AppendRequest::from(request));
         let response = self
             .data_client()
@@ -391,10 +381,7 @@ impl ReplicaApi for GrpcReplica {
     }
 
     /// Sends the read to `ReplicaData.Read`.
-    async fn read(
-        &self,
-        request: domain::ReadRequest,
-    ) -> Result<domain::ReadResponse, ReplicaError> {
+    async fn read(&self, request: domain::ReadRequest) -> Result<domain::ReadResponse, ReplicaError> {
         let wire_request = self.request_for_this_replica(wire::ReadRequest::from(request));
         let response = self
             .data_client()
@@ -405,10 +392,7 @@ impl ReplicaApi for GrpcReplica {
     }
 
     /// Sends the fence to `ReplicaData.Fence`.
-    async fn fence(
-        &self,
-        request: domain::FenceRequest,
-    ) -> Result<domain::FenceResponse, ReplicaError> {
+    async fn fence(&self, request: domain::FenceRequest) -> Result<domain::FenceResponse, ReplicaError> {
         let wire_request = self.request_for_this_replica(wire::FenceRequest::from(request));
         let response = self
             .data_client()
@@ -419,10 +403,7 @@ impl ReplicaApi for GrpcReplica {
     }
 
     /// Sends the seal to `ReplicaData.Seal`.
-    async fn seal(
-        &self,
-        request: domain::SealRequest,
-    ) -> Result<domain::SealResponse, ReplicaError> {
+    async fn seal(&self, request: domain::SealRequest) -> Result<domain::SealResponse, ReplicaError> {
         let wire_request = self.request_for_this_replica(wire::SealRequest::from(request));
         let response = self
             .data_client()
@@ -433,10 +414,7 @@ impl ReplicaApi for GrpcReplica {
     }
 
     /// Sends the repair to `ReplicaTransfer.RepairSegment`.
-    async fn repair_segment(
-        &self,
-        request: domain::RepairRequest,
-    ) -> Result<domain::RepairResponse, ReplicaError> {
+    async fn repair_segment(&self, request: domain::RepairRequest) -> Result<domain::RepairResponse, ReplicaError> {
         let wire_request = self.request_for_this_replica(wire::RepairSegmentRequest::from(request));
         let response = self
             .transfer_client()
@@ -447,10 +425,7 @@ impl ReplicaApi for GrpcReplica {
     }
 
     /// Sends the upload to `ReplicaTransfer.UploadSegment`.
-    async fn upload_segment(
-        &self,
-        request: domain::UploadRequest,
-    ) -> Result<domain::UploadResponse, ReplicaError> {
+    async fn upload_segment(&self, request: domain::UploadRequest) -> Result<domain::UploadResponse, ReplicaError> {
         let wire_request = self.request_for_this_replica(wire::UploadSegmentRequest::from(request));
         let response = self
             .transfer_client()

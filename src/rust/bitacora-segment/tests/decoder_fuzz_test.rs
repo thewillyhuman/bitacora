@@ -18,9 +18,7 @@ use bitacora_segment::format::{
     Batch, FlushedMark, SEGMENT_HEADER_BYTES, SegmentHeader, decode_frames, scan_valid_prefix,
 };
 use bitacora_segment::tiered::{TieredFooter, TieredIndex, encode_tiered_segment};
-use bitacora_types::{
-    DeterministicRandom, Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId,
-};
+use bitacora_types::{DeterministicRandom, Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId};
 use bytes::{BufMut, Bytes, BytesMut};
 
 /// The segment every valid encoding in this file belongs to.
@@ -154,8 +152,7 @@ fn no_decoder_panics_on_a_damaged_tiered_object() {
 
     for _round in 0..ROUNDS {
         let (frames, last_sequence) = valid_frames(&mut random);
-        let object =
-            encode_tiered_segment(segment_header(), last_sequence, &frames).expect("valid segment");
+        let object = encode_tiered_segment(segment_header(), last_sequence, &frames).expect("valid segment");
         let damaged_object = damaged(&object, &mut random);
 
         decode_with_everything(&damaged_object);

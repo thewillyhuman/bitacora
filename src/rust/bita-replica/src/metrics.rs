@@ -61,16 +61,12 @@ impl ReplicaDaemonMetrics {
     /// * `registry` - The registry of the process. Register once per registry.
     pub(crate) fn register(registry: &MetricsRegistry) -> Self {
         Self {
-            segment_copies: registry
-                .gauge("replica_segment_copies", "Segment copies the replica holds"),
+            segment_copies: registry.gauge("replica_segment_copies", "Segment copies the replica holds"),
             damaged_segment_copies: registry.gauge(
                 "replica_damaged_segment_copies",
                 "Segment copies that failed a checksum or a flush and await replacement",
             ),
-            draining: registry.gauge(
-                "replica_draining",
-                "Whether the replica is draining (1) or not (0)",
-            ),
+            draining: registry.gauge("replica_draining", "Whether the replica is draining (1) or not (0)"),
             registrations: registry.counter(
                 "replica_registrations",
                 "Renewals of the replica's registration that reached the metadata store",
@@ -79,10 +75,7 @@ impl ReplicaDaemonMetrics {
                 "replica_registration_failures",
                 "Renewals of the replica's registration that failed",
             ),
-            scrubs: registry.counter(
-                "replica_scrubs",
-                "Completed scrubs of the replica's sealed segments",
-            ),
+            scrubs: registry.counter("replica_scrubs", "Completed scrubs of the replica's sealed segments"),
         }
     }
 }

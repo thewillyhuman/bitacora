@@ -281,11 +281,7 @@ impl WriterState {
     }
 
     /// Tells whether the writer should roll to a new segment now, and why.
-    pub(crate) fn roll_reason(
-        &self,
-        now: Instant,
-        settings: &WriterSettings,
-    ) -> Option<RollReason> {
+    pub(crate) fn roll_reason(&self, now: Instant, settings: &WriterSettings) -> Option<RollReason> {
         if self.is_rolling || matches!(self.status, Status::Stopped(_)) {
             return None;
         }
@@ -340,16 +336,11 @@ impl WriterState {
         self.pending
             .retain(|pending_batch| pending_batch.range.last() > self.durable_sequence);
         for pending_batch in &mut self.pending {
-            let payloads: Vec<Bytes> = pending_batch
-                .batch
-                .records()
-                .map(|record| record.payload)
-                .collect();
-            pending_batch.batch =
-                Batch::encode(new_segment.address, pending_batch.range.first(), &payloads)
-                    .unwrap_or_else(|encode_error: EncodeError| {
-                        unreachable!("a batch that was encoded once encodes again: {encode_error}")
-                    });
+            let payloads: Vec<Bytes> = pending_batch.batch.records().map(|record| record.payload).collect();
+            pending_batch.batch = Batch::encode(new_segment.address, pending_batch.range.first(), &payloads)
+                .unwrap_or_else(|encode_error: EncodeError| {
+                    unreachable!("a batch that was encoded once encodes again: {encode_error}")
+                });
         }
         self.generation += 1;
         self.segment = new_segment;
@@ -389,11 +380,8 @@ impl WriterState {
         if self.is_rolling {
             return;
         }
-        let mut acknowledged_ends: Vec<SequenceNumber> = self
-            .replicas
-            .iter()
-            .map(|replica| replica.acknowledged_end)
-            .collect();
+        let mut acknowledged_ends: Vec<SequenceNumber> =
+            self.replicas.iter().map(|replica| replica.acknowledged_end).collect();
         acknowledged_ends.sort_unstable_by(|left, right| right.cmp(left));
         let Some(quorum_end) = acknowledged_ends.get(self.write_quorum - 1).copied() else {
             return;
@@ -459,11 +447,7 @@ impl WriterState {
     }
 }
 
-fn fresh_progress(
-    replica_ids: Vec<ReplicaId>,
-    acknowledged_end: SequenceNumber,
-    now: Instant,
-) -> Vec<ReplicaProgress> {
+fn fresh_progress(replica_ids: Vec<ReplicaId>, acknowledged_end: SequenceNumber, now: Instant) -> Vec<ReplicaProgress> {
     replica_ids
         .into_iter()
         .map(|replica_id| ReplicaProgress {
@@ -525,12 +509,7 @@ mod tests {
     /// Appends `count` single-record batches and returns their receivers.
     fn enqueue(state: &mut WriterState, count: usize) -> Vec<oneshot::Receiver<CommitResult>> {
         (0..count)
-            .map(|_| {
-                state
-                    .enqueue(&[payload()])
-                    .expect("the writer is running")
-                    .1
-            })
+            .map(|_| state.enqueue(&[payload()]).expect("the writer is running").1)
             .collect()
     }
 
@@ -576,8 +555,7 @@ mod tests {
         let rejected = state.enqueue(&[oversized]).map(|(range, _receiver)| range);
         let next = state.enqueue(&[payload()]).expect("accepted").0;
         assert!(
-            matches!(rejected, Err(AppendError::Rejected(_)))
-                && next.first() == SequenceNumber::new(FIRST_SEQUENCE)
+            matches!(rejected, Err(AppendError::Rejected(_))) && next.first() == SequenceNumber::new(FIRST_SEQUENCE)
         );
     }
 
@@ -748,10 +726,7 @@ mod tests {
         let had_capacity_when_full = state.has_capacity(&settings);
         acknowledge(&mut state, 0, 101);
         acknowledge(&mut state, 1, 101);
-        assert_eq!(
-            (had_capacity_when_full, state.has_capacity(&settings)),
-            (false, true)
-        );
+        assert_eq!((had_capacity_when_full, state.has_capacity(&settings)), (false, true));
     }
 
     #[tokio::test(start_paused = true)]
@@ -811,10 +786,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn healthy_young_segment_does_not_roll() {
         let state = new_state();
-        assert_eq!(
-            state.roll_reason(Instant::now(), &WriterSettings::default()),
-            None
-        );
+        assert_eq!(state.roll_reason(Instant::now(), &WriterSettings::default()), None);
     }
 
     #[tokio::test(start_paused = true)]

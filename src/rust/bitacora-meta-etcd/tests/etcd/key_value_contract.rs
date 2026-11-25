@@ -65,10 +65,7 @@ async fn written_value_is_read_back() {
 
     let stored = store.get("streams/orders").await.expect("get");
 
-    assert_eq!(
-        stored.map(|stored| stored.value),
-        Some(Bytes::from_static(b"v1"))
-    );
+    assert_eq!(stored.map(|stored| stored.value), Some(Bytes::from_static(b"v1")));
 }
 
 #[tokio::test]
@@ -384,17 +381,11 @@ async fn transaction_writes_all_its_keys_at_one_revision() {
     let store = etcd.store_in_fresh_namespace().await;
 
     store
-        .transact(
-            Vec::new(),
-            vec![put_mutation("a", b"1"), put_mutation("b", b"2")],
-        )
+        .transact(Vec::new(), vec![put_mutation("a", b"1"), put_mutation("b", b"2")])
         .await
         .expect("transact");
 
-    assert_eq!(
-        revision_of(&store, "a").await,
-        revision_of(&store, "b").await
-    );
+    assert_eq!(revision_of(&store, "a").await, revision_of(&store, "b").await);
 }
 
 /// Two writers that both saw the key absent: etcd must let exactly one of
@@ -483,10 +474,7 @@ async fn listing_larger_than_the_default_response_limit_is_read() {
             key: format!("streams/{value_number}"),
             value: Bytes::from(vec![b'x'; LARGE_VALUE_BYTES]),
         };
-        store
-            .transact(Vec::new(), vec![mutation])
-            .await
-            .expect("put");
+        store.transact(Vec::new(), vec![mutation]).await.expect("put");
     }
 
     let listed = store.list("streams/").await.expect("list");
@@ -560,10 +548,7 @@ async fn stores_with_the_same_prefix_share_their_data() {
 
     let stored = other_store.get("streams/orders").await.expect("get");
 
-    assert_eq!(
-        stored.map(|stored| stored.value),
-        Some(Bytes::from_static(b"v1"))
-    );
+    assert_eq!(stored.map(|stored| stored.value), Some(Bytes::from_static(b"v1")));
 }
 
 // ---- what etcd refuses ----

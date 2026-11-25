@@ -157,8 +157,7 @@ impl S3Server {
         let buckets_directory = directory.path().join("buckets");
         let metadata_directory = directory.path().join("metadata");
         std::fs::create_dir_all(buckets_directory.join(BUCKET)).expect("the bucket can be created");
-        std::fs::create_dir_all(&metadata_directory)
-            .expect("the metadata directory can be created");
+        std::fs::create_dir_all(&metadata_directory).expect("the metadata directory can be created");
         let listen_address = format!("127.0.0.1:{port}");
 
         let mut command = Command::new(binary);
@@ -180,10 +179,7 @@ impl S3Server {
             .stdin(Stdio::null());
         let process = match command.spawn() {
             Ok(process) => process,
-            Err(error) => panic!(
-                "cannot start the S3 server from {}: {error}",
-                binary.display()
-            ),
+            Err(error) => panic!("cannot start the S3 server from {}: {error}", binary.display()),
         };
 
         let mut server = Self {
@@ -209,10 +205,7 @@ impl S3Server {
             if probe.list_prefix("readiness/").await.is_ok() {
                 return;
             }
-            let exit_status = self
-                .process
-                .try_wait()
-                .expect("the server's state can be read");
+            let exit_status = self.process.try_wait().expect("the server's state can be read");
             if let Some(exit_status) = exit_status {
                 panic!("the S3 server stopped while starting: {exit_status}");
             }
@@ -269,8 +262,7 @@ impl Drop for S3Server {
 /// Panics when the settings are invalid: the tests of invalid settings do not need a server.
 pub(crate) fn open_store(settings: &S3Settings) -> S3ArtifactStore {
     let credentials = S3Credentials::new(ACCESS_KEY, SECRET_KEY);
-    S3ArtifactStore::open_with_credentials(settings, &credentials)
-        .expect("the settings of a test store are valid")
+    S3ArtifactStore::open_with_credentials(settings, &credentials).expect("the settings of a test store are valid")
 }
 
 /// Returns a key prefix that no call has returned before.
@@ -354,9 +346,7 @@ pub(crate) fn loopback_listener() -> TcpListener {
 
 /// Returns the port `listener` is bound to.
 pub(crate) fn port_of(listener: &TcpListener) -> u16 {
-    let address = listener
-        .local_addr()
-        .expect("a bound listener has an address");
+    let address = listener.local_addr().expect("a bound listener has an address");
     address.port()
 }
 

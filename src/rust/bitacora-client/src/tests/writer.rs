@@ -38,10 +38,7 @@ async fn append_many(writer: &StreamWriter, count: u64) {
 }
 
 /// Starts an append in its own task, so the test can go on while it waits.
-fn append_in_background(
-    writer: &Arc<StreamWriter>,
-    text: &str,
-) -> JoinHandle<Result<SequenceNumber, AppendError>> {
+fn append_in_background(writer: &Arc<StreamWriter>, text: &str) -> JoinHandle<Result<SequenceNumber, AppendError>> {
     let writer = Arc::clone(writer);
     let payload = record(text);
     tokio::spawn(async move { writer.append(payload).await })
@@ -49,10 +46,7 @@ fn append_in_background(
 
 /// Simulates a compute node that dies with an append in flight, and
 /// returns once nothing of the writer is running any more.
-async fn crash(
-    writer: Arc<StreamWriter>,
-    in_flight: JoinHandle<Result<SequenceNumber, AppendError>>,
-) {
+async fn crash(writer: Arc<StreamWriter>, in_flight: JoinHandle<Result<SequenceNumber, AppendError>>) {
     in_flight.abort();
     drop(writer);
     // The aborted task held the last handle to the writer. Waiting for it
@@ -75,12 +69,7 @@ async fn opening_a_fresh_stream_claims_the_first_epoch_and_segment() {
             stream.segments[0].first_sequence,
             stream.writer.map(|lease| lease.writer_identity)
         ),
-        (
-            Epoch::new(1),
-            1,
-            SequenceNumber::FIRST,
-            Some("compute-1".to_owned())
-        )
+        (Epoch::new(1), 1, SequenceNumber::FIRST, Some("compute-1".to_owned()))
     );
 }
 
@@ -371,10 +360,7 @@ async fn writer_rolls_when_the_segment_reaches_its_target_size() {
         .await
         .expect("the writer opens");
     cluster.place_standby(&[0, 1, 2]).await;
-    writer
-        .append(Bytes::from(vec![0xAB; 3 * 1024]))
-        .await
-        .expect("commits");
+    writer.append(Bytes::from(vec![0xAB; 3 * 1024])).await.expect("commits");
     settle(Duration::from_secs(1)).await;
     let stream = cluster.stream().await;
     assert_eq!(
@@ -432,10 +418,7 @@ async fn old_writer_is_fenced_after_a_takeover() {
     append_many(&first_writer, 2).await;
     cluster.place_standby(&[0, 1, 2]).await;
     let _second_writer = open(&cluster, "compute-2").await;
-    assert_eq!(
-        first_writer.append(record("too late")).await,
-        Err(AppendError::Fenced)
-    );
+    assert_eq!(first_writer.append(record("too late")).await, Err(AppendError::Fenced));
 }
 
 #[tokio::test(start_paused = true)]

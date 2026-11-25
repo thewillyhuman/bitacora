@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceResponse, ReadRequest, ReadResponse, RepairRequest,
-    RepairResponse, ReplicaApi, ReplicaError, SealResponse, SegmentStatus,
+    AppendRequest, AppendResponse, FenceResponse, ReadRequest, ReadResponse, RepairRequest, RepairResponse, ReplicaApi,
+    ReplicaError, SealResponse, SegmentStatus,
 };
 use bitacora_types::{Epoch, SegmentAddress, SequenceNumber};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -99,13 +99,7 @@ impl SegmentHandle {
     ) -> Self {
         let (command_sender, command_receiver) = mpsc::channel(COMMAND_QUEUE_LENGTH);
         let (progress_sender, progress_receiver) = watch::channel(Progress::of(&copy));
-        tasks.spawn(run(
-            address,
-            copy,
-            command_receiver,
-            progress_sender,
-            on_write_failure,
-        ));
+        tasks.spawn(run(address, copy, command_receiver, progress_sender, on_write_failure));
         Self {
             commands: command_sender,
             progress: progress_receiver,
@@ -133,10 +127,7 @@ impl SegmentHandle {
         self.ask(|reply| Command::Fence { epoch, reply }).await
     }
 
-    pub(crate) async fn seal(
-        &self,
-        sealed_end: SequenceNumber,
-    ) -> Result<SealResponse, ReplicaError> {
+    pub(crate) async fn seal(&self, sealed_end: SequenceNumber) -> Result<SealResponse, ReplicaError> {
         self.ask(|reply| Command::Seal { sealed_end, reply }).await
     }
 
@@ -173,11 +164,7 @@ impl SegmentHandle {
 
     /// Waits until a reader at `from_sequence` has something to read or the
     /// segment is sealed, for at most `longest_wait`.
-    pub(crate) async fn wait_until_readable(
-        &self,
-        from_sequence: SequenceNumber,
-        longest_wait: Duration,
-    ) {
+    pub(crate) async fn wait_until_readable(&self, from_sequence: SequenceNumber, longest_wait: Duration) {
         let mut progress = self.progress.clone();
         let has_news = |progress: &Progress| {
             progress.sealed_end.is_some()
@@ -187,8 +174,7 @@ impl SegmentHandle {
         };
         // Both outcomes lead to the same next step: the caller reads and
         // answers with whatever is readable, which may be nothing.
-        let _timed_out_or_stopped =
-            tokio::time::timeout(longest_wait, progress.wait_for(has_news)).await;
+        let _timed_out_or_stopped = tokio::time::timeout(longest_wait, progress.wait_for(has_news)).await;
     }
 
     /// Sends one command and awaits its answer.
@@ -238,12 +224,7 @@ async fn run(
                 admission,
                 pace,
                 reply,
-            } => drop(
-                reply.send(
-                    copy.repair(&request, source.as_ref(), admission, pace)
-                        .await,
-                ),
-            ),
+            } => drop(reply.send(copy.repair(&request, source.as_ref(), admission, pace).await)),
             Command::Verify { reply } => {
                 copy.verify().await;
                 drop(reply.send(Ok(())));

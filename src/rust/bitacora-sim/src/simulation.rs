@@ -14,9 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
-use bitacora_client::{
-    BitacoraClient, ClientSettings, ReadError, ReaderSettings, TakeoverPolicy, WriterSettings,
-};
+use bitacora_client::{BitacoraClient, ClientSettings, ReadError, ReaderSettings, TakeoverPolicy, WriterSettings};
 use bitacora_controller::{Controller, ControllerSettings};
 use bitacora_kv::{KV_MATERIALIZER, KvDependencies, KvStore};
 use bitacora_meta::{CopyState, PlacementPolicy, RetentionPolicy, SegmentRecord, StreamRecord};
@@ -238,9 +236,7 @@ impl SimulationReport {
         self.events
             .iter()
             .flat_map(|timed| format!("{timed:?}").into_bytes())
-            .fold(OFFSET_BASIS, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(PRIME)
-            })
+            .fold(OFFSET_BASIS, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(PRIME))
     }
 
     /// Describes what went wrong, with the seed that reproduces it.
@@ -278,9 +274,7 @@ pub fn run(config: &SimulationConfig) -> SimulationReport {
         // Tokio makes a few random choices of its own, such as which waiter
         // of a watch channel wakes first. Seeding them is what makes a run
         // replay exactly.
-        .rng_seed(tokio::runtime::RngSeed::from_bytes(
-            &config.seed.to_le_bytes(),
-        ))
+        .rng_seed(tokio::runtime::RngSeed::from_bytes(&config.seed.to_le_bytes()))
         .build()
         .expect("a current-thread runtime needs nothing from the system")
         .block_on(simulate(config.clone()))
@@ -356,12 +350,7 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     world
         .cluster
         .metadata()
-        .create_stream(
-            STREAM,
-            ReplicationSettings::DEFAULT,
-            RetentionPolicy::default(),
-            None,
-        )
+        .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
         .await
         .expect("a fresh metadata store accepts a stream");
     KvStore::initialize(world.cluster.metadata(), STREAM)
@@ -372,10 +361,7 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     let mut background = JoinSet::new();
     background.spawn(renew_registrations(Arc::clone(&world)));
     background.spawn(run_controller(Arc::clone(&world)));
-    background.spawn(stop_replicas_whose_disk_failed(
-        Arc::clone(&world),
-        random.fork(),
-    ));
+    background.spawn(stop_replicas_whose_disk_failed(Arc::clone(&world), random.fork()));
     background.spawn(scrub_replicas(Arc::clone(&world)));
 
     let (designated_writer, _) = watch::channel(0_usize);
@@ -423,9 +409,7 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
         node.crash();
         node.restart().await;
     }
-    world
-        .history
-        .fault("healed: every fault removed, every node restarted");
+    world.history.fault("healed: every fault removed, every node restarted");
 
     // Audit.
     let settled = match timeout(config.settle_timeout, audit(&world)).await {
@@ -443,11 +427,7 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
 }
 
 /// Checks the history of a finished run and summarizes it.
-fn judge(
-    config: &SimulationConfig,
-    events: &[TimedEvent],
-    settled: Result<u64, String>,
-) -> SimulationReport {
+fn judge(config: &SimulationConfig, events: &[TimedEvent], settled: Result<u64, String>) -> SimulationReport {
     let mut violations = check(events);
     violations.extend(check_linearizability(events));
     let stuck = match settled {
@@ -457,12 +437,7 @@ fn judge(
         }
         Err(reason) => Some(reason),
     };
-    let count = |is_counted: fn(&Event) -> bool| {
-        events
-            .iter()
-            .filter(|timed| is_counted(&timed.event))
-            .count()
-    };
+    let count = |is_counted: fn(&Event) -> bool| events.iter().filter(|timed| is_counted(&timed.event)).count();
     SimulationReport {
         seed: config.seed,
         events: events.to_vec(),
@@ -486,12 +461,8 @@ fn judge(
 /// Says what the healed cluster was still waiting for when time ran out.
 async fn describe_stuck_cluster(world: &World, waited: Duration) -> String {
     use std::fmt::Write as _;
-    let step = *world
-        .audit_step
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let mut description =
-        format!("the healed cluster did not settle within {waited:?}; it was {step}");
+    let step = *world.audit_step.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut description = format!("the healed cluster did not settle within {waited:?}; it was {step}");
     if let Ok(stream) = world.cluster.metadata().get_stream(STREAM).await {
         let _ = write!(
             description,
@@ -635,9 +606,7 @@ async fn run_reader(world: Arc<World>, mut random: DeterministicRandom) {
         loop {
             match timeout_at(session_ends_at, following.next()).await {
                 Ok(Some(Ok(record))) => {
-                    world
-                        .history
-                        .record_read(session, record.sequence, record.payload);
+                    world.history.record_read(session, record.sequence, record.payload);
                     read_through = read_through.max(record.sequence);
                 }
                 Ok(Some(Err(ReadError::Truncated { low_water_mark }))) => {
@@ -666,8 +635,7 @@ async fn run_nemesis(
     if kinds.is_empty() {
         std::future::pending::<()>().await;
     }
-    let mean_gap_millis =
-        u64::try_from(config.mean_time_between_faults.as_millis()).unwrap_or(u64::MAX);
+    let mean_gap_millis = u64::try_from(config.mean_time_between_faults.as_millis()).unwrap_or(u64::MAX);
     let mut repairs = JoinSet::new();
     let mut has_lost_a_disk = false;
     loop {
@@ -686,11 +654,9 @@ async fn run_nemesis(
                     continue;
                 }
                 let is_torn = kind == FaultKind::TornCrash;
-                world.history.fault(describe(if is_torn {
-                    "crashes with torn writes"
-                } else {
-                    "crashes"
-                }));
+                world
+                    .history
+                    .fault(describe(if is_torn { "crashes with torn writes" } else { "crashes" }));
                 crash_node(&world, node_number, is_torn, &mut random);
                 let world = Arc::clone(&world);
                 repairs.spawn(async move {
@@ -713,9 +679,7 @@ async fn run_nemesis(
                         ..LinkFault::default()
                     },
                 };
-                world
-                    .history
-                    .fault(describe(&format!("link gets {fault:?}")));
+                world.history.fault(describe(&format!("link gets {fault:?}")));
                 node.link().set_fault(fault);
                 let world = Arc::clone(&world);
                 repairs.spawn(async move {
@@ -753,9 +717,7 @@ async fn run_nemesis(
             }
             FaultKind::WriterCrash => {
                 let compute_node = *designated_writer.borrow();
-                world
-                    .history
-                    .fault(format!("compute node {compute_node} crashes"));
+                world.history.fault(format!("compute node {compute_node} crashes"));
                 crash_signals[compute_node].send_modify(|crash_count| *crash_count += 1);
             }
             FaultKind::SilentCorruption => corrupt_a_stored_byte(&world, &mut random).await,
@@ -792,9 +754,7 @@ fn crash_node(world: &World, node_number: usize, is_torn: bool, random: &mut Det
     let node = &world.cluster.nodes()[node_number];
     if is_torn {
         let mut torn = random.fork();
-        node.crash_keeping(|path, durable, visible| {
-            tear_unflushed_writes(path, durable, visible, &mut torn)
-        });
+        node.crash_keeping(|path, durable, visible| tear_unflushed_writes(path, durable, visible, &mut torn));
     } else {
         node.crash();
     }
@@ -814,9 +774,7 @@ async fn corrupt_a_stored_byte(world: &World, random: &mut DeterministicRandom) 
     let Some(path) = random.choose(&segment_files) else {
         return;
     };
-    let file_bytes = disk
-        .durable_content(path)
-        .map_or(0, |content| content.len());
+    let file_bytes = disk.durable_content(path).map_or(0, |content| content.len());
     if file_bytes == 0 {
         return;
     }
@@ -832,12 +790,7 @@ async fn corrupt_a_stored_byte(world: &World, random: &mut DeterministicRandom) 
 /// flushed, plus a random-length part of what was written after it, whose
 /// last byte is damaged. State files are replaced atomically and never
 /// torn.
-fn tear_unflushed_writes(
-    path: &str,
-    durable: &[u8],
-    visible: &[u8],
-    random: &mut DeterministicRandom,
-) -> Vec<u8> {
+fn tear_unflushed_writes(path: &str, durable: &[u8], visible: &[u8], random: &mut DeterministicRandom) -> Vec<u8> {
     let is_segment_file = path.rsplit('.').next() == Some("seg");
     let longest = durable.len().max(visible.len());
     // What was written since the last flush need not be one run of bytes:
@@ -869,10 +822,7 @@ fn tear_unflushed_writes(
 /// do it.
 async fn audit(world: &World) -> Result<u64, String> {
     let now_waiting_for = |step: &'static str| {
-        *world
-            .audit_step
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = step;
+        *world.audit_step.lock().unwrap_or_else(PoisonError::into_inner) = step;
     };
     now_waiting_for("opening a store and committing a final record");
     let mut attempt = 0_u64;
@@ -911,9 +861,7 @@ async fn audit(world: &World) -> Result<u64, String> {
         {
             let session = world.history.reader_started(low_water_mark);
             for record in records {
-                world
-                    .history
-                    .record_read(session, record.sequence, record.payload);
+                world.history.record_read(session, record.sequence, record.payload);
             }
             check_truncation(world, low_water_mark).await?;
             now_waiting_for("waiting for every sealed segment to have all its copies good");
@@ -938,9 +886,7 @@ async fn check_truncation(world: &World, low_water_mark: SequenceNumber) -> Resu
         .map_err(|meta_error| meta_error.to_string())?
         .checkpoint;
     if low_water_mark > checkpoint.next() {
-        world
-            .history
-            .truncated_past_checkpoint(checkpoint, low_water_mark);
+        world.history.truncated_past_checkpoint(checkpoint, low_water_mark);
     }
     Ok(())
 }
@@ -979,10 +925,7 @@ fn is_where_it_belongs(stream: &StreamRecord, segment: &SegmentRecord) -> bool {
             .as_ref()
             .is_some_and(|tiered| tiered.are_local_copies_dropped);
     let has_every_good_copy = segment.copies.len() == stream.replication.replica_count()
-        && segment
-            .copies
-            .iter()
-            .all(|copy| copy.state == CopyState::Good);
+        && segment.copies.iter().all(|copy| copy.state == CopyState::Good);
     is_released || has_every_good_copy
 }
 
@@ -991,12 +934,7 @@ mod tests {
     use super::*;
 
     fn torn(durable: &[u8], visible: &[u8], seed: u64) -> Vec<u8> {
-        tear_unflushed_writes(
-            "7/3.seg",
-            durable,
-            visible,
-            &mut DeterministicRandom::from_seed(seed),
-        )
+        tear_unflushed_writes("7/3.seg", durable, visible, &mut DeterministicRandom::from_seed(seed))
     }
 
     #[test]
@@ -1004,11 +942,7 @@ mod tests {
         let durable = b"flushed-\0\0\0\0".to_vec();
         let visible = b"flushed-tail".to_vec();
         for seed in 0..50 {
-            assert_eq!(
-                torn(&durable, &visible, seed)[..8],
-                durable[..8],
-                "seed {seed}"
-            );
+            assert_eq!(torn(&durable, &visible, seed)[..8], durable[..8], "seed {seed}");
         }
     }
 
@@ -1044,11 +978,7 @@ mod tests {
         let visible = b"mark-B|flushed-data|tail".to_vec();
         for seed in 0..50 {
             let survived = torn(&durable, &visible, seed);
-            assert_eq!(
-                survived[6..20],
-                durable[6..20],
-                "seed {seed} damaged flushed bytes"
-            );
+            assert_eq!(survived[6..20], durable[6..20], "seed {seed} damaged flushed bytes");
         }
     }
 

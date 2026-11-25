@@ -259,11 +259,7 @@ pub trait ArtifactStore: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    async fn get_range(
-        &self,
-        object_key: &str,
-        byte_range: Range<u64>,
-    ) -> Result<Bytes, ArtifactError>;
+    async fn get_range(&self, object_key: &str, byte_range: Range<u64>) -> Result<Bytes, ArtifactError>;
 
     /// Deletes the object stored under `object_key`.
     ///
@@ -377,9 +373,7 @@ pub fn validate_key(object_key: &str) -> Result<(), ArtifactError> {
 
 /// Whether one `/`-separated component of a key is allowed: non-empty and not a directory reference.
 fn is_valid_key_component(component: &str) -> bool {
-    !component.is_empty()
-        && component != CURRENT_DIRECTORY_COMPONENT
-        && component != PARENT_DIRECTORY_COMPONENT
+    !component.is_empty() && component != CURRENT_DIRECTORY_COMPONENT && component != PARENT_DIRECTORY_COMPONENT
 }
 
 /// Cuts `byte_range` out of an object's contents, as every backend that holds whole objects does.
@@ -405,11 +399,7 @@ fn is_valid_key_component(component: &str) -> bool {
 /// # Panics
 ///
 /// Panics if the object is larger than 2^64 bytes, which no object in memory can be.
-pub(crate) fn slice_range(
-    object_key: &str,
-    contents: &Bytes,
-    byte_range: &Range<u64>,
-) -> Result<Bytes, ArtifactError> {
+pub(crate) fn slice_range(object_key: &str, contents: &Bytes, byte_range: &Range<u64>) -> Result<Bytes, ArtifactError> {
     let size_bytes = u64::try_from(contents.len()).expect("lengths fit in 64 bits");
     let is_inside_the_object = byte_range.start <= byte_range.end && byte_range.end <= size_bytes;
     if !is_inside_the_object {

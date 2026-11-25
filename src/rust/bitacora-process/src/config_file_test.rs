@@ -72,9 +72,8 @@ fn error_message_for(file_text: &str) -> String {
 
 #[test]
 fn valid_file_is_loaded() {
-    let (_directory, path) = write_config(
-        "listen_address = \"0.0.0.0:7000\"\nscrub_interval_seconds = 60\n\n[log]\nlevel = \"debug\"\n",
-    );
+    let (_directory, path) =
+        write_config("listen_address = \"0.0.0.0:7000\"\nscrub_interval_seconds = 60\n\n[log]\nlevel = \"debug\"\n");
 
     let loaded: Result<TestConfig, ConfigFileError> = load_config_file(&path);
 
@@ -129,10 +128,7 @@ fn file_that_is_not_toml_is_reported_as_invalid() {
 
     let loaded: Result<TestConfig, ConfigFileError> = load_config_file(&path);
 
-    assert!(
-        matches!(loaded, Err(ConfigFileError::Invalid { .. })),
-        "{loaded:?}"
-    );
+    assert!(matches!(loaded, Err(ConfigFileError::Invalid { .. })), "{loaded:?}");
 }
 
 #[test]
@@ -146,16 +142,12 @@ fn error_for_an_invalid_file_names_the_file() {
 fn unknown_field_is_refused_by_name() {
     let message = error_message_for("listen_address = \"0.0.0.0:7000\"\nlisten_adress = \"x\"\n");
 
-    assert!(
-        message.contains("unknown field `listen_adress`"),
-        "{message}"
-    );
+    assert!(message.contains("unknown field `listen_adress`"), "{message}");
 }
 
 #[test]
 fn unknown_field_in_a_nested_table_is_refused_by_name() {
-    let message =
-        error_message_for("listen_address = \"0.0.0.0:7000\"\n\n[log]\nlevl = \"debug\"\n");
+    let message = error_message_for("listen_address = \"0.0.0.0:7000\"\n\n[log]\nlevl = \"debug\"\n");
 
     assert!(message.contains("unknown field `levl`"), "{message}");
 }
@@ -164,26 +156,19 @@ fn unknown_field_in_a_nested_table_is_refused_by_name() {
 fn missing_required_field_is_named() {
     let message = error_message_for("scrub_interval_seconds = 60\n");
 
-    assert!(
-        message.contains("missing field `listen_address`"),
-        "{message}"
-    );
+    assert!(message.contains("missing field `listen_address`"), "{message}");
 }
 
 #[test]
 fn value_of_the_wrong_type_is_reported_with_its_field() {
-    let message = error_message_for(
-        "listen_address = \"0.0.0.0:7000\"\nscrub_interval_seconds = \"often\"\n",
-    );
+    let message = error_message_for("listen_address = \"0.0.0.0:7000\"\nscrub_interval_seconds = \"often\"\n");
 
     assert!(message.contains("scrub_interval_seconds"), "{message}");
 }
 
 #[test]
 fn value_of_the_wrong_type_is_reported_with_what_was_expected() {
-    let message = error_message_for(
-        "listen_address = \"0.0.0.0:7000\"\nscrub_interval_seconds = \"often\"\n",
-    );
+    let message = error_message_for("listen_address = \"0.0.0.0:7000\"\nscrub_interval_seconds = \"often\"\n");
 
     assert!(message.contains("invalid type: string"), "{message}");
 }

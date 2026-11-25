@@ -76,10 +76,7 @@ fn example_configuration_is_valid() {
 fn example_configuration_names_three_failure_domains() {
     let example = parse(&read_example()).expect("the example is well-formed");
 
-    assert_eq!(
-        example.failure_domains,
-        ["zone-a", "rack-12", "replica-a.example.org"]
-    );
+    assert_eq!(example.failure_domains, ["zone-a", "rack-12", "replica-a.example.org"]);
 }
 
 #[test]
@@ -153,10 +150,7 @@ fn replica_has_no_failure_domains_by_default() {
 fn storage_table_overrides_the_replicas_defaults() {
     let file_text = format!("{MINIMAL_CONFIG}\n[storage]\nrepair_bytes_per_second = 1024\n");
 
-    let settings = parse(&file_text)
-        .expect("well-formed")
-        .validate()
-        .expect("valid");
+    let settings = parse(&file_text).expect("well-formed").validate().expect("valid");
 
     assert_eq!(settings.replica.repair_bytes_per_second, 1024);
 }
@@ -305,10 +299,7 @@ fn registration_interval_of_zero_is_refused() {
     let mut config = minimal_config();
     config.registration_interval_seconds = 0;
 
-    assert_eq!(
-        refused_setting(config),
-        Some("registration_interval_seconds")
-    );
+    assert_eq!(refused_setting(config), Some("registration_interval_seconds"));
 }
 
 #[test]
@@ -324,10 +315,7 @@ fn preallocation_below_one_page_is_refused() {
     let mut config = minimal_config();
     config.storage.preallocated_segment_bytes = 4095;
 
-    assert_eq!(
-        refused_setting(config),
-        Some("storage.preallocated_segment_bytes")
-    );
+    assert_eq!(refused_setting(config), Some("storage.preallocated_segment_bytes"));
 }
 
 #[test]
@@ -335,10 +323,7 @@ fn threshold_above_the_whole_disk_is_refused() {
     let mut config = minimal_config();
     config.storage.refuse_appends_at_used_percent = 101;
 
-    assert_eq!(
-        refused_setting(config),
-        Some("storage.refuse_appends_at_used_percent")
-    );
+    assert_eq!(refused_setting(config), Some("storage.refuse_appends_at_used_percent"));
 }
 
 #[test]
@@ -358,10 +343,7 @@ fn append_threshold_below_the_new_segment_threshold_is_refused() {
     config.storage.refuse_new_segments_at_used_percent = 90;
     config.storage.refuse_appends_at_used_percent = 80;
 
-    assert_eq!(
-        refused_setting(config),
-        Some("storage.refuse_appends_at_used_percent")
-    );
+    assert_eq!(refused_setting(config), Some("storage.refuse_appends_at_used_percent"));
 }
 
 #[test]
@@ -369,10 +351,7 @@ fn error_names_the_setting_and_the_reason() {
     let mut config = minimal_config();
     config.advertised_address = "replica-a.example.org".to_owned();
 
-    let message = config
-        .validate()
-        .expect_err("the address has no port")
-        .to_string();
+    let message = config.validate().expect_err("the address has no port").to_string();
 
     assert_eq!(
         message,

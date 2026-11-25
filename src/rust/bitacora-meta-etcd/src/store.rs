@@ -60,13 +60,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bitacora_meta::{
-    Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome,
-    VersionedValue,
+    Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome, VersionedValue,
 };
 use bytes::Bytes;
 use etcd_client::{
-    Client, Compare, CompareOp, ConnectOptions, GetOptions, KeyValue, KvClient, SortOrder,
-    SortTarget, Txn, TxnOp,
+    Client, Compare, CompareOp, ConnectOptions, GetOptions, KeyValue, KvClient, SortOrder, SortTarget, Txn, TxnOp,
 };
 
 use crate::settings::{EtcdSettings, InvalidEtcdSettings};
@@ -216,9 +214,7 @@ impl EtcdKeyValueStore {
         };
         let (etcd_key, value) = key_value.into_key_value();
         let Ok(etcd_key) = String::from_utf8(etcd_key) else {
-            return Err(unavailable(
-                "etcd returned a key that is not UTF-8".to_owned(),
-            ));
+            return Err(unavailable("etcd returned a key that is not UTF-8".to_owned()));
         };
         let Some(key) = etcd_key.strip_prefix(&self.key_prefix) else {
             return Err(unavailable(format!(
@@ -239,9 +235,7 @@ impl EtcdKeyValueStore {
         match condition {
             // etcd reports create revision zero for a key that does not
             // exist, and a positive one for every key that does.
-            Condition::IsAbsent { key } => {
-                Compare::create_revision(self.etcd_key(&key), CompareOp::Equal, 0)
-            }
+            Condition::IsAbsent { key } => Compare::create_revision(self.etcd_key(&key), CompareOp::Equal, 0),
             Condition::HasRevision { key, revision } => {
                 let etcd_key = self.etcd_key(&key);
                 match assignable_revision(revision) {
@@ -281,10 +275,7 @@ impl KeyValueStore for EtcdKeyValueStore {
 
     /// Reads every key under a prefix with one linearizable range request,
     /// so all entries are from the same revision of the cluster.
-    async fn list(
-        &self,
-        key_prefix: &str,
-    ) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
+    async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
         let mut client = self.key_value_client();
         let options = GetOptions::new()
             .with_prefix()
@@ -396,10 +387,7 @@ mod tests {
     async fn connecting_without_endpoints_is_refused() {
         let store = EtcdKeyValueStore::connect(settings(&[])).await;
 
-        assert_eq!(
-            store.err(),
-            Some(InvalidEtcdSettings::because("there is no endpoint"))
-        );
+        assert_eq!(store.err(), Some(InvalidEtcdSettings::because("there is no endpoint")));
     }
 
     #[tokio::test]

@@ -115,8 +115,7 @@ pub(crate) fn violated_invariant(state: &State) -> Option<Invariant> {
 
 /// Every sequence number the model can assign, in order.
 fn sequences() -> impl Iterator<Item = Sequence> {
-    (FIRST_SEQUENCE_SLOT..SEQUENCE_SLOTS)
-        .map(|slot| Sequence::try_from(slot).expect("slots are few"))
+    (FIRST_SEQUENCE_SLOT..SEQUENCE_SLOTS).map(|slot| Sequence::try_from(slot).expect("slots are few"))
 }
 
 /// I1: every record a writer reported as committed is still part of the stream, stored durably, and no
@@ -127,8 +126,7 @@ fn holds_durability(state: &State) -> bool {
             continue;
         };
         let readable_author = state.observations.ever_readable[usize::from(sequence)];
-        let was_read_as_another_record =
-            readable_author.is_some_and(|read_author| read_author != author);
+        let was_read_as_another_record = readable_author.is_some_and(|read_author| read_author != author);
         if !state.stream_holds(sequence, author) || was_read_as_another_record {
             return false;
         }
@@ -204,8 +202,7 @@ fn holds_single_writer(state: &State) -> bool {
 /// fenced a recovery quorum.
 fn did_old_epoch_commit_a_late_record(state: &State) -> bool {
     for sequence in sequences() {
-        let was_assigned_after_takeover =
-            state.observations.assigned_after_takeover[usize::from(sequence)];
+        let was_assigned_after_takeover = state.observations.assigned_after_takeover[usize::from(sequence)];
         let committed_author = state.observations.committed[usize::from(sequence)];
         if was_assigned_after_takeover && committed_author == Some(FIRST_EPOCH) {
             return true;

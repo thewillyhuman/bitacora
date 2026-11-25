@@ -54,15 +54,13 @@ mod sweeper;
 mod test_harness;
 
 pub use artifact_catalog::{
-    ArtifactBuilder, ArtifactCatalog, ArtifactDescriptor, CatalogEntry, CatalogView,
-    CompactionPolicy, decode_catalog,
+    ArtifactBuilder, ArtifactCatalog, ArtifactDescriptor, CatalogEntry, CatalogView, CompactionPolicy, decode_catalog,
 };
 pub use contract::{CheckpointManifest, Materializer, MaterializerError};
 pub use manifest::{decode_manifest, encode_manifest};
 pub use namespace::{ArtifactNamespace, namespace_prefix, token_of_artifact};
 pub use page_store::{LayeringPolicy, PageMaterializer, PageReadError, PageReader, PageStore};
 pub use runner::{
-    MaterializerRunner, Progress, RunnerDependencies, RunnerError, RunnerProgress, RunnerSettings,
-    RunnerStopped,
+    MaterializerRunner, Progress, RunnerDependencies, RunnerError, RunnerProgress, RunnerSettings, RunnerStopped,
 };
 pub use sweeper::{SweepError, SweepReport, sweep_orphans};

@@ -30,10 +30,7 @@ impl ClientContext {
     ///
     /// A replica that is no longer registered gets a handle that fails every
     /// request, so callers treat it like any other replica that is down.
-    pub(crate) async fn connect_copies(
-        &self,
-        copies: &[CopyRecord],
-    ) -> Result<Vec<ConnectedReplica>, MetaError> {
+    pub(crate) async fn connect_copies(&self, copies: &[CopyRecord]) -> Result<Vec<ConnectedReplica>, MetaError> {
         let registered_replicas = self.metadata.list_replicas().await?;
         Ok(copies
             .iter()
@@ -42,9 +39,7 @@ impl ClientContext {
                     .iter()
                     .find(|replica| replica.replica_id == copy.replica_id);
                 let client: Arc<dyn ReplicaApi> = match registration {
-                    Some(replica) => self
-                        .connector
-                        .connect(&replica.replica_id, &replica.address),
+                    Some(replica) => self.connector.connect(&replica.replica_id, &replica.address),
                     None => Arc::new(UnreachableReplica::new(format!(
                         "replica {} is not registered",
                         copy.replica_id

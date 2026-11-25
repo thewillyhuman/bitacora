@@ -181,8 +181,7 @@ impl MetricsRegistry {
     /// The gauge, exposed as `bitacora_<name>_bytes`.
     pub fn bytes_gauge(&self, name: &str, help: &str) -> Gauge {
         let gauge = LibraryGauge::default();
-        self.lock()
-            .register_with_unit(name, help, Unit::Bytes, gauge.clone());
+        self.lock().register_with_unit(name, help, Unit::Bytes, gauge.clone());
         Gauge { gauge }
     }
 
@@ -199,8 +198,7 @@ impl MetricsRegistry {
     /// The counter, exposed as `bitacora_<name>_bytes_total`.
     pub fn bytes_counter(&self, name: &str, help: &str) -> Counter {
         let counter = LibraryCounter::default();
-        self.lock()
-            .register_with_unit(name, help, Unit::Bytes, counter.clone());
+        self.lock().register_with_unit(name, help, Unit::Bytes, counter.clone());
         Counter { counter }
     }
 
@@ -231,8 +229,7 @@ impl MetricsRegistry {
     /// Like [`MetricsRegistry::register_family`], for a family that counts bytes. The name follows the
     /// same rules as for [`MetricsRegistry::bytes_counter`].
     pub(crate) fn register_bytes_family(&self, name: &str, help: &str, family: impl Metric) {
-        self.lock()
-            .register_with_unit(name, help, Unit::Bytes, family);
+        self.lock().register_with_unit(name, help, Unit::Bytes, family);
     }
 
     /// Writes every registered metric in the `OpenMetrics` text format, which Prometheus scrapes.
@@ -346,8 +343,7 @@ impl RequestMetrics {
     /// * `description` - What the requests are, for the help texts, for example `Requests to the replica`.
     pub(crate) fn register(registry: &MetricsRegistry, subsystem: &str, description: &str) -> Self {
         let requests = Family::<OperationLabels, LibraryCounter>::default();
-        let durations =
-            DurationFamily::<OperationLabels>::new_with_constructor(new_duration_histogram);
+        let durations = DurationFamily::<OperationLabels>::new_with_constructor(new_duration_histogram);
         let failures = Family::<FailureLabels, LibraryCounter>::default();
         let mut library_registry = registry.lock();
         library_registry.register(
@@ -401,10 +397,7 @@ impl RequestMetrics {
             .get_or_create(&operation_labels)
             .observe(started_at.elapsed().as_secs_f64());
         if let Err(failure) = &outcome {
-            let failure_labels = [
-                (OPERATION_LABEL, operation),
-                (ERROR_LABEL, kind_of_failure(failure)),
-            ];
+            let failure_labels = [(OPERATION_LABEL, operation), (ERROR_LABEL, kind_of_failure(failure))];
             self.failures.get_or_create(&failure_labels).inc();
         }
         outcome

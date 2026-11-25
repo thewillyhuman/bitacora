@@ -84,10 +84,7 @@ fn bytes_after_the_manifest_are_refused() {
 
     let decoded = decode_manifest(&Bytes::from(stored));
 
-    assert!(matches!(
-        decoded,
-        Err(MaterializerError::InvalidManifest { .. })
-    ));
+    assert!(matches!(decoded, Err(MaterializerError::InvalidManifest { .. })));
 }
 
 #[test]

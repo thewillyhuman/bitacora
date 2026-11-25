@@ -73,8 +73,7 @@ fn append_workload(records: u64) -> AppendWorkload {
 
 /// How many records `stream` holds.
 async fn records_in(client: &BitacoraClient, stream: &str) -> usize {
-    let everything = SequenceRange::new(SequenceNumber::FIRST, SequenceNumber::new(1_000_000))
-        .expect("a valid range");
+    let everything = SequenceRange::new(SequenceNumber::FIRST, SequenceNumber::new(1_000_000)).expect("a valid range");
     client
         .open_reader(stream)
         .read_range(everything)
@@ -93,10 +92,7 @@ fn workload_on_several_streams_numbers_them() {
     let mut workload = append_workload(1);
     workload.stream_count = 3;
 
-    assert_eq!(
-        stream_names(&workload),
-        ["orders-0", "orders-1", "orders-2"]
-    );
+    assert_eq!(stream_names(&workload), ["orders-0", "orders-1", "orders-2"]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -193,16 +189,8 @@ async fn duration_limited_workload_stops_when_its_time_is_up() {
         .expect("the workload runs");
 
     assert!(measured.appends > 0);
-    assert!(
-        measured.elapsed >= Duration::from_secs(2),
-        "{:?}",
-        measured.elapsed
-    );
-    assert!(
-        measured.elapsed < Duration::from_secs(3),
-        "{:?}",
-        measured.elapsed
-    );
+    assert!(measured.elapsed >= Duration::from_secs(2), "{:?}", measured.elapsed);
+    assert!(measured.elapsed < Duration::from_secs(3), "{:?}", measured.elapsed);
 }
 
 #[tokio::test(start_paused = true)]
@@ -297,11 +285,7 @@ async fn writer_is_closed_when_the_workload_is_over() {
         .await
         .expect("the workload runs");
 
-    let described = client
-        .admin()
-        .describe_stream(STREAM)
-        .await
-        .expect("the stream exists");
+    let described = client.admin().describe_stream(STREAM).await.expect("the stream exists");
     assert_eq!(described.stream.writer, None);
 }
 
@@ -323,10 +307,7 @@ async fn workload_without_appends_in_flight_is_refused() {
 
     let refused = run_append_workloads(&client, &workload).await;
 
-    assert!(matches!(
-        refused,
-        Err(WorkloadError::InvalidWorkload { .. })
-    ));
+    assert!(matches!(refused, Err(WorkloadError::InvalidWorkload { .. })));
 }
 
 #[tokio::test(start_paused = true)]
@@ -337,10 +318,7 @@ async fn workload_with_a_rate_of_zero_is_refused() {
 
     let refused = run_append_workloads(&client, &workload).await;
 
-    assert!(matches!(
-        refused,
-        Err(WorkloadError::InvalidWorkload { .. })
-    ));
+    assert!(matches!(refused, Err(WorkloadError::InvalidWorkload { .. })));
 }
 
 #[tokio::test(start_paused = true)]
@@ -419,9 +397,7 @@ async fn scan_limited_by_a_duration_still_ends_at_the_end_of_the_stream() {
         limit: WorkloadLimit::Duration(Duration::from_mins(1)),
     };
 
-    let measured = run_read_workload(&client, &workload)
-        .await
-        .expect("the scan runs");
+    let measured = run_read_workload(&client, &workload).await.expect("the scan runs");
 
     assert_eq!(measured.records, 30);
 }

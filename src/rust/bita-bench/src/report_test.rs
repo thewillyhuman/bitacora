@@ -129,10 +129,7 @@ fn paced_workload_says_its_rate() {
 
     let rendered = AppendReport::of(&asked, &measurement_of(&[10])).render_text();
 
-    assert!(
-        rendered.contains("paced to 500 records/s per stream\n"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("paced to 500 records/s per stream\n"), "{rendered}");
 }
 
 #[test]
@@ -234,10 +231,7 @@ fn milliseconds_are_rendered_with_three_decimals() {
 
 #[test]
 fn throughput_is_rendered_in_mebibytes_rounded_down() {
-    assert_eq!(
-        format_mebibytes_per_second(1024 * 1024 * 3 / 2),
-        "1.5 MiB/s"
-    );
+    assert_eq!(format_mebibytes_per_second(1024 * 1024 * 3 / 2), "1.5 MiB/s");
 }
 
 #[test]

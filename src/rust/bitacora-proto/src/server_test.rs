@@ -49,20 +49,14 @@ fn request_for_this_replica_passes_the_identity_check() {
 fn request_without_an_identity_is_refused() {
     let request_metadata = MetadataMap::new();
 
-    assert_eq!(
-        refusal_code(&request_metadata),
-        Some(Code::FailedPrecondition)
-    );
+    assert_eq!(refusal_code(&request_metadata), Some(Code::FailedPrecondition));
 }
 
 #[test]
 fn request_for_another_replica_is_refused() {
     let request_metadata = headers_naming(&["replica-b"]);
 
-    assert_eq!(
-        refusal_code(&request_metadata),
-        Some(Code::FailedPrecondition)
-    );
+    assert_eq!(refusal_code(&request_metadata), Some(Code::FailedPrecondition));
 }
 
 /// An identifier is compared whole: one that merely starts like this
@@ -71,10 +65,7 @@ fn request_for_another_replica_is_refused() {
 fn request_for_a_replica_with_a_longer_name_is_refused() {
     let request_metadata = headers_naming(&["replica-a2"]);
 
-    assert_eq!(
-        refusal_code(&request_metadata),
-        Some(Code::FailedPrecondition)
-    );
+    assert_eq!(refusal_code(&request_metadata), Some(Code::FailedPrecondition));
 }
 
 /// A request that names two replicas is not unambiguously for this one.
@@ -82,10 +73,7 @@ fn request_for_a_replica_with_a_longer_name_is_refused() {
 fn request_for_this_replica_and_another_is_refused() {
     let request_metadata = headers_naming(&["replica-a", "replica-b"]);
 
-    assert_eq!(
-        refusal_code(&request_metadata),
-        Some(Code::FailedPrecondition)
-    );
+    assert_eq!(refusal_code(&request_metadata), Some(Code::FailedPrecondition));
 }
 
 #[test]
@@ -94,10 +82,7 @@ fn refusal_tells_which_replica_answered_and_which_was_asked_for() {
 
     let refusal = check_identity(&own_replica_id(), &request_metadata).expect_err("refused");
 
-    assert_eq!(
-        refusal.message(),
-        "this is replica replica-a, not \"replica-b\""
-    );
+    assert_eq!(refusal.message(), "this is replica replica-a, not \"replica-b\"");
 }
 
 /// Ties [`LARGEST_READ_CAP_BYTES`] to the size of a batch frame: the
@@ -123,46 +108,28 @@ struct RecordingReplica {
 
 #[tonic::async_trait]
 impl ReplicaApi for RecordingReplica {
-    async fn append(
-        &self,
-        _request: domain::AppendRequest,
-    ) -> Result<domain::AppendResponse, ReplicaError> {
+    async fn append(&self, _request: domain::AppendRequest) -> Result<domain::AppendResponse, ReplicaError> {
         Err(ReplicaError::Draining)
     }
 
-    async fn read(
-        &self,
-        request: domain::ReadRequest,
-    ) -> Result<domain::ReadResponse, ReplicaError> {
+    async fn read(&self, request: domain::ReadRequest) -> Result<domain::ReadResponse, ReplicaError> {
         *self.last_read_cap.lock().expect("no test panicked") = Some(request.max_bytes);
         Err(ReplicaError::Draining)
     }
 
-    async fn fence(
-        &self,
-        _request: domain::FenceRequest,
-    ) -> Result<domain::FenceResponse, ReplicaError> {
+    async fn fence(&self, _request: domain::FenceRequest) -> Result<domain::FenceResponse, ReplicaError> {
         Err(ReplicaError::Draining)
     }
 
-    async fn seal(
-        &self,
-        _request: domain::SealRequest,
-    ) -> Result<domain::SealResponse, ReplicaError> {
+    async fn seal(&self, _request: domain::SealRequest) -> Result<domain::SealResponse, ReplicaError> {
         Err(ReplicaError::Draining)
     }
 
-    async fn repair_segment(
-        &self,
-        _request: domain::RepairRequest,
-    ) -> Result<domain::RepairResponse, ReplicaError> {
+    async fn repair_segment(&self, _request: domain::RepairRequest) -> Result<domain::RepairResponse, ReplicaError> {
         Err(ReplicaError::Draining)
     }
 
-    async fn upload_segment(
-        &self,
-        _request: domain::UploadRequest,
-    ) -> Result<domain::UploadResponse, ReplicaError> {
+    async fn upload_segment(&self, _request: domain::UploadRequest) -> Result<domain::UploadResponse, ReplicaError> {
         Err(ReplicaError::Draining)
     }
 
@@ -198,14 +165,9 @@ async fn cap_handed_to_the_replica(requested_cap_bytes: usize) -> Option<usize> 
         limit: domain::ReadLimit::DurableSequence,
     };
 
-    let _refusal = service
-        .read(Request::new(wire::ReadRequest::from(read_request)))
-        .await;
+    let _refusal = service.read(Request::new(wire::ReadRequest::from(read_request))).await;
 
-    *recording_replica
-        .last_read_cap
-        .lock()
-        .expect("no test panicked")
+    *recording_replica.last_read_cap.lock().expect("no test panicked")
 }
 
 #[tokio::test]
@@ -238,9 +200,6 @@ async fn malformed_request_is_answered_without_calling_the_replica() {
 
     let _answer = service.read(Request::new(request_without_a_segment)).await;
 
-    let handed_cap = *recording_replica
-        .last_read_cap
-        .lock()
-        .expect("no test panicked");
+    let handed_cap = *recording_replica.last_read_cap.lock().expect("no test panicked");
     assert_eq!(handed_cap, None);
 }

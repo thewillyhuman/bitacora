@@ -60,7 +60,5 @@ mod transitions;
 pub use invariants::Invariant;
 pub use protocol::{CheckOutcome, Counterexample, ProtocolModel};
 pub use rules::{Bounds, RecoveryEnd, Rules};
-pub use state::{
-    Epoch, FIRST_EPOCH, RECOVERY_QUORUM, REPLICA_COUNT, SECOND_EPOCH, Sequence, State, WRITE_QUORUM,
-};
+pub use state::{Epoch, FIRST_EPOCH, RECOVERY_QUORUM, REPLICA_COUNT, SECOND_EPOCH, Sequence, State, WRITE_QUORUM};
 pub use transitions::Action;

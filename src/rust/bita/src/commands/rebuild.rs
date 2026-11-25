@@ -67,14 +67,13 @@ use std::fmt::Write as _;
 
 use bitacora_artifact::ArtifactStore;
 use bitacora_meta::{
-    CopyRecord, CopyState, RECORD_SCHEMA_VERSION, RetentionPolicy, SealRecord, SegmentRecord,
-    StreamRecord, TieredRecord,
+    CopyRecord, CopyState, RECORD_SCHEMA_VERSION, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
+    TieredRecord,
 };
 use bitacora_segment::tiered::{TIERED_FOOTER_BYTES, TieredFooter};
 use bitacora_types::replica_api::SegmentStatus;
 use bitacora_types::{
-    Epoch, ReplicaId, ReplicationSettings, SegmentAddress, SegmentId, SequenceNumber, StreamId,
-    Timestamp,
+    Epoch, ReplicaId, ReplicationSettings, SegmentAddress, SegmentId, SequenceNumber, StreamId, Timestamp,
 };
 use serde::Serialize;
 use tokio::time::timeout;
@@ -181,8 +180,7 @@ struct LocatedSegment {
 /// One plan per stream identifier that a replica or an object mentions, sorted by identifier. Streams the
 /// metadata store knows but nothing was found of are not planned and stay as they are.
 pub(crate) fn plan_rebuild(inputs: &RebuildInputs) -> Vec<PlannedStream> {
-    let mut evidence_by_stream: BTreeMap<StreamId, BTreeMap<SegmentId, SegmentEvidence>> =
-        BTreeMap::new();
+    let mut evidence_by_stream: BTreeMap<StreamId, BTreeMap<SegmentId, SegmentEvidence>> = BTreeMap::new();
     for inventory in &inputs.inventories {
         for copy in &inventory.copies {
             evidence_by_stream
@@ -234,10 +232,9 @@ fn plan_stream(
         problems: Vec::new(),
     };
     if inputs.deleted_stream_ids.contains(&stream_id) {
-        planned.problems.push(
-            "the stream is recorded as deleted; its records are being removed and it is not rebuilt"
-                .to_owned(),
-        );
+        planned
+            .problems
+            .push("the stream is recorded as deleted; its records are being removed and it is not rebuilt".to_owned());
         return planned;
     }
 
@@ -252,23 +249,20 @@ fn plan_stream(
         }
     }
     if located_segments.is_empty() {
-        planned.problems.push(
-            "no replica that answered holds a file of the stream, and the object store holds none"
-                .to_owned(),
-        );
+        planned
+            .problems
+            .push("no replica that answered holds a file of the stream, and the object store holds none".to_owned());
         return planned;
     }
 
     let sealed_ends = sealed_ends_of(&located_segments, &mut planned.assumptions);
-    let first_kept =
-        first_segment_after_the_last_gap(&located_segments, &sealed_ends, &mut planned.problems);
+    let first_kept = first_segment_after_the_last_gap(&located_segments, &sealed_ends, &mut planned.problems);
     let replication = if let Some(known_stream) = existing {
         known_stream.replication
     } else {
-        planned.assumptions.push(
-            "replication is not stored on replicas: assumed 3 replicas with write quorum 2"
-                .to_owned(),
-        );
+        planned
+            .assumptions
+            .push("replication is not stored on replicas: assumed 3 replicas with write quorum 2".to_owned());
         ReplicationSettings::DEFAULT
     };
     let mut segments = Vec::new();
@@ -438,10 +432,7 @@ fn locate_segment(
 /// A segment without a recorded seal is sealed one below the start of the next located segment, because
 /// a segment is only opened after its predecessor was sealed and starts right after it. Only the last
 /// located segment can be left open.
-fn sealed_ends_of(
-    located_segments: &[LocatedSegment],
-    assumptions: &mut Vec<String>,
-) -> Vec<Option<SequenceNumber>> {
+fn sealed_ends_of(located_segments: &[LocatedSegment], assumptions: &mut Vec<String>) -> Vec<Option<SequenceNumber>> {
     let mut sealed_ends = Vec::with_capacity(located_segments.len());
     for (index, located) in located_segments.iter().enumerate() {
         if located.recorded_sealed_end.is_some() {
@@ -479,8 +470,7 @@ fn first_segment_after_the_last_gap(
     for index in 1..located_segments.len() {
         let previous = &located_segments[index - 1];
         let current = &located_segments[index];
-        let connects = sealed_ends[index - 1]
-            .is_some_and(|previous_end| previous_end.next() == current.first_sequence);
+        let connects = sealed_ends[index - 1].is_some_and(|previous_end| previous_end.next() == current.first_sequence);
         if connects {
             continue;
         }
@@ -510,10 +500,7 @@ fn segment_record(
     let mut holders = located.evidence.holders.clone();
     // Longest copy first; a replica with bare state last.
     holders.sort_by(|(left_id, left), (right_id, right)| {
-        right
-            .local_end
-            .cmp(&left.local_end)
-            .then_with(|| left_id.cmp(right_id))
+        right.local_end.cmp(&left.local_end).then_with(|| left_id.cmp(right_id))
     });
     let mut file_holder_count = 0;
     let mut has_complete_copy = located.evidence.tiered.is_some();
@@ -531,8 +518,7 @@ fn segment_record(
     }
 
     let replica_count = replication.replica_count();
-    let is_released =
-        sealed_end.is_some() && located.evidence.tiered.is_some() && file_holder_count == 0;
+    let is_released = sealed_end.is_some() && located.evidence.tiered.is_some() && file_holder_count == 0;
     let mut copies = Vec::new();
     if !is_released {
         for (replica_id, _status) in holders.iter().take(replica_count) {
@@ -577,16 +563,12 @@ fn segment_record(
         first_sequence: located.first_sequence,
         sealed: sealed_end.map(|end| SealRecord { end, at: now }),
         copies,
-        tiered: located
-            .evidence
-            .tiered
-            .as_ref()
-            .map(|tiered_object| TieredRecord {
-                object_key: tiered_object.object_key.clone(),
-                size_bytes: tiered_object.size_bytes,
-                uploaded_at: now,
-                are_local_copies_dropped: is_released,
-            }),
+        tiered: located.evidence.tiered.as_ref().map(|tiered_object| TieredRecord {
+            object_key: tiered_object.object_key.clone(),
+            size_bytes: tiered_object.size_bytes,
+            uploaded_at: now,
+            are_local_copies_dropped: is_released,
+        }),
     }
 }
 
@@ -665,11 +647,7 @@ impl RebuildReport {
             ]);
         }
         rendered.push_str(&replica_table.render());
-        let _ = writeln!(
-            rendered,
-            "tiered segment objects found: {}",
-            self.tiered_objects
-        );
+        let _ = writeln!(rendered, "tiered segment objects found: {}", self.tiered_objects);
         render_list(&mut rendered, "problems", &self.problems);
 
         for stream in &self.streams {
@@ -677,11 +655,7 @@ impl RebuildReport {
                 Some(name) => format!("{name:?}"),
                 None => "(no name)".to_owned(),
             };
-            let written = if stream.is_written {
-                "written"
-            } else {
-                "not written"
-            };
+            let written = if stream.is_written { "written" } else { "not written" };
             let _ = writeln!(rendered, "\nstream {} {name}: {written}", stream.stream_id);
             if let (Some(epoch), Some(low_water_mark), Some(next_segment_id)) =
                 (stream.epoch, stream.low_water_mark, stream.next_segment_id)
@@ -702,9 +676,7 @@ impl RebuildReport {
 
         rendered.push('\n');
         if self.is_applied {
-            rendered.push_str(
-                "applied. Start the controllers: they verify every copy and rebuild missing ones.\n",
-            );
+            rendered.push_str("applied. Start the controllers: they verify every copy and rebuild missing ones.\n");
         } else if self.problem_count() == 0 {
             rendered.push_str("dry run: nothing was written. Pass --apply to write this plan.\n");
         } else {
@@ -897,14 +869,8 @@ fn rebuilt_stream(planned: &PlannedStream) -> RebuiltStream {
         stream_id: planned.stream_id.get(),
         name: planned.name.clone(),
         epoch: planned.record.as_ref().map(|record| record.epoch.get()),
-        low_water_mark: planned
-            .record
-            .as_ref()
-            .map(|record| record.low_water_mark.get()),
-        next_segment_id: planned
-            .record
-            .as_ref()
-            .map(|record| record.next_segment_id.get()),
+        low_water_mark: planned.record.as_ref().map(|record| record.low_water_mark.get()),
+        next_segment_id: planned.record.as_ref().map(|record| record.next_segment_id.get()),
         segments,
         assumptions: planned.assumptions.clone(),
         problems: planned.problems.clone(),
@@ -927,10 +893,8 @@ async fn find_tiered_objects(
     )
     .await;
     let Ok(Ok(objects)) = listing else {
-        problems.push(
-            "the object store could not be listed: segments that were left to it are not in the plan"
-                .to_owned(),
-        );
+        problems
+            .push("the object store could not be listed: segments that were left to it are not in the plan".to_owned());
         return Vec::new();
     };
     let mut tiered_objects = Vec::new();
@@ -953,9 +917,8 @@ async fn find_tiered_objects(
                 _failed_or_timed_out => None,
             }
         };
-        let is_the_named_segment = footer.is_some_and(|footer| {
-            footer.segment.address == address && footer.object_bytes() == object.size_bytes
-        });
+        let is_the_named_segment = footer
+            .is_some_and(|footer| footer.segment.address == address && footer.object_bytes() == object.size_bytes);
         match footer {
             Some(footer) if is_the_named_segment => tiered_objects.push(TieredObject {
                 object_key: object.object_key,

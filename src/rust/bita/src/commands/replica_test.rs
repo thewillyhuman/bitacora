@@ -110,12 +110,7 @@ async fn status_of_a_replica_that_is_not_registered_fails() {
 
     let failed = status(&started.cluster, &replica(9)).await;
 
-    assert_eq!(
-        failed,
-        Err(CommandError::UnknownReplica {
-            replica_id: replica(9)
-        })
-    );
+    assert_eq!(failed, Err(CommandError::UnknownReplica { replica_id: replica(9) }));
 }
 
 #[tokio::test(start_paused = true)]
@@ -145,12 +140,7 @@ async fn status_gives_up_after_the_request_timeout() {
 
     let failed = status(&started.cluster, &replica(1)).await;
 
-    assert_eq!(
-        failed,
-        Err(CommandError::ReplicaTimedOut {
-            replica_id: replica(1)
-        })
-    );
+    assert_eq!(failed, Err(CommandError::ReplicaTimedOut { replica_id: replica(1) }));
     assert_eq!(asked_at.elapsed(), started.cluster.request_timeout);
 }
 
@@ -220,9 +210,7 @@ async fn drain_that_waits_returns_as_soon_as_nothing_names_the_replica() {
     let started = Arc::new(TestCluster::with_stream(3).await);
     let draining = {
         let started = Arc::clone(&started);
-        tokio::spawn(async move {
-            drain(&started.cluster, &replica(0), Some(Duration::from_mins(2))).await
-        })
+        tokio::spawn(async move { drain(&started.cluster, &replica(0), Some(Duration::from_mins(2))).await })
     };
     tokio::time::sleep(Duration::from_secs(10)).await;
     let waiting_since = Instant::now();
@@ -320,10 +308,5 @@ async fn removing_a_replica_that_is_not_registered_fails() {
 
     let failed = remove(&started.cluster, &replica(9), true).await;
 
-    assert_eq!(
-        failed,
-        Err(CommandError::UnknownReplica {
-            replica_id: replica(9)
-        })
-    );
+    assert_eq!(failed, Err(CommandError::UnknownReplica { replica_id: replica(9) }));
 }

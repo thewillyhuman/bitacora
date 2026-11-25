@@ -29,18 +29,17 @@ impl SparseIndex {
     /// Creates an empty index.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self { entries: Vec::new() }
     }
 
     /// Tells the index about the next batch of the file. Batches must be
     /// reported in file order; the index keeps only those far enough from
     /// the previous entry.
     pub fn observe_batch(&mut self, first_sequence: SequenceNumber, offset_bytes: u64) {
-        let is_far_enough = self.entries.last().is_none_or(|last_entry| {
-            offset_bytes >= last_entry.offset_bytes + INDEX_INTERVAL_BYTES
-        });
+        let is_far_enough = self
+            .entries
+            .last()
+            .is_none_or(|last_entry| offset_bytes >= last_entry.offset_bytes + INDEX_INTERVAL_BYTES);
         if is_far_enough {
             self.entries.push(IndexEntry {
                 first_sequence,
@@ -54,9 +53,7 @@ impl SparseIndex {
     /// every indexed batch starts after `sequence`.
     #[must_use]
     pub fn entry_at_or_before(&self, sequence: SequenceNumber) -> Option<IndexEntry> {
-        let entries_at_or_before = self
-            .entries
-            .partition_point(|entry| entry.first_sequence <= sequence);
+        let entries_at_or_before = self.entries.partition_point(|entry| entry.first_sequence <= sequence);
         entries_at_or_before
             .checked_sub(1)
             .and_then(|position| self.entries.get(position))
@@ -72,8 +69,7 @@ impl SparseIndex {
     /// Forgets every batch at or after `offset_bytes`, after the file was cut
     /// there.
     pub fn forget_from(&mut self, offset_bytes: u64) {
-        self.entries
-            .retain(|entry| entry.offset_bytes < offset_bytes);
+        self.entries.retain(|entry| entry.offset_bytes < offset_bytes);
     }
 }
 
@@ -104,10 +100,7 @@ mod tests {
 
     #[test]
     fn empty_index_knows_no_starting_point() {
-        assert_eq!(
-            SparseIndex::new().entry_at_or_before(SequenceNumber::new(5)),
-            None
-        );
+        assert_eq!(SparseIndex::new().entry_at_or_before(SequenceNumber::new(5)), None);
     }
 
     #[test]

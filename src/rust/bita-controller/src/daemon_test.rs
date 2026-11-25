@@ -75,14 +75,7 @@ impl RunningLoop {
                     Err(_sender_dropped) => ShutdownSignal::Terminate,
                 }
             };
-            run_rounds(
-                &controller,
-                &metrics,
-                &readiness_of_the_loop,
-                pass_interval,
-                shutdown,
-            )
-            .await
+            run_rounds(&controller, &metrics, &readiness_of_the_loop, pass_interval, shutdown).await
         });
         Self {
             registry,
@@ -108,9 +101,7 @@ impl RunningLoop {
     ///
     /// The signal `run_rounds` returned.
     async fn stop_with(self, signal: ShutdownSignal) -> ShutdownSignal {
-        self.shutdown_sender
-            .send(signal)
-            .expect("the loop is still running");
+        self.shutdown_sender.send(signal).expect("the loop is still running");
         self.running.await.expect("the loop does not panic")
     }
 }
@@ -121,12 +112,7 @@ async fn cluster_with_a_new_stream() -> Cluster {
     let cluster = Cluster::start(3).await;
     cluster
         .metadata()
-        .create_stream(
-            STREAM,
-            ReplicationSettings::DEFAULT,
-            RetentionPolicy::default(),
-            None,
-        )
+        .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
         .await
         .expect("the stream is created");
     cluster
@@ -260,10 +246,7 @@ async fn first_instance_reports_that_it_leads() {
     let leader = RunningLoop::start(&cluster, "controller-a");
     let_pass(A_MOMENT).await;
 
-    assert_eq!(
-        leader.metric("bitacora_controller_leading "),
-        Some("1".to_owned())
-    );
+    assert_eq!(leader.metric("bitacora_controller_leading "), Some("1".to_owned()));
     leader.stop_with(ShutdownSignal::Terminate).await;
 }
 
@@ -276,10 +259,7 @@ async fn second_instance_stands_by_and_reports_that_it_does_not_lead() {
     let standby = RunningLoop::start(&cluster, "controller-b");
     let_pass(A_MOMENT).await;
 
-    assert_eq!(
-        standby.metric("bitacora_controller_leading "),
-        Some("0".to_owned())
-    );
+    assert_eq!(standby.metric("bitacora_controller_leading "), Some("0".to_owned()));
     leader.stop_with(ShutdownSignal::Terminate).await;
     standby.stop_with(ShutdownSignal::Terminate).await;
 }
@@ -311,10 +291,7 @@ async fn standby_takes_over_once_the_leadership_of_a_stopped_leader_lapses() {
     leader.stop_with(ShutdownSignal::Terminate).await;
     let_pass(settings.leadership_duration + settings.pass_interval * 2).await;
 
-    assert_eq!(
-        standby.metric("bitacora_controller_leading "),
-        Some("1".to_owned())
-    );
+    assert_eq!(standby.metric("bitacora_controller_leading "), Some("1".to_owned()));
     standby.stop_with(ShutdownSignal::Terminate).await;
 }
 
@@ -372,9 +349,7 @@ async fn round_that_is_running_at_shutdown_is_finished_and_recorded() {
         "{registry_text_before}"
     );
     assert!(
-        registry
-            .encode()
-            .contains("bitacora_controller_rounds_total 1\n"),
+        registry.encode().contains("bitacora_controller_rounds_total 1\n"),
         "{}",
         registry.encode()
     );
@@ -403,9 +378,7 @@ async fn round_that_outlasts_the_grace_period_is_abandoned() {
 
     assert_eq!(asked_at.elapsed(), SHUTDOWN_GRACE);
     assert!(
-        registry
-            .encode()
-            .contains("bitacora_controller_rounds_total 0\n"),
+        registry.encode().contains("bitacora_controller_rounds_total 0\n"),
         "{}",
         registry.encode()
     );
@@ -516,10 +489,7 @@ async fn daemon_exposes_that_it_leads() {
 
     let metrics = daemon.scraped_metrics().await;
 
-    assert!(
-        metrics.contains("bitacora_controller_leading 1\n"),
-        "{metrics}"
-    );
+    assert!(metrics.contains("bitacora_controller_leading 1\n"), "{metrics}");
     daemon.terminate().await;
 }
 

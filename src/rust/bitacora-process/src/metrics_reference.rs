@@ -72,9 +72,7 @@ pub fn undocumented_metrics(exposition: &str, reference: &str) -> Vec<String> {
             continue;
         };
         let mut declaration_words = declaration.split_whitespace();
-        let (Some(declared_name), Some(metric_type)) =
-            (declaration_words.next(), declaration_words.next())
-        else {
+        let (Some(declared_name), Some(metric_type)) = (declaration_words.next(), declaration_words.next()) else {
             continue;
         };
         let queried_name = if metric_type == "counter" {

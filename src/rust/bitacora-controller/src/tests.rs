@@ -3,9 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitacora_client::{
-    BitacoraClient, ClientSettings, StreamWriter, TakeoverPolicy, WriterSettings,
-};
+use bitacora_client::{BitacoraClient, ClientSettings, StreamWriter, TakeoverPolicy, WriterSettings};
 use bitacora_meta::{CopyState, KeyValueStore, RetentionPolicy, StreamRecord};
 use bitacora_replica::ReplicaSettings;
 use bitacora_testkit::Cluster;
@@ -48,22 +46,13 @@ async fn run_pass(cluster: &Cluster) -> PassReport {
 async fn create_stream(cluster: &Cluster) {
     cluster
         .metadata()
-        .create_stream(
-            STREAM,
-            ReplicationSettings::DEFAULT,
-            RetentionPolicy::default(),
-            None,
-        )
+        .create_stream(STREAM, ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
         .await
         .expect("the stream is created");
 }
 
 pub(crate) async fn stream(cluster: &Cluster) -> StreamRecord {
-    cluster
-        .metadata()
-        .get_stream(STREAM)
-        .await
-        .expect("the stream exists")
+    cluster.metadata().get_stream(STREAM).await.expect("the stream exists")
 }
 
 pub(crate) fn client(cluster: &Cluster, settings: WriterSettings) -> BitacoraClient {
@@ -130,10 +119,7 @@ async fn pass_places_a_standby_for_a_stream_without_one() {
     create_stream(&cluster).await;
     let report = run_pass(&cluster).await;
     assert_eq!(
-        (
-            report.standbys_placed,
-            stream(&cluster).await.standby_replicas
-        ),
+        (report.standbys_placed, stream(&cluster).await.standby_replicas),
         (1, Some(cluster.replica_ids(&[0, 1, 2])))
     );
 }
@@ -261,11 +247,7 @@ async fn replica_that_missed_the_seal_learns_it_from_the_controller() {
         .collect();
     assert_eq!(
         (sealed_before, known_seal, copy_states(&cluster).await[2]),
-        (
-            vec![1, 2, 3],
-            vec![Some(SequenceNumber::new(3))],
-            CopyState::Good
-        )
+        (vec![1, 2, 3], vec![Some(SequenceNumber::new(3))], CopyState::Good)
     );
 }
 
@@ -421,10 +403,7 @@ async fn damaged_copy_is_rebuilt_in_place() {
     replica.scrub_sealed_segments().await.expect("scrubs");
     run_pass(&cluster).await;
     assert_eq!(
-        (
-            copy_states(&cluster).await,
-            replica.scrub_sealed_segments().await
-        ),
+        (copy_states(&cluster).await, replica.scrub_sealed_segments().await),
         (vec![CopyState::Good; 3], Ok(0))
     );
 }
@@ -512,12 +491,7 @@ async fn lost_copy_without_a_spare_replica_stays_bad_until_one_appears() {
 
 #[tokio::test(start_paused = true)]
 async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
-    let zone_of = |node_number: usize| {
-        vec![
-            format!("zone-{}", node_number % 3),
-            format!("host-{node_number}"),
-        ]
-    };
+    let zone_of = |node_number: usize| vec![format!("zone-{}", node_number % 3), format!("host-{node_number}")];
     let cluster = Cluster::start_with(6, small_segment_files(), zone_of).await;
     create_stream(&cluster).await;
     run_pass(&cluster).await;
@@ -584,10 +558,7 @@ pub(crate) async fn cluster_with_segments(node_count: usize, sealed_segment_coun
 pub(crate) async fn checkpoint_at(cluster: &Cluster, name: &str, sequence: u64) {
     let metadata = cluster.metadata();
     let stream_id = stream(cluster).await.stream_id;
-    metadata
-        .register_materializer(STREAM, name)
-        .await
-        .expect("registered");
+    metadata.register_materializer(STREAM, name).await.expect("registered");
     let token = metadata
         .acquire_checkpoint(stream_id, name)
         .await
@@ -652,10 +623,7 @@ async fn deleted_segments_are_removed_from_their_replicas() {
     let cluster = cluster_with_segments(3, 3).await;
     checkpoint_at(&cluster, "pages", 2).await;
     let report = run_pass(&cluster).await;
-    assert_eq!(
-        (report.copies_removed, held_segments(&cluster, 0).await),
-        (6, vec![3])
-    );
+    assert_eq!((report.copies_removed, held_segments(&cluster, 0).await), (6, vec![3]));
 }
 
 #[tokio::test(start_paused = true)]
@@ -697,10 +665,7 @@ async fn owner_request_deletes_whole_segments_only() {
         .expect("requested");
     run_pass(&cluster).await;
     assert_eq!(
-        (
-            listed_segments(&cluster).await,
-            stream(&cluster).await.low_water_mark
-        ),
+        (listed_segments(&cluster).await, stream(&cluster).await.low_water_mark),
         (vec![3, 4], SequenceNumber::new(3))
     );
 }
@@ -711,10 +676,7 @@ async fn open_segment_survives_a_checkpoint_past_its_start() {
     checkpoint_at(&cluster, "pages", 500).await;
     run_pass(&cluster).await;
     assert_eq!(
-        (
-            listed_segments(&cluster).await,
-            stream(&cluster).await.low_water_mark
-        ),
+        (listed_segments(&cluster).await, stream(&cluster).await.low_water_mark),
         (vec![3], SequenceNumber::new(3))
     );
 }
@@ -755,10 +717,7 @@ async fn materializer_registered_after_a_truncation_does_not_move_the_mark_back(
         .expect("registered");
     run_pass(&cluster).await;
     assert_eq!(
-        (
-            late_checkpoint.checkpoint,
-            stream(&cluster).await.low_water_mark
-        ),
+        (late_checkpoint.checkpoint, stream(&cluster).await.low_water_mark),
         (SequenceNumber::new(2), SequenceNumber::new(3))
     );
 }
@@ -773,11 +732,7 @@ async fn replica_that_missed_a_deletion_is_cleaned_up_when_it_returns() {
     cluster.nodes()[2].set_reachable(true);
     let report = run_pass(&cluster).await;
     assert_eq!(
-        (
-            held_while_away,
-            report.copies_removed,
-            held_segments(&cluster, 2).await
-        ),
+        (held_while_away, report.copies_removed, held_segments(&cluster, 2).await),
         (vec![1, 2, 3], 2, vec![3])
     );
 }
@@ -806,11 +761,7 @@ async fn copy_replaced_by_repair_is_removed_when_its_replica_returns() {
 #[tokio::test(start_paused = true)]
 async fn deleted_stream_is_removed_from_replicas_and_then_forgotten() {
     let cluster = cluster_with_segments(3, 2).await;
-    cluster
-        .metadata()
-        .delete_stream(STREAM)
-        .await
-        .expect("deleted");
+    cluster.metadata().delete_stream(STREAM).await.expect("deleted");
     let report = run_pass(&cluster).await;
     assert_eq!(
         (
@@ -826,18 +777,9 @@ async fn deleted_stream_is_removed_from_replicas_and_then_forgotten() {
 async fn deleted_stream_is_remembered_while_a_replica_has_not_been_cleaned() {
     let cluster = cluster_with_segments(3, 2).await;
     cluster.nodes()[2].set_reachable(false);
-    cluster
-        .metadata()
-        .delete_stream(STREAM)
-        .await
-        .expect("deleted");
+    cluster.metadata().delete_stream(STREAM).await.expect("deleted");
     run_pass(&cluster).await;
-    let remembered = cluster
-        .metadata()
-        .list_deleted_streams()
-        .await
-        .expect("lists")
-        .len();
+    let remembered = cluster.metadata().list_deleted_streams().await.expect("lists").len();
     cluster.nodes()[2].set_reachable(true);
     run_pass(&cluster).await;
     assert_eq!(
@@ -862,9 +804,7 @@ async fn segments_of_a_stream_the_metadata_store_does_not_know_are_left_alone() 
         .key_value_store()
         .transact(
             Vec::new(),
-            vec![bitacora_meta::Mutation::Delete {
-                key: key.to_owned(),
-            }],
+            vec![bitacora_meta::Mutation::Delete { key: key.to_owned() }],
         )
         .await
         .expect("forgotten");
@@ -905,10 +845,7 @@ async fn second_controller_takes_over_when_the_first_one_stops() {
     tokio::time::sleep(ControllerSettings::default().leadership_duration * 2).await;
     assert_eq!(
         (leader_while_both_run, leader(&cluster).await),
-        (
-            Some("controller-1".to_owned()),
-            Some("controller-2".to_owned())
-        )
+        (Some("controller-1".to_owned()), Some("controller-2".to_owned()))
     );
 }
 

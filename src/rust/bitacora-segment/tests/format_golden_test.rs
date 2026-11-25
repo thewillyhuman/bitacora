@@ -15,9 +15,7 @@
 //! 5, holding records 100 to 102 in a single batch.
 
 use bitacora_segment::SegmentState;
-use bitacora_segment::format::{
-    Batch, FlushedMark, SEGMENT_HEADER_BYTES, SegmentHeader, decode_frames,
-};
+use bitacora_segment::format::{Batch, FlushedMark, SEGMENT_HEADER_BYTES, SegmentHeader, decode_frames};
 use bitacora_segment::tiered::{TieredFooter, TieredIndex, encode_tiered_segment};
 use bitacora_types::{Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId};
 use bytes::Bytes;
@@ -132,10 +130,7 @@ fn segment_header_of_version_1_is_read() {
 
 #[test]
 fn flushed_mark_is_written_as_in_version_1() {
-    assert_eq!(
-        flushed_mark().encode(SEGMENT).to_vec(),
-        bytes_of(GOLDEN_FLUSHED_MARK)
-    );
+    assert_eq!(flushed_mark().encode(SEGMENT).to_vec(), bytes_of(GOLDEN_FLUSHED_MARK));
 }
 
 #[test]
@@ -149,10 +144,7 @@ fn flushed_mark_of_version_1_is_read_from_its_slot() {
     golden_header.resize(SEGMENT_HEADER_BYTES, 0);
     golden_header[80..96].copy_from_slice(&bytes_of(GOLDEN_FLUSHED_MARK));
 
-    assert_eq!(
-        FlushedMark::latest_in(SEGMENT, &golden_header),
-        Some(flushed_mark())
-    );
+    assert_eq!(FlushedMark::latest_in(SEGMENT, &golden_header), Some(flushed_mark()));
 }
 
 #[test]

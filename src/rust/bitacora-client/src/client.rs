@@ -88,11 +88,7 @@ impl BitacoraClient {
     /// Returns [`OpenError`] if the stream does not exist, another candidate
     /// claimed it first, a live writer still holds the lease and `policy`
     /// says to wait, or recovery could not reach enough replicas in time.
-    pub async fn open_writer(
-        &self,
-        stream_name: &str,
-        policy: TakeoverPolicy,
-    ) -> Result<StreamWriter, OpenError> {
+    pub async fn open_writer(&self, stream_name: &str, policy: TakeoverPolicy) -> Result<StreamWriter, OpenError> {
         StreamWriter::open(
             Arc::clone(&self.context),
             self.settings.writer.clone(),
@@ -113,10 +109,6 @@ impl BitacoraClient {
     /// the same stream. Nothing is contacted until the reader is used.
     #[must_use]
     pub fn open_reader(&self, stream_name: &str) -> StreamReader {
-        StreamReader::new(
-            Arc::clone(&self.context),
-            self.settings.reader.clone(),
-            stream_name,
-        )
+        StreamReader::new(Arc::clone(&self.context), self.settings.reader.clone(), stream_name)
     }
 }

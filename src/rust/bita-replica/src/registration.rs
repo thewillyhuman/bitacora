@@ -114,12 +114,8 @@ impl Registration {
                 damaged_copies += 1;
             }
         }
-        self.metrics
-            .segment_copies
-            .set_unsigned(held_copies.len() as u64);
-        self.metrics
-            .damaged_segment_copies
-            .set_unsigned(damaged_copies);
+        self.metrics.segment_copies.set_unsigned(held_copies.len() as u64);
+        self.metrics.damaged_segment_copies.set_unsigned(damaged_copies);
         self.metrics.draining.set_flag(status.is_draining);
 
         let record = ReplicaRecord {

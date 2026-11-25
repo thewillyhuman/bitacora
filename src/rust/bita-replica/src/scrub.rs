@@ -48,19 +48,13 @@ use crate::metrics::ReplicaDaemonMetrics;
 /// * `interval` - How long to wait before the first scrub and between two scrubs.
 /// * `metrics` - The daemon's metrics: each completed scrub is counted, and the number of damaged
 ///   copies it found is stored in the gauge.
-pub(crate) async fn run_scrub_schedule(
-    replica: Arc<Replica>,
-    interval: Duration,
-    metrics: ReplicaDaemonMetrics,
-) {
+pub(crate) async fn run_scrub_schedule(replica: Arc<Replica>, interval: Duration, metrics: ReplicaDaemonMetrics) {
     loop {
         sleep(interval).await;
         match replica.scrub_sealed_segments().await {
             Ok(damaged_copies) => {
                 metrics.scrubs.add(1);
-                metrics
-                    .damaged_segment_copies
-                    .set_unsigned(damaged_copies as u64);
+                metrics.damaged_segment_copies.set_unsigned(damaged_copies as u64);
                 if damaged_copies == 0 {
                     tracing::info!("scrub found every sealed segment intact");
                 } else {

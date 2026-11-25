@@ -166,9 +166,7 @@ async fn range_that_ends_one_byte_past_a_large_object_reports_its_size() {
     store_large_object(&store).await;
     let one_byte_too_far = LARGE_OBJECT_END - 10..LARGE_OBJECT_END + 1;
 
-    let outcome = store
-        .get_range(LARGE_OBJECT_KEY, one_byte_too_far.clone())
-        .await;
+    let outcome = store.get_range(LARGE_OBJECT_KEY, one_byte_too_far.clone()).await;
 
     assert_eq!(outcome, Err(out_of_bounds(&one_byte_too_far)));
 }
@@ -183,9 +181,7 @@ async fn range_that_starts_at_the_end_of_a_large_object_reports_its_size() {
     store_large_object(&store).await;
     let starts_at_the_end = LARGE_OBJECT_END..LARGE_OBJECT_END + 1;
 
-    let outcome = store
-        .get_range(LARGE_OBJECT_KEY, starts_at_the_end.clone())
-        .await;
+    let outcome = store.get_range(LARGE_OBJECT_KEY, starts_at_the_end.clone()).await;
 
     assert_eq!(outcome, Err(out_of_bounds(&starts_at_the_end)));
 }
@@ -250,10 +246,7 @@ async fn key_with_characters_that_need_care_in_a_url_is_listed_unchanged() {
         .await
         .expect("the object is stored");
 
-    let listed = store
-        .list_prefix("reports/")
-        .await
-        .expect("the listing succeeds");
+    let listed = store.list_prefix("reports/").await.expect("the listing succeeds");
 
     assert_eq!(listed[0].object_key, unusual_key);
 }

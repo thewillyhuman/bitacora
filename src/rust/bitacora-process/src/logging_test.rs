@@ -43,10 +43,7 @@ impl io::Write for CapturedOutput {
 impl CapturedOutput {
     /// Everything written so far, as text.
     fn text(&self) -> String {
-        let written_bytes = self
-            .written_bytes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let written_bytes = self.written_bytes.lock().unwrap_or_else(PoisonError::into_inner);
         String::from_utf8(written_bytes.clone()).expect("log output is text")
     }
 }
@@ -69,11 +66,7 @@ fn logged_by(settings: LogSettings, events: &[TestEvent]) -> String {
         for event in events {
             match event {
                 TestEvent::ReplicaOpened => {
-                    tracing::info!(
-                        replica_id = "replica-a",
-                        segment_count = 12,
-                        "replica opened"
-                    );
+                    tracing::info!(replica_id = "replica-a", segment_count = 12, "replica opened");
                 }
                 TestEvent::DebugDetail => {
                     tracing::debug!("read failed, trying another replica");
@@ -144,10 +137,7 @@ fn json_event_carries_its_numeric_fields_as_numbers() {
 fn json_event_carries_a_timestamp() {
     let logged = logged_by(json_at(LogLevel::Info), &[TestEvent::ReplicaOpened]);
 
-    assert!(
-        single_json_line(&logged)["timestamp"].is_string(),
-        "{logged}"
-    );
+    assert!(single_json_line(&logged)["timestamp"].is_string(), "{logged}");
 }
 
 #[test]

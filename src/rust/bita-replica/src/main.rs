@@ -58,9 +58,7 @@ mod test_support;
 use std::path::Path;
 use std::process::ExitCode;
 
-use bitacora_process::{
-    CommandLine, ShutdownListener, init_logging, load_config_file, parse_command_line, usage,
-};
+use bitacora_process::{CommandLine, ShutdownListener, init_logging, load_config_file, parse_command_line, usage};
 
 use crate::config::{ReplicaConfigFile, ReplicaDaemonSettings};
 use crate::daemon::DaemonError;
@@ -117,10 +115,7 @@ fn start(config_path: &Path) -> ExitCode {
         eprintln!("{DAEMON_NAME}: {logging_error}");
         return ExitCode::FAILURE;
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(io_error) => {
             tracing::error!(%io_error, "cannot start the runtime");

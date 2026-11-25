@@ -135,10 +135,7 @@ pub fn init_logging(settings: LogSettings) -> Result<(), LoggingError> {
 
 /// Builds the log output that writes to `writer`, without installing it. Tests use it to capture what
 /// would be written.
-fn build_log_output<Writer>(
-    settings: LogSettings,
-    writer: Writer,
-) -> Box<dyn Subscriber + Send + Sync>
+fn build_log_output<Writer>(settings: LogSettings, writer: Writer) -> Box<dyn Subscriber + Send + Sync>
 where
     Writer: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {

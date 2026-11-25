@@ -76,9 +76,7 @@ pub enum MaterializerError {
         reason: String,
     },
     /// The label given for a new artifact cannot be part of an object key.
-    #[error(
-        "artifact label {label:?} is not valid: use 1 to 64 ASCII letters, digits, '.', '_' or '-'"
-    )]
+    #[error("artifact label {label:?} is not valid: use 1 to 64 ASCII letters, digits, '.', '_' or '-'")]
     InvalidLabel {
         /// The rejected label.
         label: String,

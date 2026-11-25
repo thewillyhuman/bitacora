@@ -76,11 +76,7 @@ impl Fixture {
 
     /// The only record of the registry, as the controller would read it.
     async fn registered(&self) -> ReplicaRecord {
-        let mut records = self
-            .metadata
-            .list_replicas()
-            .await
-            .expect("the metadata store is up");
+        let mut records = self.metadata.list_replicas().await.expect("the metadata store is up");
         assert_eq!(records.len(), 1, "{records:?}");
         records.remove(0)
     }
@@ -94,8 +90,7 @@ impl Fixture {
         let readiness = Readiness::new();
         let registration = Arc::clone(&self.registration);
         let readiness_of_the_loop = readiness.clone();
-        let running =
-            tokio::spawn(async move { registration.run(INTERVAL, &readiness_of_the_loop).await });
+        let running = tokio::spawn(async move { registration.run(INTERVAL, &readiness_of_the_loop).await });
         (readiness, running)
     }
 
@@ -133,10 +128,7 @@ async fn renewal_registers_the_advertised_address() {
 
     fixture.registration.renew().await.expect("renewed");
 
-    assert_eq!(
-        fixture.registered().await.address,
-        "replica-a.example.org:7000"
-    );
+    assert_eq!(fixture.registered().await.address, "replica-a.example.org:7000");
 }
 
 #[tokio::test(start_paused = true)]
@@ -145,10 +137,7 @@ async fn renewal_registers_the_failure_domains_in_order() {
 
     fixture.registration.renew().await.expect("renewed");
 
-    assert_eq!(
-        fixture.registered().await.failure_domains,
-        ["zone-a", "host-a"]
-    );
+    assert_eq!(fixture.registered().await.failure_domains, ["zone-a", "host-a"]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -158,10 +147,7 @@ async fn renewal_registers_the_capacity_of_the_disk() {
 
     fixture.registration.renew().await.expect("renewed");
 
-    assert_eq!(
-        fixture.registered().await.capacity_bytes,
-        space.capacity_bytes
-    );
+    assert_eq!(fixture.registered().await.capacity_bytes, space.capacity_bytes);
 }
 
 #[tokio::test(start_paused = true)]
@@ -224,10 +210,7 @@ async fn renewal_fails_while_the_metadata_store_is_down() {
 
     let renewed = fixture.registration.renew().await;
 
-    assert!(
-        matches!(renewed, Err(RegistrationError::Metadata(_))),
-        "{renewed:?}"
-    );
+    assert!(matches!(renewed, Err(RegistrationError::Metadata(_))), "{renewed:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -237,10 +220,7 @@ async fn renewal_fails_once_the_replica_has_stopped() {
 
     let renewed = fixture.registration.renew().await;
 
-    assert!(
-        matches!(renewed, Err(RegistrationError::Replica(_))),
-        "{renewed:?}"
-    );
+    assert!(matches!(renewed, Err(RegistrationError::Replica(_))), "{renewed:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -288,10 +268,7 @@ async fn renewal_updates_the_gauge_of_held_copies() {
 
     fixture.registration.renew().await.expect("renewed");
 
-    assert_eq!(
-        fixture.metric("bitacora_replica_segment_copies "),
-        Some("1".to_owned())
-    );
+    assert_eq!(fixture.metric("bitacora_replica_segment_copies "), Some("1".to_owned()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -302,10 +279,7 @@ async fn renewal_updates_the_gauges_even_while_the_metadata_store_is_down() {
 
     let _renewed = fixture.registration.renew().await;
 
-    assert_eq!(
-        fixture.metric("bitacora_replica_segment_copies "),
-        Some("1".to_owned())
-    );
+    assert_eq!(fixture.metric("bitacora_replica_segment_copies "), Some("1".to_owned()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -315,10 +289,7 @@ async fn renewal_updates_the_gauge_of_the_drain_state() {
 
     fixture.registration.renew().await.expect("renewed");
 
-    assert_eq!(
-        fixture.metric("bitacora_replica_draining "),
-        Some("1".to_owned())
-    );
+    assert_eq!(fixture.metric("bitacora_replica_draining "), Some("1".to_owned()));
 }
 
 #[tokio::test(start_paused = true)]

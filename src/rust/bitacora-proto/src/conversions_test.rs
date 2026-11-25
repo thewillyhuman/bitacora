@@ -44,10 +44,7 @@ fn segment_address_survives_the_round_trip() {
 fn segment_descriptor_survives_the_round_trip() {
     let message = wire::SegmentDescriptor::from(segment_descriptor());
 
-    assert_eq!(
-        domain::SegmentDescriptor::try_from(message),
-        Ok(segment_descriptor())
-    );
+    assert_eq!(domain::SegmentDescriptor::try_from(message), Ok(segment_descriptor()));
 }
 
 #[test]
@@ -84,10 +81,7 @@ fn segment_descriptor_starting_at_sequence_zero_is_malformed() {
 fn status_of_a_sealed_copy_survives_the_round_trip() {
     let message = wire::SegmentStatus::from(sealed_segment_status());
 
-    assert_eq!(
-        domain::SegmentStatus::try_from(message),
-        Ok(sealed_segment_status())
-    );
+    assert_eq!(domain::SegmentStatus::try_from(message), Ok(sealed_segment_status()));
 }
 
 /// A replica that only holds fencing state for a segment reports no end at
@@ -179,10 +173,7 @@ fn record_sequence_rejects_zero() {
 
 #[test]
 fn replica_identifier_with_a_path_separator_is_malformed() {
-    let read = replica_id_from_wire(
-        "zone/a".to_owned(),
-        "RepairSegmentRequest.source_replica_id",
-    );
+    let read = replica_id_from_wire("zone/a".to_owned(), "RepairSegmentRequest.source_replica_id");
 
     assert_eq!(
         read,
@@ -212,8 +203,5 @@ fn malformed_message_names_the_field_at_fault() {
         field: "AppendRequest.segment",
     };
 
-    assert_eq!(
-        malformed.to_string(),
-        "field `AppendRequest.segment` is missing"
-    );
+    assert_eq!(malformed.to_string(), "field `AppendRequest.segment` is missing");
 }
