@@ -278,6 +278,37 @@ async fn follower_asking_for_the_empty_position_starts_at_the_first_record() {
     assert_eq!(take(&mut following, 2).await, [1, 2]);
 }
 
+/// A follower with nothing to ask must wait between looks at the metadata
+/// store. Under a paused clock a follower that does not would never let
+/// time advance, and this test would hang instead of timing out.
+#[tokio::test(start_paused = true)]
+async fn follower_of_a_stream_nobody_has_written_waits_instead_of_spinning() {
+    let cluster = Cluster::start(3).await;
+    let mut following = reader(&cluster)
+        .follow_from(SequenceNumber::FIRST)
+        .await
+        .expect("follows");
+    let nothing_yet = timeout(Duration::from_secs(5), following.next()).await;
+    let writer = open_writer(&cluster, "compute-1").await;
+    append_numbered(&writer, 1).await;
+    assert!(nothing_yet.is_err() && take(&mut following, 1).await == [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn follower_waits_between_two_writers_instead_of_spinning() {
+    let cluster = Cluster::start(3).await;
+    let first_writer = open_writer(&cluster, "compute-1").await;
+    append_numbered(&first_writer, 2).await;
+    first_writer.close().await.expect("closes");
+    let mut following = reader(&cluster)
+        .follow_from(SequenceNumber::FIRST)
+        .await
+        .expect("follows");
+    let before_the_gap = take(&mut following, 2).await;
+    let in_the_gap = timeout(Duration::from_secs(5), following.next()).await;
+    assert!(before_the_gap == [1, 2] && in_the_gap.is_err());
+}
+
 #[tokio::test(start_paused = true)]
 async fn follower_receives_a_record_shortly_after_it_commits() {
     let cluster = Cluster::start(3).await;

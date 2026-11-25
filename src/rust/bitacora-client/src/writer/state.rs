@@ -234,7 +234,8 @@ impl WriterState {
     }
 
     /// Records that a replica acknowledged everything up to `local_end`,
-    /// then commits whatever a write quorum now holds.
+    /// then commits whatever a write quorum now holds. Returns whether the
+    /// replica acknowledged anything it had not acknowledged before.
     pub(crate) fn record_acknowledgement(
         &mut self,
         generation: u64,
@@ -242,23 +243,26 @@ impl WriterState {
         local_end: SequenceNumber,
         now: Instant,
         settings: &WriterSettings,
-    ) {
+    ) -> bool {
         if generation != self.generation {
-            return;
+            return false;
         }
         let last_assigned = self.next_sequence.preceding();
         let replica = &mut self.replicas[replica_index];
         replica.last_contact = now;
-        if local_end < replica.acknowledged_end {
+        let previously_acknowledged = replica.acknowledged_end;
+        if local_end < previously_acknowledged {
             // A replica must never lose what it acknowledged. If it did, its
             // copy cannot be trusted any more: roll away from it.
             replica.has_refused = true;
         } else {
             replica.acknowledged_end = local_end.min(last_assigned);
         }
+        let has_progressed = replica.acknowledged_end > previously_acknowledged;
         self.advance_durable_sequence();
         self.abandon_lagging_replicas(settings);
         self.drop_fully_acknowledged_batches();
+        has_progressed
     }
 
     /// Records that a replica answered, without acknowledging anything new.
@@ -530,14 +534,14 @@ mod tests {
             .collect()
     }
 
-    fn acknowledge(state: &mut WriterState, replica_index: usize, local_end: u64) {
+    fn acknowledge(state: &mut WriterState, replica_index: usize, local_end: u64) -> bool {
         state.record_acknowledgement(
             state.generation(),
             replica_index,
             SequenceNumber::new(local_end),
             Instant::now(),
             &WriterSettings::default(),
-        );
+        )
     }
 
     fn planned_sequences(state: &mut WriterState, replica_index: usize) -> Vec<u64> {
@@ -649,6 +653,19 @@ mod tests {
         acknowledge(&mut state, 0, 101);
         acknowledge(&mut state, 1, 101);
         assert_eq!((was_drained_before, state.is_drained()), (false, true));
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_reports_whether_the_replica_progressed() {
+        let mut state = new_state();
+        let _receivers = enqueue(&mut state, 3);
+        let progressed_first = acknowledge(&mut state, 0, 101);
+        let progressed_again = acknowledge(&mut state, 0, 101);
+        let went_backwards = acknowledge(&mut state, 0, 100);
+        assert_eq!(
+            (progressed_first, progressed_again, went_backwards),
+            (true, false, false)
+        );
     }
 
     // ---- what to send ----

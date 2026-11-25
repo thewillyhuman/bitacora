@@ -553,7 +553,7 @@ async fn run_sender(
             Ok(Err(ReplicaError::OutOfOrder { local_end, .. })) => {
                 // The replica's copy ends elsewhere than assumed, typically
                 // after a request whose answer was lost. Resume from there.
-                shared.lock().record_acknowledgement(
+                let has_progressed = shared.lock().record_acknowledgement(
                     generation,
                     replica_index,
                     local_end,
@@ -561,6 +561,12 @@ async fn run_sender(
                     &shared.settings,
                 );
                 shared.announce_change();
+                if !has_progressed {
+                    // The replica holds less than it acknowledged, so the
+                    // same request would be refused again. Pause until the
+                    // driver rolls away from it.
+                    sleep(shared.settings.retry_interval).await;
+                }
             }
             // A fence or a seal on the open segment can only come from a
             // newer writer's takeover.

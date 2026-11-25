@@ -14,7 +14,7 @@ use bitacora_meta::{CopyState, MetaError, SegmentRecord, StreamRecord};
 use bitacora_segment::format::{Batch, decode_frames};
 use bitacora_types::replica_api::{ReadLimit, ReadRequest};
 use bitacora_types::{LogRecord, SegmentId, SequenceNumber, SequenceRange};
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout};
 
 use crate::context::{ClientContext, ConnectedReplica};
 use crate::error::ReadError;
@@ -125,9 +125,23 @@ impl RecordStream {
                 return None;
             }
             let tail_wait = self.cursor.settings.tail_wait;
+            let asked_at = Instant::now();
             match self.cursor.fetch(Some(tail_wait)).await {
                 Ok(Fetched::Records(records)) => self.buffered_records.extend(records),
-                Ok(Fetched::NothingNew) => {}
+                Ok(Fetched::NothingNew) => {
+                    // Usually a replica held the request for the tail wait.
+                    // When there was no replica to ask, for example between
+                    // two writers, nothing has waited yet: pause here, or
+                    // the follower would poll the metadata store in a loop.
+                    let still_to_wait = self
+                        .cursor
+                        .settings
+                        .retry_interval
+                        .saturating_sub(asked_at.elapsed());
+                    if !still_to_wait.is_zero() {
+                        sleep(still_to_wait).await;
+                    }
+                }
                 Err(
                     fatal @ (ReadError::Truncated { .. }
                     | ReadError::Metadata(MetaError::StreamNotFound { .. })),
