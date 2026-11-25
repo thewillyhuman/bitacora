@@ -1,0 +1,35 @@
+[package]
+name = "bita"
+description = "The bitacora command-line tool: stream administration, replica maintenance and metadata recovery for operators."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bita"
+path = "src/main.rs"
+
+[dependencies]
+bitacora.workspace = true
+bitacora-artifact.workspace = true
+bitacora-meta.workspace = true
+bitacora-types.workspace = true
+bytes.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+bitacora-controller.workspace = true
+bitacora-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -83,6 +83,7 @@ def bitacora_binary(
         deps = [],
         test_deps = [],
         test_data = [],
+        test_compile_data = [],
         test_size = "small",
         **kwargs):
     """Declares a binary crate and the test target for its unit tests.
@@ -92,10 +93,12 @@ def bitacora_binary(
 
     Args:
         name: the binary name as typed at a shell, for example `bita-replica`.
-        srcs: the binary's source files, unit tests included.
+        srcs: the binary's source files, its `*_test.rs` files included.
         deps: first-party crates the binary depends on.
         test_deps: first-party crates only the unit tests depend on.
         test_data: files the unit tests read at run time.
+        test_compile_data: files the unit tests include at compile time, for
+            example a document a test checks against the code.
         test_size: Bazel test size of the unit tests.
         **kwargs: passed through to `rust_binary`.
     """
@@ -121,6 +124,7 @@ def bitacora_binary(
             normal_dev = True,
             proc_macro_dev = True,
         ),
+        compile_data = test_compile_data,
         crate = ":" + name,
         data = test_data,
         lint_config = _LINTS,

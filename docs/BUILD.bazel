@@ -1,8 +1,12 @@
 """The documentation. Files that tests read are exported here."""
 
-# The metrics reference is checked against the code: the test of every crate
-# that registers metrics fails when it exposes one this file does not list.
+# These are checked against the code, so that they cannot fall behind it:
+# the metrics reference by the test of every crate that registers metrics,
+# the command reference by the tests of the `bita` tool.
 exports_files(
-    ["operations/metrics.md"],
+    [
+        "cli.md",
+        "operations/metrics.md",
+    ],
     visibility = ["//visibility:public"],
 )

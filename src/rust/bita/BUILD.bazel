@@ -1,0 +1,23 @@
+load("//src/rust:defs.bzl", "bitacora_binary")
+
+exports_files(["Cargo.toml"])
+
+# The operator's command-line tool. Its unit tests run every command against
+# the in-process test cluster.
+bitacora_binary(
+    name = "bita",
+    srcs = glob(["src/**/*.rs"]),
+    # A test checks that the reference documents exactly the commands that
+    # exist.
+    test_compile_data = ["//docs:cli.md"],
+    test_deps = [
+        "//src/rust/bitacora-controller:bitacora_controller",
+        "//src/rust/bitacora-testkit:bitacora_testkit",
+    ],
+    deps = [
+        "//src/rust/bitacora:bitacora",
+        "//src/rust/bitacora-artifact:bitacora_artifact",
+        "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+)

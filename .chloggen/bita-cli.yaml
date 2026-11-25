@@ -1,0 +1,4 @@
+change_type: new_component
+component: cli
+note: "Add the bita command-line tool: stream administration, appending and reading for smoke tests, replica listing, status, drain and removal, segment listing and controller status, as text or JSON."
+issues: [3]

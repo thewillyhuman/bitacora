@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "bita",
     "bita-controller",
     "bita-replica",
     "bitacora",
@@ -56,6 +57,7 @@ async-trait = "0.1"
 # endpoint of the daemons. Only what serving plain HTTP/1 needs.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 bytes = "1"
+clap = { version = "4", features = ["derive"] }
 crc32c = "0.6"
 etcd-client = "0.21"
 fs4 = "1"
