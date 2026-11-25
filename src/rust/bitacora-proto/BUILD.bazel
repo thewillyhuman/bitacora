@@ -1,7 +1,7 @@
 load("@crates//:defs.bzl", "all_crate_deps")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_doc_test")
-load("//src/rust:defs.bzl", "bitacora_library")
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
 
 exports_files(["Cargo.toml"])
 
@@ -18,6 +18,9 @@ cargo_build_script(
 
 bitacora_library(
     name = "bitacora_proto",
+    # The unit tests hold the transport's size limits to the size of a batch
+    # frame, which the segment crate defines.
+    test_deps = ["//src/rust/bitacora-segment:bitacora_segment"],
     deps = [
         ":generated_protocol",
         "//src/rust/bitacora-types:bitacora_types",
@@ -30,4 +33,39 @@ rust_doc_test(
     name = "bitacora_proto_doc_test",
     size = "small",
     crate = ":bitacora_proto",
+)
+
+# A real replica served over gRPC on the loopback interface.
+bitacora_integration_test(
+    name = "replica_transport_test",
+    srcs = [
+        "tests/replica_transport_test.rs",
+        "tests/support/mod.rs",
+    ],
+    crate_root = "tests/replica_transport_test.rs",
+    deps = [
+        ":bitacora_proto",
+        "//src/rust/bitacora-artifact:bitacora_artifact",
+        "//src/rust/bitacora-replica:bitacora_replica",
+        "//src/rust/bitacora-segment:bitacora_segment",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+)
+
+# A writer, a reader and a takeover on three replicas served over gRPC.
+bitacora_integration_test(
+    name = "cluster_transport_test",
+    srcs = [
+        "tests/cluster_transport_test.rs",
+        "tests/support/mod.rs",
+    ],
+    crate_root = "tests/cluster_transport_test.rs",
+    deps = [
+        ":bitacora_proto",
+        "//src/rust/bitacora-client:bitacora_client",
+        "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-replica:bitacora_replica",
+        "//src/rust/bitacora-segment:bitacora_segment",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
 )

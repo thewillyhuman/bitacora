@@ -1,6 +1,6 @@
 [package]
 name = "bitacora-proto"
-description = "The bitacora wire protocol: generated gRPC code and its conversions to the domain types."
+description = "The bitacora wire protocol: Protocol Buffers definitions, generated gRPC code and the replica transport."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,16 +9,26 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 bitacora-types.workspace = true
 bytes.workspace = true
 prost.workspace = true
 thiserror.workspace = true
+# The only crate of the workspace that opens sockets.
+tokio = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tonic-prost.workspace = true
 
 [build-dependencies]
 protox.workspace = true
 tonic-prost-build.workspace = true
+
+[dev-dependencies]
+bitacora-artifact.workspace = true
+bitacora-client.workspace = true
+bitacora-meta.workspace = true
+bitacora-replica.workspace = true
+bitacora-segment.workspace = true
 
 [lints]
 workspace = true

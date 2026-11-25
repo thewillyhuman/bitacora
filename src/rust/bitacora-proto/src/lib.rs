@@ -1,20 +1,23 @@
-//! The bitacora wire protocol.
+//! The bitacora wire protocol and its gRPC transport.
 //!
 //! # Why this crate exists
 //!
 //! Writers, readers, the controller and the replicas themselves only ever
 //! hold a `dyn ReplicaApi` (`bitacora-types`). In one process that is the
-//! replica itself. Across machines each call has to travel as a message
-//! that a program in any language can read, and it has to arrive meaning
-//! exactly what it meant. This crate holds those messages and their
-//! translation to and from the domain types, and it is the only crate of
-//! the workspace that knows about gRPC: the domain crates stay free of it.
+//! replica itself. Across machines something has to carry each call over
+//! the network and bring the answer back without changing its meaning. This
+//! crate is that something, and the only crate of the workspace that opens
+//! a socket or knows about gRPC: the domain crates stay free of both.
 //!
 //! # What it contains
 //!
 //! - [`v1`]: the messages and gRPC stubs generated from
 //!   `src/proto/bitacora/v1/replica.proto`, the language-neutral source of
 //!   truth of the protocol.
+//! - [`GrpcReplicaConnector`]: the client side. It turns a replica's
+//!   registration into a `dyn ReplicaApi` that talks gRPC.
+//! - [`serve_replica`]: the server side. It serves any `dyn ReplicaApi` on a
+//!   listening socket.
 //! - [`MalformedMessage`]: why a message cannot be converted to a domain
 //!   value. The conversions themselves are `From` and `TryFrom`
 //!   implementations between the [`v1`] messages and the domain types.
@@ -25,7 +28,8 @@
 //!
 //! `build.rs` compiles the protocol file into the [`v1`] module. The
 //! conversion modules translate between those generated messages and the
-//! domain types, in both directions.
+//! domain types, in both directions. The client and the server are thin
+//! adapters on top: convert, call, convert back.
 //!
 //! Three rules shape every call (docs/decisions/0002-grpc-transport.md):
 //!
@@ -43,7 +47,9 @@
 //!
 //! # Invariants
 //!
-//! - A conversion never panics on input from the network.
+//! - A conversion never panics on input from the network. A malformed
+//!   request is answered with `ReplicaError::InvalidRequest`; a malformed
+//!   answer is read as `ReplicaError::Unavailable`.
 //! - Converting a domain value to its message and back yields the same
 //!   value.
 //! - No domain crate depends on this one, on `tonic` or on `prost`.
@@ -53,14 +59,19 @@
 //! - `conversions.rs`: values shared by several messages, and what makes a
 //!   message malformed.
 //! - `error_conversions.rs`: `ReplicaError` to and from its message.
-//! - `request_conversions.rs`: the request of every call, in both
-//!   directions.
+//! - `request_conversions.rs` and `response_conversions.rs`: one conversion
+//!   per call and direction.
+//! - `client.rs`: [`GrpcReplicaConnector`].
+//! - `server.rs`: [`serve_replica`].
 
 #![warn(clippy::missing_docs_in_private_items)]
 
+mod client;
 mod conversions;
 mod error_conversions;
 mod request_conversions;
+mod response_conversions;
+mod server;
 
 /// The messages and gRPC stubs of protocol version 1, generated at build
 /// time from `src/proto/bitacora/v1/replica.proto`. The protocol file
@@ -78,7 +89,9 @@ pub mod v1 {
     tonic::include_proto!("bitacora.v1");
 }
 
+pub use client::{GrpcConnectorSettings, GrpcReplicaConnector};
 pub use conversions::MalformedMessage;
+pub use server::{ServeError, serve_replica};
 
 /// The name of the metadata header that carries the identity of the replica
 /// a request is meant for. Every request must carry it, and a server refuses

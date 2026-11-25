@@ -1,0 +1,4 @@
+change_type: new_component
+component: proto
+note: "Add the replica wire protocol as Protocol Buffers definitions and its gRPC transport, so that writers, readers and the controller reach replicas on other machines."
+issues: [1]

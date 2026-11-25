@@ -160,11 +160,18 @@ version = "0.0.0"
 name = "bitacora-proto"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
+ "bitacora-artifact",
+ "bitacora-client",
+ "bitacora-meta",
+ "bitacora-replica",
+ "bitacora-segment",
  "bitacora-types",
  "bytes",
  "prost",
  "protox",
  "thiserror",
+ "tokio",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
