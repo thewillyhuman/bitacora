@@ -6,6 +6,7 @@
 //! the replica itself behind a fault-injecting link. Because the replica
 //! implements the same trait, the protocol is tested without a socket.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -289,9 +290,122 @@ pub trait ReplicaConnector: Send + Sync {
     fn connect(&self, address: &str) -> Arc<dyn ReplicaApi>;
 }
 
+/// A connector over a fixed set of replica handles, keyed by address.
+///
+/// It serves in-process clusters: tests, the simulator and single-binary
+/// deployments. An address it does not know behaves like a replica that is
+/// down.
+#[derive(Clone, Default)]
+pub struct StaticReplicaConnector {
+    replicas_by_address: BTreeMap<String, Arc<dyn ReplicaApi>>,
+}
+
+impl StaticReplicaConnector {
+    /// Creates a connector that knows no replica.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Makes `replica` reachable at `address`, replacing any previous one.
+    pub fn register(&mut self, address: impl Into<String>, replica: Arc<dyn ReplicaApi>) {
+        self.replicas_by_address.insert(address.into(), replica);
+    }
+}
+
+impl ReplicaConnector for StaticReplicaConnector {
+    fn connect(&self, address: &str) -> Arc<dyn ReplicaApi> {
+        match self.replicas_by_address.get(address) {
+            Some(replica) => Arc::clone(replica),
+            None => Arc::new(UnreachableReplica {
+                address: address.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Stands in for a replica nobody listens for: every request fails as
+/// [`ReplicaError::Unavailable`].
+struct UnreachableReplica {
+    address: String,
+}
+
+impl UnreachableReplica {
+    fn unavailable<Response>(&self) -> Result<Response, ReplicaError> {
+        Err(ReplicaError::Unavailable {
+            reason: format!("no replica is reachable at {}", self.address),
+        })
+    }
+}
+
+#[async_trait]
+impl ReplicaApi for UnreachableReplica {
+    async fn append(&self, _request: AppendRequest) -> Result<AppendResponse, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn read(&self, _request: ReadRequest) -> Result<ReadResponse, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn fence(&self, _request: FenceRequest) -> Result<FenceResponse, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn seal(&self, _request: SealRequest) -> Result<SealResponse, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn delete_segment(&self, _segment: SegmentAddress) -> Result<(), ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn list_segments(&self) -> Result<Vec<SegmentStatus>, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn status(&self) -> Result<ReplicaStatus, ReplicaError> {
+        self.unavailable()
+    }
+
+    async fn drain(&self) -> Result<(), ReplicaError> {
+        self.unavailable()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unknown_address_behaves_like_a_replica_that_is_down() {
+        let connector = StaticReplicaConnector::new();
+        let status = connector.connect("replica-a:7000").status().await;
+        assert_eq!(
+            status,
+            Err(ReplicaError::Unavailable {
+                reason: "no replica is reachable at replica-a:7000".to_owned()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_address_reaches_its_replica() {
+        let mut connector = StaticReplicaConnector::new();
+        connector.register(
+            "replica-a:7000",
+            Arc::new(UnreachableReplica {
+                address: "the registered handle".to_owned(),
+            }),
+        );
+        let status = connector.connect("replica-a:7000").status().await;
+        assert_eq!(
+            status,
+            Err(ReplicaError::Unavailable {
+                reason: "no replica is reachable at the registered handle".to_owned()
+            })
+        );
+    }
 
     #[test]
     fn only_unavailability_is_worth_retrying() {
