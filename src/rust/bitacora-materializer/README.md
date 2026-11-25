@@ -10,6 +10,9 @@ queried, and makes it safe to truncate the log behind it (design, section 11).
   (`MaterializerRunner`).
 - A materializer's corner of the artifact store (`ArtifactNamespace`) and the
   deletion of what is no longer used in it (`sweep_orphans`).
+- The adapter for engines that update pages and log redo records
+  (`PageStore`), which most page-based workloads use instead of the bare
+  contract.
 
 It does not own the log, the metadata records or the artifact store itself;
 it uses them through `bitacora-client`, `bitacora-meta` and
@@ -47,6 +50,24 @@ Three decisions shape the rest:
   current token may belong to a checkpoint about to be committed; only the
   runner that holds the token deletes those, right after its own commit.
 
+### Versioned pages
+
+`PageStore` implements the contract for an engine that only says which pages
+a record touches and how a record changes one page (`PageMaterializer`). It
+keeps the history of the pages as immutable layers, oldest first:
+
+```text
+delta 1..40 | delta 41..90 | image at 90 | delta 91..130 | records in memory
+```
+
+A delta layer holds the records that changed pages over a sequence range; an
+image layer holds every page in full as of one sequence. A checkpoint flushes
+the records in memory into a delta layer and, every few delta layers, writes
+an image. A read as of sequence N takes the page from the newest image at or
+below N and applies the page's later records up to N. Layers older than the
+oldest image kept are dropped; the sequence of that image is the horizon,
+below which pages can no longer be read.
+
 ## Invariants
 
 - A checkpoint is committed only after its artifacts and manifest are stored.
@@ -58,6 +79,8 @@ Three decisions shape the rest:
 - An artifact key is never written twice.
 - The sweeper never deletes an artifact that the committed manifest names or
   that its writer may still commit.
+- A page read at any sequence from the horizon to the last record applied
+  sees exactly the records up to it, whatever was flushed or dropped since.
 
 ## Which file holds what
 
@@ -68,6 +91,8 @@ Three decisions shape the rest:
 | `manifest.rs` | The stored form of a manifest |
 | `runner.rs` | `MaterializerRunner` and its progress reporting |
 | `sweeper.rs` | `sweep_orphans` and the rule for what is garbage |
+| `layer.rs` | The layer files of the page adapter |
+| `page_store.rs` | `PageMaterializer`, `PageStore`, `PageReader` |
 | `test_harness.rs` | The in-process cluster the tests of this crate share |
 
 Tests sit next to the file they test, in `<file>_test.rs`.

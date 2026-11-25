@@ -1,0 +1,4 @@
+change_type: enhancement
+component: materializer
+note: "Add the page store adapter: versioned pages kept as delta and image layers, with point-in-time reads, a layering policy and a read horizon."
+issues: [4]

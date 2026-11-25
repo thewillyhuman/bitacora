@@ -94,6 +94,45 @@ Why. Reads of the materialized state should not stall because a checkpoint
 is late. The cost is that the artifacts of a failed attempt are orphans
 until the next successful commit.
 
+## Layer files of the page adapter
+
+One layout serves delta and image layers: a fixed-size header, an index
+from page identifier to blob, then the blobs (`layer.rs` gives the bytes).
+Header, index and every blob carry their own CRC-32C. A blob is the page
+itself in an image layer, and the page's records in a delta layer.
+
+Why. A page read wants one page out of a layer that may hold thousands. With
+the header first and of fixed size, a reader fetches the header, then the
+index, then exactly one blob, and can check each on its own. The page store
+keeps indexes it has read in memory, so later reads cost one range request
+per layer.
+
+Choices kept simple on purpose:
+
+- **An image layer holds every page**, not only the pages that changed. Then
+  one rule collects garbage: keep the `images_kept` newest images and drop
+  every layer older than the oldest of them. Its sequence is the horizon;
+  reads below it fail with an explicit error. The price is rewriting cold
+  pages at every image. An engine with a large, mostly cold page space would
+  split images by page range as Neon does; the layer format already allows
+  an image that holds only some pages.
+- **An image is written after a fixed number of delta layers** (four by
+  default), at a checkpoint. There is no background compaction.
+- **Records are validated when a page is read or imaged, not when they are
+  applied.** Applying only appends to in-memory chains, because
+  `apply_records` is synchronous and the page before the record may be in
+  the artifact store. A `PageMaterializer` should fail only for records its
+  engine can never have written.
+- **`PageMaterializer` must be `Default` and encode its page identifiers.**
+  The contract restores a materializer with a static function, so the logic
+  cannot be handed in; it is created. Anything that shapes pages must be a
+  constant of the type, which is also what keeps it the same in every
+  process that reads the artifacts.
+
+Not done: compression of layers, a cache of page images in the page store
+(the compute node caches hot pages), and read-only followers that tail the
+log without checkpointing.
+
 ## One addition to the core contract
 
 `Materializer::wants_checkpoint` (default `false`) lets an instance ask for

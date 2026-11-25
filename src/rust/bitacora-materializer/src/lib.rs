@@ -15,6 +15,8 @@
 //! - What runs it: [`MaterializerRunner`], with [`RunnerDependencies`], [`RunnerSettings`],
 //!   [`RunnerProgress`], [`Progress`], [`RunnerError`] and [`RunnerStopped`].
 //! - What cleans up after it: [`sweep_orphans`], with [`SweepReport`] and [`SweepError`].
+//! - The adapter for engines with pages and redo records: [`PageMaterializer`], [`PageStore`],
+//!   [`PageReader`], with [`LayeringPolicy`] and [`PageReadError`].
 //! - The stored form of a manifest: [`encode_manifest`] and [`decode_manifest`].
 //!
 //! # How it fits together
@@ -37,8 +39,10 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 mod contract;
+mod layer;
 mod manifest;
 mod namespace;
+mod page_store;
 mod runner;
 mod sweeper;
 
@@ -48,6 +52,7 @@ mod test_harness;
 pub use contract::{CheckpointManifest, Materializer, MaterializerError};
 pub use manifest::{decode_manifest, encode_manifest};
 pub use namespace::{ArtifactNamespace, namespace_prefix, token_of_artifact};
+pub use page_store::{LayeringPolicy, PageMaterializer, PageReadError, PageReader, PageStore};
 pub use runner::{
     MaterializerRunner, Progress, RunnerDependencies, RunnerError, RunnerProgress, RunnerSettings,
     RunnerStopped,
