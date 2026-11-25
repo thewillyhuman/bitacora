@@ -5,4 +5,11 @@
 //! the scrub that rereads it later. It makes no decisions about ordering,
 //! membership or leadership (design, section 7).
 
+mod disk;
 pub mod format;
+mod local_disk;
+mod memory_disk;
+
+pub use disk::{Disk, DiskFile, DiskSpace};
+pub use local_disk::LocalDisk;
+pub use memory_disk::{DEFAULT_MEMORY_DISK_CAPACITY_BYTES, MemoryDisk};
