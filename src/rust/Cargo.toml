@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "bitacora",
     "bitacora-artifact",
     "bitacora-client",
     "bitacora-controller",
@@ -25,6 +26,7 @@ authors = ["Guillermo Facundo Colunga"]
 
 [workspace.dependencies]
 # First-party crates.
+bitacora = { path = "bitacora", version = "0.0.0" }
 bitacora-artifact = { path = "bitacora-artifact", version = "0.0.0" }
 bitacora-client = { path = "bitacora-client", version = "0.0.0" }
 bitacora-controller = { path = "bitacora-controller", version = "0.0.0" }

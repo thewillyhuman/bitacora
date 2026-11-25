@@ -1,0 +1,4 @@
+change_type: new_component
+component: client
+note: "Add the bitacora crate, which applications depend on: a cluster configuration and connect, which builds a client from it over etcd and gRPC."
+issues: [1]
