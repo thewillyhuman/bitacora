@@ -5,7 +5,8 @@
 # Cargo output, for those who build with cargo or use rust-analyzer.
 /src/rust/target/
 
-# Editors and operating systems.
+# Editors, assistants and operating systems.
+.claude/
 .DS_Store
 .idea/
 .vscode/

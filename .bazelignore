@@ -1,0 +1,4 @@
+# Directories that are not part of the build. Tools keep worktrees and
+# scratch copies of the repository here; Bazel must not read their BUILD
+# files as packages of this workspace.
+.claude
