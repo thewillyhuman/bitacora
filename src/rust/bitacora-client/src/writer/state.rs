@@ -89,8 +89,10 @@ pub(crate) struct WriterState {
     generation: u64,
     segment: SegmentDescriptor,
     segment_opened_at: Instant,
-    /// How many bytes of batches were assigned to the open segment.
-    segment_bytes: u64,
+    /// How many bytes of committed batches the open segment holds. Batches
+    /// still in flight do not count: rolling for size before they commit
+    /// would seal the segment without them.
+    committed_segment_bytes: u64,
     write_quorum: usize,
     replicas: Vec<ReplicaProgress>,
     /// The sequence number the next record gets.
@@ -120,7 +122,7 @@ impl WriterState {
             generation: 0,
             segment,
             segment_opened_at: now,
-            segment_bytes: 0,
+            committed_segment_bytes: 0,
             write_quorum,
             replicas: fresh_progress(replica_ids, durable_sequence, now),
             next_sequence: segment.first_sequence,
@@ -175,7 +177,6 @@ impl WriterState {
         let (waiter, commit_receiver) = oneshot::channel();
         self.next_sequence = range.last().next();
         self.unacknowledged_bytes += batch.frame().len();
-        self.segment_bytes += to_u64(batch.frame().len());
         self.pending.push_back(PendingBatch {
             range,
             batch,
@@ -295,7 +296,7 @@ impl WriterState {
                 return Some(RollReason::ReplicaUnreachable(replica.replica_id.clone()));
             }
         }
-        if self.segment_bytes >= settings.target_segment_bytes {
+        if self.committed_segment_bytes >= settings.target_segment_bytes {
             return Some(RollReason::SegmentFull);
         }
         if now.duration_since(self.segment_opened_at) >= settings.target_segment_age {
@@ -334,7 +335,6 @@ impl WriterState {
         debug_assert_eq!(new_segment.first_sequence, self.durable_sequence.next());
         self.pending
             .retain(|pending_batch| pending_batch.range.last() > self.durable_sequence);
-        let mut segment_bytes = 0;
         for pending_batch in &mut self.pending {
             let payloads: Vec<Bytes> = pending_batch
                 .batch
@@ -346,12 +346,11 @@ impl WriterState {
                     .unwrap_or_else(|encode_error: EncodeError| {
                         unreachable!("a batch that was encoded once encodes again: {encode_error}")
                     });
-            segment_bytes += to_u64(pending_batch.batch.frame().len());
         }
         self.generation += 1;
         self.segment = new_segment;
         self.segment_opened_at = now;
-        self.segment_bytes = segment_bytes;
+        self.committed_segment_bytes = 0;
         self.replicas = fresh_progress(new_replica_ids, self.durable_sequence, now);
         self.is_rolling = false;
     }
@@ -405,6 +404,7 @@ impl WriterState {
             }
             if let Some(waiter) = pending_batch.waiter.take() {
                 self.unacknowledged_bytes -= pending_batch.batch.frame().len();
+                self.committed_segment_bytes += to_u64(pending_batch.batch.frame().len());
                 // The appender may have stopped waiting; the record is
                 // committed either way.
                 drop(waiter.send(Ok(())));
@@ -848,10 +848,44 @@ mod tests {
         };
         let mut state = new_state();
         let _receivers = enqueue(&mut state, 2);
+        acknowledge(&mut state, 0, 101);
+        acknowledge(&mut state, 1, 101);
         assert_eq!(
             state.roll_reason(Instant::now(), &settings),
             Some(RollReason::SegmentFull)
         );
+    }
+
+    /// Rolling for size before the records commit would seal the segment
+    /// without them and open the next one already full.
+    #[tokio::test(start_paused = true)]
+    async fn records_still_in_flight_do_not_count_towards_the_segment_size() {
+        let settings = WriterSettings {
+            target_segment_bytes: 2_000,
+            ..WriterSettings::default()
+        };
+        let mut state = new_state();
+        let _receivers = enqueue(&mut state, 2);
+        assert_eq!(state.roll_reason(Instant::now(), &settings), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn segment_opened_by_a_roll_starts_empty() {
+        let settings = WriterSettings {
+            target_segment_bytes: 2_000,
+            ..WriterSettings::default()
+        };
+        let mut state = new_state();
+        let _receivers = enqueue(&mut state, 4);
+        acknowledge(&mut state, 0, 101);
+        acknowledge(&mut state, 1, 101);
+        state.begin_roll();
+        state.complete_roll(
+            segment(4, 102),
+            replica_ids(&["replica-d", "replica-e", "replica-f"]),
+            Instant::now(),
+        );
+        assert_eq!(state.roll_reason(Instant::now(), &settings), None);
     }
 
     #[tokio::test(start_paused = true)]
