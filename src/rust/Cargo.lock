@@ -17,10 +17,9 @@ dependencies = [
 name = "bitacora-client"
 version = "0.0.0"
 dependencies = [
- "async-trait",
  "bitacora-meta",
- "bitacora-replica",
  "bitacora-segment",
+ "bitacora-testkit",
  "bitacora-types",
  "bytes",
  "thiserror",

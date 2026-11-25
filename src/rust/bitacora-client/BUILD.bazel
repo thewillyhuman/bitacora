@@ -4,7 +4,7 @@ exports_files(["Cargo.toml"])
 
 bitacora_library(
     name = "bitacora_client",
-    test_deps = ["//src/rust/bitacora-replica:bitacora_replica"],
+    test_deps = ["//src/rust/bitacora-testkit:bitacora_testkit"],
     deps = [
         "//src/rust/bitacora-meta:bitacora_meta",
         "//src/rust/bitacora-segment:bitacora_segment",

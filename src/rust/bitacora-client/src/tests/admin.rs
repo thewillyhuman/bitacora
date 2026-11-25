@@ -31,8 +31,8 @@ async fn created_stream_can_be_written_at_once() {
 async fn stream_created_on_too_few_replicas_waits_for_the_controller() {
     let cluster = Cluster::start(3).await;
     cluster
-        .metadata
-        .remove_replica(&cluster.nodes[2].replica_id)
+        .metadata()
+        .remove_replica(cluster.nodes()[2].replica_id())
         .await
         .expect("the replica is removed");
     let created = cluster

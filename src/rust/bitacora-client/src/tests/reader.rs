@@ -133,7 +133,7 @@ async fn range_read_uses_another_replica_when_one_is_down() {
     let writer = open_writer(&cluster, "compute-1").await;
     append_numbered(&writer, 3).await;
     settle(HEARTBEAT_SETTLE).await;
-    cluster.nodes[0].set_reachable(false);
+    cluster.nodes()[0].set_reachable(false);
     let records = reader(&cluster)
         .read_range(range(1, 3))
         .await
@@ -149,10 +149,10 @@ async fn range_read_skips_a_replica_whose_sealed_copy_is_short() {
     append_numbered(&writer, 2).await;
     settle(HEARTBEAT_SETTLE).await;
     // Replica 0 misses records 3..=5 and the seal that follows.
-    cluster.nodes[0].set_reachable(false);
+    cluster.nodes()[0].set_reachable(false);
     append_numbered(&writer, 3).await;
     settle(WriterSettings::default().replica_failure_timeout + Duration::from_secs(1)).await;
-    cluster.nodes[0].set_reachable(true);
+    cluster.nodes()[0].set_reachable(true);
 
     let records = reader(&cluster)
         .read_range(range(1, 5))
@@ -172,7 +172,7 @@ async fn range_read_fails_when_no_replica_of_the_segment_answers() {
     let cluster = Cluster::start(3).await;
     let writer = open_writer(&cluster, "compute-1").await;
     append_numbered(&writer, 3).await;
-    for node in &cluster.nodes {
+    for node in cluster.nodes() {
         node.set_reachable(false);
     }
     let read = reader(&cluster).read_range(range(1, 3)).await;
@@ -197,7 +197,7 @@ async fn reading_a_stream_that_does_not_exist_fails() {
 
 async fn truncate_below(cluster: &Cluster, low_water_mark: u64) {
     cluster
-        .metadata
+        .metadata()
         .update_stream(STREAM, |stream| {
             stream.low_water_mark = SequenceNumber::new(low_water_mark);
             Ok(())
@@ -308,8 +308,8 @@ async fn follower_is_never_served_an_uncommitted_record() {
     let cluster = Cluster::start(3).await;
     let writer = Arc::new(open_writer(&cluster, "compute-1").await);
     append_numbered(&writer, 2).await;
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     let _in_flight = {
         let writer = Arc::clone(&writer);
         tokio::spawn(async move { writer.append(Bytes::from("reaches one replica only")).await })
@@ -338,7 +338,7 @@ async fn follower_continues_across_a_roll() {
         .await
         .expect("follows");
     append_numbered(&writer, 3).await;
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     settle(WriterSettings::default().replica_failure_timeout + Duration::from_secs(1)).await;
     append_numbered(&writer, 3).await;
 
@@ -382,7 +382,12 @@ async fn follower_switches_away_from_a_replica_cut_off_from_the_writer() {
 
     // The follower's replica stops hearing from the writer but still
     // answers reads, so it looks alive and merely idle.
-    cluster.nodes[0].replica.drain().await.expect("drains");
+    cluster.nodes()[0]
+        .replica()
+        .expect("the node is running")
+        .drain()
+        .await
+        .expect("drains");
     append_numbered(&writer, 2).await;
     assert_eq!(
         (caught_up, take(&mut following, 2).await),
@@ -401,9 +406,9 @@ async fn follower_rides_out_a_metadata_outage() {
     append_numbered(&writer, 2).await;
     let before_outage = take(&mut following, 2).await;
 
-    cluster.key_value_store.set_unavailable(true);
+    cluster.key_value_store().set_unavailable(true);
     let during_outage = timeout(Duration::from_secs(3), following.next()).await;
-    cluster.key_value_store.set_unavailable(false);
+    cluster.key_value_store().set_unavailable(false);
     append_numbered(&writer, 1).await;
     assert!(
         before_outage == [1, 2] && during_outage.is_err() && take(&mut following, 1).await == [3]

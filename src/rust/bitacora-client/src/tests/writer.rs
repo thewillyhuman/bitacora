@@ -120,12 +120,12 @@ async fn committed_records_reach_every_healthy_replica() {
     append_many(&writer, 4).await;
     settle(HEARTBEAT_SETTLE).await;
     let segment = cluster.segment_address(1).await;
-    for node in &cluster.nodes {
+    for node in cluster.nodes() {
         assert_eq!(
             node.local_end(segment).await,
             Some(SequenceNumber::new(4)),
             "{}",
-            node.replica_id
+            node.replica_id()
         );
     }
 }
@@ -137,7 +137,7 @@ async fn replicas_serve_committed_records_within_a_heartbeat() {
     append_many(&writer, 3).await;
     settle(HEARTBEAT_SETTLE).await;
     let segment = cluster.segment_address(1).await;
-    for node in &cluster.nodes {
+    for node in cluster.nodes() {
         assert_eq!(node.readable_sequences(segment).await, [1, 2, 3]);
     }
 }
@@ -185,7 +185,7 @@ async fn oversized_record_is_rejected_and_the_writer_keeps_working() {
 async fn appends_do_not_need_the_metadata_store() {
     let cluster = Cluster::start(3).await;
     let writer = open(&cluster, "compute-1").await;
-    cluster.key_value_store.set_unavailable(true);
+    cluster.key_value_store().set_unavailable(true);
     assert_eq!(writer.append(record("a")).await, Ok(SequenceNumber::FIRST));
 }
 
@@ -195,7 +195,7 @@ async fn appends_do_not_need_the_metadata_store() {
 async fn append_commits_with_one_replica_down() {
     let cluster = Cluster::start(3).await;
     let writer = open(&cluster, "compute-1").await;
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     assert_eq!(writer.append(record("a")).await, Ok(SequenceNumber::FIRST));
 }
 
@@ -203,11 +203,11 @@ async fn append_commits_with_one_replica_down() {
 async fn append_waits_without_a_quorum_and_commits_when_it_returns() {
     let cluster = Cluster::start(3).await;
     let writer = Arc::new(open(&cluster, "compute-1").await);
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     let mut pending = append_in_background(&writer, "a");
     let waited = timeout(Duration::from_secs(2), &mut pending).await;
-    cluster.nodes[1].set_reachable(true);
+    cluster.nodes()[1].set_reachable(true);
     let committed = pending.await.expect("task finishes");
     assert!(
         waited.is_err() && committed == Ok(SequenceNumber::FIRST),
@@ -219,13 +219,13 @@ async fn append_waits_without_a_quorum_and_commits_when_it_returns() {
 async fn replica_that_missed_records_catches_up_when_it_returns() {
     let cluster = Cluster::start(3).await;
     let writer = open(&cluster, "compute-1").await;
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     append_many(&writer, 5).await;
-    cluster.nodes[2].set_reachable(true);
+    cluster.nodes()[2].set_reachable(true);
     settle(Duration::from_secs(1)).await;
     let segment = cluster.segment_address(1).await;
     assert_eq!(
-        cluster.nodes[2].local_end(segment).await,
+        cluster.nodes()[2].local_end(segment).await,
         Some(SequenceNumber::new(5))
     );
 }
@@ -244,16 +244,16 @@ async fn appends_wait_while_too_much_is_unacknowledged() {
             .await
             .expect("the writer opens"),
     );
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     let first = append_in_background(&writer, &"x".repeat(2048));
     settle(HEARTBEAT_SETTLE).await;
     let second = append_in_background(&writer, "held back by flow control");
     settle(HEARTBEAT_SETTLE).await;
     let segment = cluster.segment_address(1).await;
-    let sent_while_full = cluster.nodes[0].local_end(segment).await;
+    let sent_while_full = cluster.nodes()[0].local_end(segment).await;
 
-    cluster.nodes[1].set_reachable(true);
+    cluster.nodes()[1].set_reachable(true);
     let committed = (
         first.await.expect("task finishes"),
         second.await.expect("task finishes"),
@@ -275,7 +275,7 @@ async fn writer_rolls_away_from_a_replica_that_stays_down() {
     let writer = open(&cluster, "compute-1").await;
     cluster.place_standby(&[0, 1, 3]).await;
     append_many(&writer, 3).await;
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     settle(WriterSettings::default().replica_failure_timeout + Duration::from_secs(1)).await;
 
     let next = writer.append(record("after the roll")).await;
@@ -302,8 +302,8 @@ async fn records_in_flight_during_a_roll_keep_their_sequence_numbers() {
     let writer = Arc::new(open(&cluster, "compute-1").await);
     cluster.place_standby(&[0, 3, 4]).await;
     append_many(&writer, 2).await;
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
 
     let in_flight = append_in_background(&writer, "uncommitted when the roll starts");
     let committed = in_flight.await.expect("task finishes");
@@ -328,8 +328,8 @@ async fn sealed_segment_keeps_no_record_above_its_sealed_end() {
     let writer = Arc::new(open(&cluster, "compute-1").await);
     cluster.place_standby(&[0, 3, 4]).await;
     append_many(&writer, 2).await;
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     append_in_background(&writer, "uncommitted when the roll starts")
         .await
         .expect("task finishes")
@@ -337,7 +337,7 @@ async fn sealed_segment_keeps_no_record_above_its_sealed_end() {
     settle(HEARTBEAT_SETTLE).await;
     let old_segment = cluster.segment_address(1).await;
     assert_eq!(
-        cluster.nodes[0].local_end(old_segment).await,
+        cluster.nodes()[0].local_end(old_segment).await,
         Some(SequenceNumber::new(2))
     );
 }
@@ -348,7 +348,12 @@ async fn writer_rolls_at_once_when_a_replica_drains() {
     let writer = open(&cluster, "compute-1").await;
     cluster.place_standby(&[0, 1, 3]).await;
     append_many(&writer, 2).await;
-    cluster.nodes[2].replica.drain().await.expect("drains");
+    cluster.nodes()[2]
+        .replica()
+        .expect("the node is running")
+        .drain()
+        .await
+        .expect("drains");
     settle(Duration::from_secs(1)).await;
     assert_eq!(cluster.stream().await.segments.len(), 2);
 }
@@ -382,7 +387,7 @@ async fn writer_rolls_when_the_segment_reaches_its_target_size() {
 async fn without_a_standby_the_writer_keeps_committing_on_its_segment() {
     let cluster = Cluster::start(3).await;
     let writer = open(&cluster, "compute-1").await;
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     settle(WriterSettings::default().replica_failure_timeout + Duration::from_secs(5)).await;
     let committed = writer.append(record("a")).await;
     assert_eq!(
@@ -438,13 +443,13 @@ async fn takeover_keeps_an_uncommitted_tail_found_on_a_responder() {
     let cluster = Cluster::start(3).await;
     let first_writer = Arc::new(open(&cluster, "compute-1").await);
     append_many(&first_writer, 3).await;
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     let in_flight = append_in_background(&first_writer, "reached one replica only");
     settle(HEARTBEAT_SETTLE).await;
     crash(first_writer, in_flight).await;
-    cluster.nodes[1].set_reachable(true);
-    cluster.nodes[2].set_reachable(true);
+    cluster.nodes()[1].set_reachable(true);
+    cluster.nodes()[2].set_reachable(true);
     cluster.place_standby(&[0, 1, 2]).await;
 
     let second_writer = open(&cluster, "compute-2").await;
@@ -452,7 +457,7 @@ async fn takeover_keeps_an_uncommitted_tail_found_on_a_responder() {
     assert_eq!(
         (
             cluster.stream().await.segments[0].sealed_end(),
-            cluster.nodes[1].local_end(old_segment).await,
+            cluster.nodes()[1].local_end(old_segment).await,
             second_writer.append(record("next")).await
         ),
         (
@@ -468,14 +473,14 @@ async fn takeover_discards_a_tail_that_no_responder_holds() {
     let cluster = Cluster::start(3).await;
     let first_writer = Arc::new(open(&cluster, "compute-1").await);
     append_many(&first_writer, 3).await;
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     let in_flight = append_in_background(&first_writer, "reached one replica only");
     settle(HEARTBEAT_SETTLE).await;
     crash(first_writer, in_flight).await;
-    cluster.nodes[0].set_reachable(false);
-    cluster.nodes[1].set_reachable(true);
-    cluster.nodes[2].set_reachable(true);
+    cluster.nodes()[0].set_reachable(false);
+    cluster.nodes()[1].set_reachable(true);
+    cluster.nodes()[2].set_reachable(true);
     cluster.place_standby(&[1, 2, 0]).await;
 
     let second_writer = open(&cluster, "compute-2").await;
@@ -494,8 +499,8 @@ async fn takeover_fails_without_a_recovery_quorum() {
     let first_writer = open(&cluster, "compute-1").await;
     append_many(&first_writer, 3).await;
     drop(first_writer);
-    cluster.nodes[1].set_reachable(false);
-    cluster.nodes[2].set_reachable(false);
+    cluster.nodes()[1].set_reachable(false);
+    cluster.nodes()[2].set_reachable(false);
     cluster.place_standby(&[0, 1, 2]).await;
 
     let opened = cluster
@@ -607,8 +612,9 @@ async fn replica_fenced_by_a_newer_writer_stops_an_older_takeover() {
     append_many(&first_writer, 2).await;
     drop(first_writer);
     let segment = cluster.segment_address(1).await;
-    for node in &cluster.nodes {
-        node.replica
+    for node in cluster.nodes() {
+        node.replica()
+            .expect("the node is running")
             .fence(bitacora_types::replica_api::FenceRequest {
                 segment,
                 epoch: Epoch::new(9),
@@ -650,8 +656,9 @@ async fn closed_writer_tells_the_replicas_the_sealed_end() {
     append_many(&writer, 3).await;
     writer.close().await.expect("closes");
     let segment = cluster.segment_address(1).await;
-    let sealed_ends: Vec<_> = cluster.nodes[0]
-        .replica
+    let sealed_ends: Vec<_> = cluster.nodes()[0]
+        .replica()
+        .expect("the node is running")
         .list_segments()
         .await
         .expect("lists")
@@ -668,7 +675,7 @@ async fn writer_opened_after_a_clean_close_needs_no_recovery() {
     let first_writer = open(&cluster, "compute-1").await;
     append_many(&first_writer, 3).await;
     first_writer.close().await.expect("closes");
-    for old_replica in &cluster.nodes[..3] {
+    for old_replica in &cluster.nodes()[..3] {
         old_replica.set_reachable(false);
     }
     cluster.place_standby(&[3, 4, 5]).await;
