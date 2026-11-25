@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "bitacora-replica",
     "bitacora-segment",
     "bitacora-types",
 ]
@@ -15,6 +16,7 @@ authors = ["Guillermo Facundo Colunga"]
 
 [workspace.dependencies]
 # First-party crates.
+bitacora-replica = { path = "bitacora-replica", version = "0.0.0" }
 bitacora-segment = { path = "bitacora-segment", version = "0.0.0" }
 bitacora-types = { path = "bitacora-types", version = "0.0.0" }
 
@@ -28,6 +30,7 @@ serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
 
 [workspace.lints.rust]
 # Unsafe code is forbidden by default. A module that needs it carries an
@@ -40,6 +43,8 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Crate names already scope every item, so `segment::SegmentWriter` is fine.
 module_name_repetitions = "allow"
+# Descriptive names win over this lint: a `Replica` has a `replica_id`.
+struct_field_names = "allow"
 # `expect` states an invariant that cannot fail, so it is not part of a
 # function's contract. Conditions a caller can trigger are documented by hand
 # under `# Panics`.

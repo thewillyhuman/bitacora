@@ -1,0 +1,23 @@
+[package]
+name = "bitacora-replica"
+description = "The bitacora replica: appends batches to segment files, flushes them and serves them back."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bitacora-segment.workspace = true
+bitacora-types.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
