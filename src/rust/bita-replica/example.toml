@@ -3,6 +3,11 @@
 #   bita-replica --config /etc/bitacora/replica.toml
 #
 # A setting that is misspelled or unknown stops the replica at start.
+#
+# A value in double quotes may take all or part of itself from the
+# environment of the process: "${NAME}" stands for the value of the variable
+# NAME. A variable that is not set stops the replica at start. This is how one
+# file serves many replicas that differ only in their name and address.
 
 # The identity a new, empty data directory gets. A directory that was used
 # before keeps the identity it was first opened with, whatever this says.

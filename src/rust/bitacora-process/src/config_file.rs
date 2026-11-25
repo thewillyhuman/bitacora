@@ -15,9 +15,14 @@
 //!
 //! # How it works
 //!
-//! The file is read whole and parsed as TOML into the type the daemon asks for. The parser's error
-//! already says which line and which field is wrong and what was expected there; this file adds the path
-//! of the file.
+//! The file is read whole, its references to environment variables are replaced, and the result is
+//! parsed as TOML into the type the daemon asks for. The parser's error already says which line and
+//! which field is wrong and what was expected there; this file adds the path of the file.
+//!
+//! A double-quoted string may take all or part of its value from the environment of the process:
+//! `replica_id = "${POD_NAME}"`. That is how one file serves many processes that differ in a few
+//! settings, as the pods of one set on Kubernetes do. A reference to a variable that is not set is an
+//! error, never an empty value. `config_environment.rs` has the exact rules.
 //!
 //! Unknown fields are refused by the configuration types themselves: every one of them carries
 //! `#[serde(deny_unknown_fields)]`, and the tests of each daemon check it. This function cannot enforce
@@ -34,15 +39,19 @@
 //! # See also
 //!
 //! - `command_line.rs`: where the path of the file comes from.
+//! - `config_environment.rs`: how references to environment variables are replaced.
 
 // This module is the adapter that reads the configuration from the file system at start, before any of
 // the injected interfaces exist.
 #![allow(clippy::disallowed_methods)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use thiserror::Error;
+
+use crate::config_environment::expand_environment;
 
 /// Why a configuration file could not be used.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -55,8 +64,8 @@ pub enum ConfigFileError {
         /// What the operating system reported.
         reason: String,
     },
-    /// The file was read but is not a valid configuration: it is not TOML, a field is unknown or
-    /// missing, or a value has the wrong type.
+    /// The file was read but is not a valid configuration: it refers to an environment variable that
+    /// is not set, it is not TOML, a field is unknown or missing, or a value has the wrong type.
     #[error("configuration file {} is invalid: {reason}", path.display())]
     Invalid {
         /// The file that was read.
@@ -68,7 +77,9 @@ pub enum ConfigFileError {
 
 /// Reads the TOML file at `path` into a configuration.
 ///
-/// Reads from the file system, synchronously: it is meant to be called once, at start.
+/// Reads from the file system, synchronously: it is meant to be called once, at start. A `${NAME}`
+/// inside a double-quoted string of the file is replaced by the value of the environment variable
+/// `NAME` of this process before the file is parsed.
 ///
 /// # Arguments
 ///
@@ -81,7 +92,8 @@ pub enum ConfigFileError {
 /// # Errors
 ///
 /// * [`ConfigFileError::Unreadable`] if the file cannot be read.
-/// * [`ConfigFileError::Invalid`] if its content is not a valid configuration of type `Config`.
+/// * [`ConfigFileError::Invalid`] if it refers to an environment variable that is not set, or if its
+///   content is not a valid configuration of type `Config`.
 ///
 /// # Examples
 ///
@@ -107,6 +119,19 @@ pub enum ConfigFileError {
 /// # }
 /// ```
 pub fn load_config_file<Config: DeserializeOwned>(path: &Path) -> Result<Config, ConfigFileError> {
+    load_config_file_with(path, &process_environment())
+}
+
+/// Reads the TOML file at `path` into a configuration, taking the values of the environment variables it
+/// refers to from `variables`.
+///
+/// # Errors
+///
+/// As [`load_config_file`].
+fn load_config_file_with<Config: DeserializeOwned>(
+    path: &Path,
+    variables: &BTreeMap<String, String>,
+) -> Result<Config, ConfigFileError> {
     let file_text = match std::fs::read_to_string(path) {
         Ok(file_text) => file_text,
         Err(io_error) => {
@@ -116,13 +141,36 @@ pub fn load_config_file<Config: DeserializeOwned>(path: &Path) -> Result<Config,
             });
         }
     };
-    match toml::from_str(&file_text) {
+    let expanded_text = match expand_environment(&file_text, variables) {
+        Ok(expanded_text) => expanded_text,
+        Err(expansion_error) => {
+            return Err(ConfigFileError::Invalid {
+                path: path.to_owned(),
+                reason: expansion_error.to_string(),
+            });
+        }
+    };
+    match toml::from_str(&expanded_text) {
         Ok(config) => Ok(config),
         Err(toml_error) => Err(ConfigFileError::Invalid {
             path: path.to_owned(),
             reason: toml_error.to_string(),
         }),
     }
+}
+
+/// The environment variables of this process whose name and value are both text.
+///
+/// A variable that is not valid UTF-8 is left out, so a reference to it is reported as not set: a
+/// configuration cannot hold such a value anyway.
+fn process_environment() -> BTreeMap<String, String> {
+    let mut variables = BTreeMap::new();
+    for (name, value) in std::env::vars_os() {
+        if let (Ok(name), Ok(value)) = (name.into_string(), value.into_string()) {
+            variables.insert(name, value);
+        }
+    }
+    variables
 }
 
 #[cfg(test)]

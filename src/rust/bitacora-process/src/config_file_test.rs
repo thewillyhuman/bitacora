@@ -5,6 +5,8 @@
 //! - A valid file is loaded, with defaults for what it leaves out.
 //! - A missing file, a file that is not TOML, an unknown field, a missing field and a value of the wrong
 //!   type are each refused with an error that names the file and what is wrong.
+//! - A setting can take its value from the environment, and a variable that is not set is refused with
+//!   the file, the line and the variable.
 //!
 //! # How the fixtures work
 //!
@@ -171,4 +173,50 @@ fn value_of_the_wrong_type_is_reported_with_what_was_expected() {
     let message = error_message_for("listen_address = \"0.0.0.0:7000\"\nscrub_interval_seconds = \"often\"\n");
 
     assert!(message.contains("invalid type: string"), "{message}");
+}
+
+/// The environment the tests of references load with: `POD_NAME` is `replica-0`, nothing else is set.
+fn environment_with_a_pod_name() -> BTreeMap<String, String> {
+    let mut variables = BTreeMap::new();
+    variables.insert("POD_NAME".to_owned(), "replica-0".to_owned());
+    variables
+}
+
+#[test]
+fn setting_takes_its_value_from_the_environment() {
+    let (_directory, path) = write_config("listen_address = \"${POD_NAME}.replicas:7000\"\n");
+
+    let config: TestConfig = load_config_file_with(&path, &environment_with_a_pod_name()).expect("valid file");
+
+    assert_eq!(config.listen_address, "replica-0.replicas:7000");
+}
+
+#[test]
+fn reference_to_an_unset_variable_is_refused_by_name() {
+    let (_directory, path) = write_config("listen_address = \"${NODE_NAME}:7000\"\n");
+
+    let refused: Result<TestConfig, ConfigFileError> = load_config_file_with(&path, &environment_with_a_pod_name());
+
+    let message = refused.expect_err("the variable is not set").to_string();
+    assert!(message.contains("`NODE_NAME` is not set"), "{message}");
+}
+
+#[test]
+fn reference_to_an_unset_variable_is_refused_with_the_file() {
+    let (_directory, path) = write_config("listen_address = \"${NODE_NAME}:7000\"\n");
+
+    let refused: Result<TestConfig, ConfigFileError> = load_config_file_with(&path, &environment_with_a_pod_name());
+
+    let message = refused.expect_err("the variable is not set").to_string();
+    assert!(message.contains(&path.display().to_string()), "{message}");
+}
+
+/// `PATH` is set wherever tests run, under Bazel and under Cargo.
+#[test]
+fn references_are_resolved_from_the_environment_of_the_process() {
+    let (_directory, path) = write_config("listen_address = \"${PATH}\"\n");
+
+    let config: TestConfig = load_config_file(&path).expect("PATH is set");
+
+    assert_eq!(Ok(config.listen_address), std::env::var("PATH"));
 }

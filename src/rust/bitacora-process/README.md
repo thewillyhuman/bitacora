@@ -52,6 +52,7 @@ follows a flag that each daemon sets when it can do its work and clears when it 
 | `src/lib.rs` | The public surface |
 | `src/command_line.rs` | `parse_command_line`, `usage` |
 | `src/config_file.rs` | `load_config_file` |
+| `src/config_environment.rs` | References to environment variables in a configuration file |
 | `src/logging.rs` | `LogSettings`, `init_logging` |
 | `src/shutdown.rs` | `ShutdownListener` |
 | `src/metrics.rs` | `MetricsRegistry`, the metric types, the naming scheme, the request families |

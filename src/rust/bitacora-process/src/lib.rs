@@ -16,7 +16,8 @@
 //! # What it contains
 //!
 //! - [`parse_command_line`], [`CommandLine`], [`usage`]: `--config <path>`.
-//! - [`load_config_file`]: a TOML file into a configuration type.
+//! - [`load_config_file`]: a TOML file into a configuration type, with `${NAME}` in its strings
+//!   taken from the environment.
 //! - [`init_logging`], [`LogSettings`]: structured logs on standard output.
 //! - [`ShutdownListener`]: SIGTERM and SIGINT.
 //! - [`MetricsRegistry`], [`Counter`], [`Gauge`], [`DurationHistogram`]: the metrics of a process.
@@ -55,6 +56,7 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 mod command_line;
+mod config_environment;
 mod config_file;
 mod http_endpoint;
 mod instrumented_artifact_store;

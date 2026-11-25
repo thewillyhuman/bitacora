@@ -1,0 +1,4 @@
+change_type: enhancement
+component: process
+note: "A double-quoted string in a daemon's configuration file may take its value from the environment with ${NAME}, so that one file serves many processes; a variable that is not set stops the daemon at start."
+issues: [5]

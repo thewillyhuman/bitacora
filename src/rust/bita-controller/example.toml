@@ -5,6 +5,10 @@
 # Run two or three with the same configuration except `identity`: one leads
 # and the others stand by. A setting that is misspelled or unknown stops the
 # controller at start.
+#
+# A value in double quotes may take all or part of itself from the
+# environment of the process: "${NAME}" stands for the value of the variable
+# NAME. A variable that is not set stops the controller at start.
 
 # The name of this instance, recorded with the leadership so that an operator
 # can see who leads. Give every instance its own.
