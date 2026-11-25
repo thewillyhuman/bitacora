@@ -280,6 +280,16 @@ impl ReplicaRecord {
     }
 }
 
+/// A stream that was deleted and whose segments still have to be removed
+/// from replicas and the object store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedStreamRecord {
+    /// The identifier the stream had. It is never reused.
+    pub stream_id: StreamId,
+    /// The name the stream had, for operators. It may be in use again.
+    pub name: String,
+}
+
 /// Which controller instance is active, and until when without renewal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaderRecord {

@@ -25,7 +25,8 @@ pub use placement::{
     PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set,
 };
 pub use records::{
-    CheckpointRecord, CopyRecord, CopyState, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
-    RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,
+    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord,
+    RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
+    TieredRecord, WriterLease,
 };
 pub use store::{MAX_NAME_LENGTH_BYTES, MetaError, MetadataStore};

@@ -20,8 +20,9 @@ use crate::key_value::{
     Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome,
 };
 use crate::records::{
-    CheckpointRecord, CopyRecord, CopyState, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
-    RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, WriterLease,
+    CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord,
+    RECORD_SCHEMA_VERSION, ReplicaRecord, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
+    WriterLease,
 };
 
 /// How many times a read-modify-write is retried when other writers keep
@@ -33,6 +34,7 @@ const MAX_UPDATE_ATTEMPTS: u32 = 32;
 pub const MAX_NAME_LENGTH_BYTES: usize = 255;
 
 const STREAM_KEY_PREFIX: &str = "streams/";
+const DELETED_STREAM_KEY_PREFIX: &str = "deleted-streams/";
 const CHECKPOINT_KEY_PREFIX: &str = "checkpoints/";
 const REPLICA_KEY_PREFIX: &str = "replicas/";
 const STREAM_ID_COUNTER_KEY: &str = "counters/stream-id";
@@ -235,8 +237,10 @@ impl MetadataStore {
             .collect()
     }
 
-    /// Deletes a stream's record and its checkpoints. The controller then
-    /// removes the segments left on replicas and in the object store.
+    /// Deletes a stream's record and its checkpoints, and leaves a note for
+    /// the controller, which removes the segments left on replicas and in
+    /// the object store and then calls
+    /// [`MetadataStore::forget_deleted_stream`].
     ///
     /// # Errors
     ///
@@ -245,9 +249,18 @@ impl MetadataStore {
         let stream_key = stream_key(name);
         for _attempt in 0..MAX_UPDATE_ATTEMPTS {
             let (record, revision) = self.read_stream(name).await?;
-            let mut mutations = vec![Mutation::Delete {
-                key: stream_key.clone(),
-            }];
+            let mut mutations = vec![
+                Mutation::Delete {
+                    key: stream_key.clone(),
+                },
+                put(
+                    &deleted_stream_key(record.stream_id),
+                    &DeletedStreamRecord {
+                        stream_id: record.stream_id,
+                        name: record.name.clone(),
+                    },
+                ),
+            ];
             for materializer in &record.materializers {
                 mutations.push(Mutation::Delete {
                     key: checkpoint_key(record.stream_id, materializer),
@@ -268,6 +281,37 @@ impl MetadataStore {
             }
         }
         Err(too_much_contention(&stream_key))
+    }
+
+    /// Lists the deleted streams whose segments may still exist.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the store is unavailable or holds an undecodable record.
+    pub async fn list_deleted_streams(&self) -> Result<Vec<DeletedStreamRecord>, MetaError> {
+        self.key_value_store
+            .list(DELETED_STREAM_KEY_PREFIX)
+            .await?
+            .iter()
+            .map(|(key, stored)| decode(key, &stored.value))
+            .collect()
+    }
+
+    /// Drops the note about a deleted stream, once nothing of it is left.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the store is unavailable.
+    pub async fn forget_deleted_stream(&self, stream_id: StreamId) -> Result<(), MetaError> {
+        self.key_value_store
+            .transact(
+                Vec::new(),
+                vec![Mutation::Delete {
+                    key: deleted_stream_key(stream_id),
+                }],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Reads a stream's record, lets `update` change it, and writes it back
@@ -807,6 +851,10 @@ fn stream_key(name: &str) -> String {
     format!("{STREAM_KEY_PREFIX}{name}")
 }
 
+fn deleted_stream_key(stream_id: StreamId) -> String {
+    format!("{DELETED_STREAM_KEY_PREFIX}{stream_id}")
+}
+
 fn checkpoint_key(stream_id: StreamId, materializer: &str) -> String {
     format!("{CHECKPOINT_KEY_PREFIX}{stream_id}/{materializer}")
 }
@@ -1129,6 +1177,45 @@ mod tests {
             ),
             (true, Ok(Vec::new()))
         );
+    }
+
+    #[tokio::test]
+    async fn deleted_stream_leaves_a_note_until_it_is_forgotten() {
+        let store = store_with_stream().await;
+        let stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
+        store.delete_stream(STREAM).await.expect("deleted");
+        let noted = store.list_deleted_streams().await.expect("list");
+        store
+            .forget_deleted_stream(stream_id)
+            .await
+            .expect("forgotten");
+        assert_eq!(
+            (noted, store.list_deleted_streams().await),
+            (
+                vec![DeletedStreamRecord {
+                    stream_id,
+                    name: STREAM.to_owned(),
+                }],
+                Ok(Vec::new())
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_name_can_be_reused_while_the_old_stream_is_cleaned_up() {
+        let store = store_with_stream().await;
+        let old_stream_id = store.get_stream(STREAM).await.expect("exists").stream_id;
+        store.delete_stream(STREAM).await.expect("deleted");
+        let recreated = store
+            .create_stream(
+                STREAM,
+                ReplicationSettings::DEFAULT,
+                RetentionPolicy::default(),
+                None,
+            )
+            .await
+            .expect("the name is free again");
+        assert_ne!(recreated.stream_id, old_stream_id);
     }
 
     #[tokio::test]
