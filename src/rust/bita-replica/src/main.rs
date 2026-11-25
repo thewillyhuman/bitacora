@@ -11,19 +11,25 @@
 //!
 //! - `main`: the entry point.
 //! - `start`: loads and checks the configuration, then runs the daemon on a Tokio runtime.
+//! - `check_config`: loads and checks the configuration, says whether it is valid, and stops there.
+//! - `load_settings`: what both of them do first.
 //! - The modules of the daemon: `config`, `daemon`, `metrics`, `registration`, `scrub`.
 //!
 //! # How it works
 //!
 //! ```text
 //! bita-replica --config /etc/bitacora/replica.toml
+//! bita-replica --config /etc/bitacora/replica.toml --check-config
 //! ```
+//!
+//! With `--check-config` the process reads and validates the configuration exactly as a start does,
+//! says whether it is valid, and exits with 0 or 2 without opening or binding anything.
 //!
 //! The process exits with:
 //!
 //! | Code | Meaning |
 //! | --- | --- |
-//! | 0 | It was asked to stop (SIGTERM or SIGINT) and stopped cleanly, or printed its help or version |
+//! | 0 | It was asked to stop (SIGTERM or SIGINT) and stopped cleanly, or printed its help or version, or checked a valid configuration |
 //! | 1 | It could not start, or had to stop: for example the disk refused a write |
 //! | 2 | Its command line or its configuration file is wrong |
 //!
@@ -73,6 +79,7 @@ const EXIT_CODE_BAD_CONFIGURATION: u8 = 2;
 fn main() -> ExitCode {
     match parse_command_line(std::env::args().skip(1)) {
         Ok(CommandLine::Run { config_path }) => start(&config_path),
+        Ok(CommandLine::CheckConfig { config_path }) => check_config(&config_path),
         Ok(CommandLine::PrintHelp) => {
             print!("{}", usage(DAEMON_NAME));
             ExitCode::SUCCESS
@@ -88,26 +95,58 @@ fn main() -> ExitCode {
     }
 }
 
+/// Reads the configuration file at `config_path` and validates it, as the daemon does at start.
+///
+/// # Returns
+///
+/// The settings the daemon runs with.
+///
+/// # Errors
+///
+/// Returns the message to show the operator: which file, which setting and what is wrong with it.
+fn load_settings(config_path: &Path) -> Result<ReplicaDaemonSettings, String> {
+    let config_file: ReplicaConfigFile = match load_config_file(config_path) {
+        Ok(config_file) => config_file,
+        Err(config_file_error) => return Err(config_file_error.to_string()),
+    };
+    match config_file.validate() {
+        Ok(settings) => Ok(settings),
+        Err(invalid_config) => Err(format!(
+            "configuration file {}: {invalid_config}",
+            config_path.display()
+        )),
+    }
+}
+
+/// Checks the configuration at `config_path` and says whether the daemon would start with it. Opens
+/// nothing and starts nothing.
+///
+/// # Returns
+///
+/// Exit code 0 if the configuration is valid, 2 if it is not.
+fn check_config(config_path: &Path) -> ExitCode {
+    match load_settings(config_path) {
+        Ok(_settings) => {
+            println!("{DAEMON_NAME}: configuration file {} is valid", config_path.display());
+            ExitCode::SUCCESS
+        }
+        Err(problem) => {
+            eprintln!("{DAEMON_NAME}: {problem}");
+            ExitCode::from(EXIT_CODE_BAD_CONFIGURATION)
+        }
+    }
+}
+
 /// Loads and checks the configuration at `config_path`, then runs the daemon until it stops.
 ///
 /// # Returns
 ///
 /// The exit code of the process, as the file header lists them.
 fn start(config_path: &Path) -> ExitCode {
-    let config_file: ReplicaConfigFile = match load_config_file(config_path) {
-        Ok(config_file) => config_file,
-        Err(config_file_error) => {
-            eprintln!("{DAEMON_NAME}: {config_file_error}");
-            return ExitCode::from(EXIT_CODE_BAD_CONFIGURATION);
-        }
-    };
-    let settings = match config_file.validate() {
+    let settings = match load_settings(config_path) {
         Ok(settings) => settings,
-        Err(invalid_config) => {
-            eprintln!(
-                "{DAEMON_NAME}: configuration file {}: {invalid_config}",
-                config_path.display()
-            );
+        Err(problem) => {
+            eprintln!("{DAEMON_NAME}: {problem}");
             return ExitCode::from(EXIT_CODE_BAD_CONFIGURATION);
         }
     };
@@ -153,3 +192,7 @@ async fn serve(settings: ReplicaDaemonSettings) -> Result<(), DaemonError> {
     let environment = daemon::open_environment(&settings).await?;
     daemon::run(settings, environment, listeners, shutdown_listener.wait()).await
 }
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;

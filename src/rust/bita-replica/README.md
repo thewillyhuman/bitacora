@@ -22,13 +22,21 @@ bita-replica --config /etc/bitacora/replica.toml
 
 `example.toml` is a complete configuration with every setting explained. A test keeps it valid.
 
+```sh
+bita-replica --config /etc/bitacora/replica.toml --check-config
+```
+
+checks a configuration without starting: it reads and validates the file exactly as a start does, opens
+nothing, and exits with 0 if the replica would start with it and with 2 if not. Use it before a restart
+and wherever the file is generated.
+
 One process serves one data directory. Deploy three or more across failure domains and give each a
 different `replica_id`, `data_directory` and `advertised_address`; the `[cluster]` table is the same
 for every process of a cluster.
 
 | Exit code | Meaning | What a supervisor should do |
 | --- | --- | --- |
-| 0 | Stopped on SIGTERM or SIGINT, or printed help or version | Nothing |
+| 0 | Stopped on SIGTERM or SIGINT, printed help or version, or checked a valid configuration | Nothing |
 | 1 | Could not start, or had to stop (the disk refused a write, a port is taken) | Restart it |
 | 2 | The command line or the configuration file is wrong | Wait for a person |
 

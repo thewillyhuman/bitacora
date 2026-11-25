@@ -1,0 +1,4 @@
+change_type: enhancement
+component: process
+note: "Both daemons accept --check-config, which reads and validates the configuration file as a start does and exits with 0 or 2 without starting anything."
+issues: [5]

@@ -21,6 +21,13 @@ bita-controller --config /etc/bitacora/controller.toml
 
 `example.toml` is a complete configuration with every setting explained. A test keeps it valid.
 
+```sh
+bita-controller --config /etc/bitacora/controller.toml --check-config
+```
+
+checks a configuration without starting: it reads and validates the file exactly as a start does, opens
+nothing, and exits with 0 if the controller would start with it and with 2 if not.
+
 Run two or three instances with the same configuration except `identity`. One leads; the others stand
 by and take over within `leadership_duration_seconds` after the leader stops. A controller holds no
 state of its own, so there is nothing to lose when one is killed.
@@ -30,7 +37,7 @@ segments run out; repair, tiering and deletion pause.
 
 | Exit code | Meaning | What a supervisor should do |
 | --- | --- | --- |
-| 0 | Stopped on SIGTERM or SIGINT, or printed help or version | Nothing |
+| 0 | Stopped on SIGTERM or SIGINT, printed help or version, or checked a valid configuration | Nothing |
 | 1 | Could not start (its metrics port is taken, the object store cannot be opened) | Restart it |
 | 2 | The command line or the configuration file is wrong | Wait for a person |
 

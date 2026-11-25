@@ -3,8 +3,9 @@
 //! # Why this file exists
 //!
 //! A daemon takes everything it needs to know from one configuration file, so its command line has one
-//! job: saying where that file is. Both daemons must agree on how, so that unit files and container
-//! images look the same for each. This file is that agreement.
+//! job: saying where that file is, and whether to run with it or only to check it. Both daemons must
+//! agree on how, so that unit files and container images look the same for each. This file is that
+//! agreement.
 //!
 //! # What it contains
 //!
@@ -21,12 +22,18 @@
 //! ```text
 //! <daemon> --config <path>
 //! <daemon> --config=<path>
+//! <daemon> --config <path> --check-config
 //! <daemon> --help
 //! <daemon> --version
 //! ```
 //!
 //! `--help` and `--version` win over everything else, so that they work even next to arguments that
 //! would be refused.
+//!
+//! `--check-config` exists so that a configuration can be judged before anything depends on it: by a
+//! supervisor before it starts or restarts the daemon, by whatever renders the file for a deployment,
+//! and by the tests of this repository's own deployment files. The daemon reads and validates the file
+//! exactly as it would at start, opens nothing, and exits.
 //!
 //! # Invariants
 //!
@@ -45,6 +52,12 @@ use thiserror::Error;
 pub enum CommandLine {
     /// Run with the configuration file at this path.
     Run {
+        /// The configuration file, as given.
+        config_path: PathBuf,
+    },
+    /// Read and validate the configuration file at this path, say whether it is valid, and exit without
+    /// starting anything.
+    CheckConfig {
         /// The configuration file, as given.
         config_path: PathBuf,
     },
@@ -87,7 +100,7 @@ pub enum UsageError {
 /// # Errors
 ///
 /// Returns [`UsageError`] if no configuration file is named, if `--config` has no value or appears
-/// twice, or if an argument is unknown.
+/// twice, or if an argument is unknown. `--check-config` needs a configuration file like a run does.
 ///
 /// # Examples
 ///
@@ -119,8 +132,13 @@ pub fn parse_command_line(arguments: impl IntoIterator<Item = String>) -> Result
     }
 
     let mut config_path: Option<PathBuf> = None;
+    let mut is_check_only = false;
     let mut remaining_arguments = arguments.into_iter();
     while let Some(argument) = remaining_arguments.next() {
+        if argument == "--check-config" {
+            is_check_only = true;
+            continue;
+        }
         let config_value = if argument == "--config" {
             remaining_arguments.next()
         } else if let Some(inline_value) = argument.strip_prefix("--config=") {
@@ -137,6 +155,7 @@ pub fn parse_command_line(arguments: impl IntoIterator<Item = String>) -> Result
         config_path = Some(PathBuf::from(config_value));
     }
     match config_path {
+        Some(config_path) if is_check_only => Ok(CommandLine::CheckConfig { config_path }),
         Some(config_path) => Ok(CommandLine::Run { config_path }),
         None => Err(UsageError::MissingConfigPath),
     }
@@ -154,10 +173,11 @@ pub fn parse_command_line(arguments: impl IntoIterator<Item = String>) -> Result
 #[must_use]
 pub fn usage(daemon_name: &str) -> String {
     format!(
-        "Usage: {daemon_name} --config <path>\n\
+        "Usage: {daemon_name} --config <path> [--check-config]\n\
          \n\
          Options:\n  \
            --config <path>  The configuration file (TOML)\n  \
+           --check-config   Check the configuration file and exit: 0 if it is valid, 2 if not\n  \
            --help           Print this text\n  \
            --version        Print the version\n"
     )

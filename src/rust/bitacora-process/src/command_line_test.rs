@@ -3,6 +3,7 @@
 //! # What is covered
 //!
 //! - Both spellings of `--config`.
+//! - `--check-config`, before and after the path it applies to.
 //! - `--help` and `--version`, alone and next to other arguments.
 //! - Every way the arguments can be wrong.
 //!
@@ -40,6 +41,37 @@ fn config_path_can_be_joined_to_the_option() {
     let parsed = parse(&["--config=/etc/bitacora/replica.toml"]);
 
     assert_eq!(parsed, Ok(run_with_the_replica_config()));
+}
+
+/// The command line that only checks `/etc/bitacora/replica.toml`.
+fn check_the_replica_config() -> CommandLine {
+    CommandLine::CheckConfig {
+        config_path: PathBuf::from("/etc/bitacora/replica.toml"),
+    }
+}
+
+#[test]
+fn check_option_after_the_path_asks_for_a_check_only() {
+    let parsed = parse(&["--config", "/etc/bitacora/replica.toml", "--check-config"]);
+
+    assert_eq!(parsed, Ok(check_the_replica_config()));
+}
+
+#[test]
+fn check_option_before_the_path_asks_for_a_check_only() {
+    let parsed = parse(&["--check-config", "--config=/etc/bitacora/replica.toml"]);
+
+    assert_eq!(parsed, Ok(check_the_replica_config()));
+}
+
+#[test]
+fn check_option_without_a_configuration_file_is_refused() {
+    assert_eq!(parse(&["--check-config"]), Err(UsageError::MissingConfigPath));
+}
+
+#[test]
+fn usage_mentions_the_check_option() {
+    assert!(usage("bita-replica").contains("--check-config"));
 }
 
 #[test]
@@ -126,7 +158,7 @@ fn path_without_the_option_is_refused() {
 fn usage_names_the_daemon() {
     let text = usage("bita-replica");
 
-    assert!(text.starts_with("Usage: bita-replica --config <path>\n"), "{text}");
+    assert!(text.starts_with("Usage: bita-replica --config <path>"), "{text}");
 }
 
 #[test]
