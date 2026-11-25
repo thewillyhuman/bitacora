@@ -16,3 +16,13 @@ bitacora_integration_test(
         "//src/rust/bitacora-types:bitacora_types",
     ],
 )
+
+# The byte formats, held to bytes that were written by version 1.
+bitacora_integration_test(
+    name = "format_golden_test",
+    srcs = ["tests/format_golden_test.rs"],
+    deps = [
+        ":bitacora_segment",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+)
