@@ -45,9 +45,10 @@
 //! - A read at any sequence from the horizon to the last record applied sees exactly the records up to
 //!   it, whatever was flushed, imaged or dropped in between.
 //! - The lock on the layer list is never held across an await: readers take a snapshot and then fetch.
-//! - A record is validated when a page is read or imaged, not when it is applied, because applying must
-//!   not do I/O. [`PageMaterializer::apply_record`] should therefore fail only for records the engine can
-//!   never have written.
+//! - When a record is applied, only [`PageMaterializer::pages_touched`] sees it, and may refuse it; the
+//!   runner then stops. Its effect on a page is computed when the page is read or imaged, because
+//!   applying must not do I/O. [`PageMaterializer::apply_record`] should therefore fail only for records
+//!   the engine can never have written.
 //!
 //! # See also
 //!
@@ -124,8 +125,14 @@ impl Default for LayeringPolicy {
 /// impl PageMaterializer for AppendOnlyPages {
 ///     type PageId = u8;
 ///
-///     fn pages_touched(&self, log_record: &LogRecord) -> Vec<u8> {
-///         vec![log_record.payload[0]]
+///     fn pages_touched(&self, log_record: &LogRecord) -> Result<Vec<u8>, MaterializerError> {
+///         match log_record.payload.first() {
+///             Some(page_id) => Ok(vec![*page_id]),
+///             None => Err(MaterializerError::InvalidRecord {
+///                 sequence: log_record.sequence,
+///                 reason: "the record names no page".to_owned(),
+///             }),
+///         }
 ///     }
 ///
 ///     fn apply_record(
@@ -178,7 +185,15 @@ pub trait PageMaterializer: Default + Send + Sync + 'static {
     ///
     /// The pages, in any order. Naming a page twice is the same as naming it once. A record may touch no
     /// page at all.
-    fn pages_touched(&self, log_record: &LogRecord) -> Vec<Self::PageId>;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MaterializerError::InvalidRecord`] if the record cannot even be read, for example
+    /// because a newer version of the engine wrote it. This is the one check made when a record is
+    /// applied: the runner stops instead of going on past a record it does not understand. The design's
+    /// signature returns the pages alone; the error is what lets an engine refuse a record in time.
+    fn pages_touched(&self, log_record: &LogRecord)
+    -> Result<Vec<Self::PageId>, MaterializerError>;
 
     /// Produces the next version of one page.
     ///
@@ -682,13 +697,19 @@ impl<M: PageMaterializer> Materializer for PageStore<M> {
         let Some(last_record) = committed_records.last() else {
             return Ok(());
         };
+        // Every record is read before any is taken in, so a record that is refused leaves nothing of
+        // its batch behind.
+        let mut pages_by_record = Vec::with_capacity(committed_records.len());
+        for record in committed_records {
+            let mut pages_of_this_record = BTreeSet::new();
+            for page_id in self.shared.logic.pages_touched(record)? {
+                pages_of_this_record.insert(Bytes::from(M::encode_page_id(&page_id)));
+            }
+            pages_by_record.push(pages_of_this_record);
+        }
         {
             let mut state = self.shared.write_state();
-            for record in committed_records {
-                let mut pages_of_this_record = BTreeSet::new();
-                for page_id in self.shared.logic.pages_touched(record) {
-                    pages_of_this_record.insert(Bytes::from(M::encode_page_id(&page_id)));
-                }
+            for (record, pages_of_this_record) in committed_records.iter().zip(pages_by_record) {
                 for encoded_page_id in pages_of_this_record {
                     state
                         .unflushed_by_page

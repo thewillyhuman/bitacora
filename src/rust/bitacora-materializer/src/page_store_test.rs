@@ -41,8 +41,14 @@ struct Journal;
 impl PageMaterializer for Journal {
     type PageId = u8;
 
-    fn pages_touched(&self, log_record: &LogRecord) -> Vec<u8> {
-        log_record.payload[1..].to_vec()
+    fn pages_touched(&self, log_record: &LogRecord) -> Result<Vec<u8>, MaterializerError> {
+        if log_record.payload.is_empty() {
+            return Err(MaterializerError::InvalidRecord {
+                sequence: log_record.sequence,
+                reason: "the record has no value".to_owned(),
+            });
+        }
+        Ok(log_record.payload[1..].to_vec())
     }
 
     fn apply_record(
@@ -765,6 +771,44 @@ async fn record_that_cannot_be_applied_leaves_other_pages_and_earlier_sequences_
 
     assert_eq!(fixture.page(2, 3).await, Ok(page_of(&[20])));
     assert_eq!(fixture.page(1, 2).await, Ok(page_of(&[10])));
+}
+
+/// A record of [`Journal`] that appends `value` to `page_ids`, or one it cannot read if `payload` is empty.
+fn record_at(sequence: u64, payload: &'static [u8]) -> LogRecord {
+    LogRecord {
+        sequence: SequenceNumber::new(sequence),
+        payload: Bytes::from_static(payload),
+    }
+}
+
+#[tokio::test]
+async fn record_the_engine_cannot_read_is_refused_when_it_is_applied() {
+    let mut fixture = Fixture::new().await;
+
+    let applied = fixture.pages.apply_records(&[record_at(1, b"")]);
+
+    assert_eq!(
+        applied,
+        Err(MaterializerError::InvalidRecord {
+            sequence: SequenceNumber::new(1),
+            reason: "the record has no value".to_owned(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn refused_record_leaves_nothing_of_its_batch_behind() {
+    let mut fixture = Fixture::new().await;
+    let readable_then_unreadable = [record_at(1, &[10, 1]), record_at(2, b"")];
+
+    drop(fixture.pages.apply_records(&readable_then_unreadable));
+
+    assert_eq!(fixture.reader.applied_sequence(), SequenceNumber::ZERO);
+    fixture
+        .pages
+        .apply_records(&[record_at(1, &[10, 1])])
+        .expect("the record is readable");
+    assert_eq!(fixture.page(1, 1).await, Ok(page_of(&[10])));
 }
 
 #[tokio::test]

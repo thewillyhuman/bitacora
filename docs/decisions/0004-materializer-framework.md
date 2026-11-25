@@ -118,11 +118,15 @@ Choices kept simple on purpose:
   an image that holds only some pages.
 - **An image is written after a fixed number of delta layers** (four by
   default), at a checkpoint. There is no background compaction.
-- **Records are validated when a page is read or imaged, not when they are
-  applied.** Applying only appends to in-memory chains, because
-  `apply_records` is synchronous and the page before the record may be in
-  the artifact store. A `PageMaterializer` should fail only for records its
-  engine can never have written.
+- **A record's effect on a page is computed when the page is read or imaged,
+  not when the record is applied.** Applying only appends to in-memory
+  chains, because `apply_records` is synchronous and the page before the
+  record may be in the artifact store. `apply_record` should fail only for
+  records its engine can never have written.
+- **`pages_touched` may refuse a record.** The design has it return the pages
+  alone. Here it returns a result, so that a record the engine cannot even
+  read, for example one written by a newer version, stops the runner when it
+  is applied instead of being skipped or found out at some later read.
 - **`PageMaterializer` must be `Default` and encode its page identifiers.**
   The contract restores a materializer with a static function, so the logic
   cannot be handed in; it is created. Anything that shapes pages must be a
