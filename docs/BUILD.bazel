@@ -1,0 +1,8 @@
+"""The documentation. Files that tests read are exported here."""
+
+# The metrics reference is checked against the code: the test of every crate
+# that registers metrics fails when it exposes one this file does not list.
+exports_files(
+    ["operations/metrics.md"],
+    visibility = ["//visibility:public"],
+)

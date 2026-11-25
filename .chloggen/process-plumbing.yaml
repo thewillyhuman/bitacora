@@ -1,0 +1,4 @@
+change_type: new_component
+component: process
+note: "Add the bitacora-process crate with what every daemon shares: the configuration file, JSON logs, the shutdown signal, Prometheus metrics measured at the injected interfaces, and an HTTP endpoint with /metrics, /healthz and /readyz."
+issues: [5]
