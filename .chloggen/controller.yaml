@@ -1,0 +1,4 @@
+change_type: new_component
+component: controller
+note: "Add the controller with leader election, standby segment placement and reconciliation of sealed segment copies."
+issues: [3]

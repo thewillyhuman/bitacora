@@ -31,6 +31,7 @@ crate.from_cargo(
     manifests = [
         "//src/rust:Cargo.toml",
         "//src/rust/bitacora-client:Cargo.toml",
+        "//src/rust/bitacora-controller:Cargo.toml",
         "//src/rust/bitacora-meta:Cargo.toml",
         "//src/rust/bitacora-replica:Cargo.toml",
         "//src/rust/bitacora-segment:Cargo.toml",

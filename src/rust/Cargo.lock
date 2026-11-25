@@ -28,6 +28,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-controller"
+version = "0.0.0"
+dependencies = [
+ "bitacora-client",
+ "bitacora-meta",
+ "bitacora-testkit",
+ "bitacora-types",
+ "bytes",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bitacora-meta"
 version = "0.0.0"
 dependencies = [
