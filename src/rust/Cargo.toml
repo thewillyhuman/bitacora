@@ -7,6 +7,7 @@ members = [
     "bitacora-meta",
     "bitacora-meta-etcd",
     "bitacora-model",
+    "bitacora-proto",
     "bitacora-replica",
     "bitacora-segment",
     "bitacora-sim",
@@ -30,6 +31,7 @@ bitacora-controller = { path = "bitacora-controller", version = "0.0.0" }
 bitacora-meta = { path = "bitacora-meta", version = "0.0.0" }
 bitacora-meta-etcd = { path = "bitacora-meta-etcd", version = "0.0.0" }
 bitacora-model = { path = "bitacora-model", version = "0.0.0" }
+bitacora-proto = { path = "bitacora-proto", version = "0.0.0" }
 bitacora-replica = { path = "bitacora-replica", version = "0.0.0" }
 bitacora-segment = { path = "bitacora-segment", version = "0.0.0" }
 bitacora-sim = { path = "bitacora-sim", version = "0.0.0" }
@@ -42,11 +44,18 @@ bytes = "1"
 crc32c = "0.6"
 etcd-client = "0.21"
 fs4 = "1"
+prost = "0.14"
+protox = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+# gRPC without TLS and without compression: neither is used yet, and both
+# are slow to build.
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "transport"] }
+tonic-prost = "0.14"
+tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 tracing = "0.1"
 
 # The protocol model's tests explore a few million states. That is pure

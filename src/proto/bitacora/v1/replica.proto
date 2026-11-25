@@ -1,0 +1,533 @@
+// The replica interface of bitacora, version 1.
+//
+// This file is the source of truth of the wire protocol between a replica
+// and everyone who talks to it: writers, readers, the controller and other
+// replicas. Every client, in any language, is generated from it.
+//
+// Conventions that hold for every call:
+//
+//   Identity. Every request carries the identity of the replica it is meant
+//   for in the metadata header `bitacora-replica-id`. A replica refuses, with
+//   the gRPC status FAILED_PRECONDITION, any request whose header is missing
+//   or names another replica. A node whose disk was replaced comes back at
+//   the same address under a new identity and holds none of the copies the
+//   old identity held, so it must never answer in the old one's name.
+//
+//   Outcomes. A replica that received a request answers with the gRPC status
+//   OK and a response whose `outcome` is either `success` or `error`. A
+//   refusal is an answer, not a transport failure, so it travels in the
+//   response as a `ReplicaError` and never as a gRPC status.
+//
+//   Transport failures. Any gRPC status other than OK means that no answer
+//   arrived: the replica may or may not have applied the request. So does a
+//   response a client cannot interpret, such as one without an `outcome`.
+//   Clients treat both exactly like `ReplicaError.unavailable`.
+//
+//   Retries. Every call is safe to send again: appends of batches the
+//   replica already holds are acknowledged again, and the other calls are
+//   idempotent.
+//
+//   Positions. A sequence number is the position of a record in its stream.
+//   Records are numbered from 1 without gaps. Where a field holds the end of
+//   something, 0 means "before the first record": nothing is there yet.
+//
+//   Batch frames. Records travel as batch frames, byte for byte as they are
+//   stored in a segment file (docs/spec.md, section 7). A replica verifies
+//   the checksum of every frame it receives before storing it, and a reader
+//   verifies every frame it is served.
+//
+//   Sizes. A message is at most 16 MiB long. A record payload is at most
+//   4 MiB and a batch frame at most 8 MiB plus its header, so one batch
+//   always fits.
+//
+// The version of the protocol is the name of this package. An incompatible
+// change gets a new package, served next to this one while clients move.
+
+syntax = "proto3";
+
+package bitacora.v1;
+
+// The calls on the path of every record: used by writers and readers.
+service ReplicaData {
+  // Appends batches to a segment copy and flushes them before answering.
+  // With no batches, it only carries the writer's durable sequence: the
+  // heartbeat of an idle stream.
+  rpc Append(AppendRequest) returns (AppendResponse);
+
+  // Reads batches from a segment copy, optionally waiting until some are
+  // readable.
+  rpc Read(ReadRequest) returns (ReadResponse);
+
+  // Raises the fenced epoch of a segment copy and reports where the copy
+  // ends. A writer taking over a stream fences every replica of its open
+  // segment before it reads their tails.
+  rpc Fence(FenceRequest) returns (FenceResponse);
+
+  // Tells a replica the final sequence number of a segment, as recorded in
+  // the metadata store. The replica discards anything above it.
+  rpc Seal(SealRequest) returns (SealResponse);
+}
+
+// The calls that move whole segments between replicas: used by the
+// controller.
+service ReplicaTransfer {
+  // Makes the replica's copy of a sealed segment complete, by pulling what
+  // it lacks from another replica and verifying every batch on the way. The
+  // answer is sent once the copy is complete, flushed and sealed.
+  rpc RepairSegment(RepairSegmentRequest) returns (RepairSegmentResponse);
+
+  // Uploads the replica's copy of a sealed segment to the object store as
+  // one tiered object. The answer is sent once the object is stored and
+  // was read back intact. Safe to repeat: the object is replaced by the
+  // same bytes.
+  rpc UploadSegment(UploadSegmentRequest) returns (UploadSegmentResponse);
+}
+
+// The calls that manage a replica: used by the controller and by operators.
+service ReplicaAdmin {
+  // Reports the replica's identity, disk space and drain state.
+  rpc Status(StatusRequest) returns (StatusResponse);
+
+  // Starts draining the replica for maintenance: it refuses appends, so
+  // writers roll to other replicas, and keeps serving reads.
+  rpc Drain(DrainRequest) returns (DrainResponse);
+
+  // Lists every segment copy the replica holds, sorted by address.
+  rpc ListSegments(ListSegmentsRequest) returns (ListSegmentsResponse);
+
+  // Deletes the replica's copy of a segment. Deleting an absent copy
+  // succeeds.
+  rpc DeleteSegment(DeleteSegmentRequest) returns (DeleteSegmentResponse);
+}
+
+// Identifies one segment across the whole cluster.
+message SegmentAddress {
+  // The stream the segment belongs to.
+  uint64 stream_id = 1;
+
+  // The position of the segment within its stream. Segments are numbered
+  // from 1 without gaps, in the order they were opened.
+  uint64 segment_id = 2;
+}
+
+// Everything a replica needs to create its copy of a segment.
+message SegmentDescriptor {
+  // Which segment this is. Required.
+  SegmentAddress address = 1;
+
+  // The epoch of the only writer that authors records in the segment.
+  uint64 epoch = 2;
+
+  // The sequence number of the segment's first record. At least 1.
+  uint64 first_sequence = 3;
+}
+
+// Why a replica refused or failed a request. Exactly one `kind` is set.
+message ReplicaError {
+  // A newer writer has fenced the segment. The caller has lost the stream
+  // and must stop.
+  message Fenced {
+    // The epoch the request carried.
+    uint64 request_epoch = 1;
+
+    // The lowest epoch the replica still accepts.
+    uint64 fenced_epoch = 2;
+  }
+
+  // The segment is sealed and accepts no more appends.
+  message Sealed {
+    // The segment's final sequence number.
+    uint64 sealed_end = 1;
+  }
+
+  // The batches leave a gap after the replica's copy. The caller should
+  // send again from `local_end + 1`.
+  message OutOfOrder {
+    // The first sequence number of the rejected batches.
+    uint64 first_sequence = 1;
+
+    // The last sequence number the replica holds.
+    uint64 local_end = 2;
+  }
+
+  // The replica already knows a different sealed end for the segment, which
+  // can only happen if the metadata store was bypassed.
+  message ConflictingSeal {
+    // The sealed end the replica has recorded.
+    uint64 existing_sealed_end = 1;
+
+    // The sealed end the request asked for.
+    uint64 requested_sealed_end = 2;
+  }
+
+  // The replica has no copy of the segment.
+  message SegmentNotFound {
+    // The segment that was asked for. Required.
+    SegmentAddress segment = 1;
+  }
+
+  // The request itself is wrong: a missing field, malformed frames, a failed
+  // checksum, or arguments that contradict the replica's copy. Sending it
+  // again cannot help.
+  message InvalidRequest {
+    // What is wrong with the request, for a person to read.
+    string reason = 1;
+  }
+
+  // The replica's disk is too full for this request. Writers roll to
+  // another set of replicas.
+  message NoCapacity {
+    // How full the replica's disk is, from 0 to 100.
+    uint32 used_percent = 1;
+  }
+
+  // The replica is being drained for maintenance. Writers roll away.
+  message Draining {}
+
+  // The replica's copy is damaged or its disk failed. The copy must be
+  // treated as suspect and replaced.
+  message Storage {
+    // What the disk reported, for a person to read.
+    string reason = 1;
+  }
+
+  // The replica could not complete the request in time, or could not reach
+  // another replica it needed. The request may or may not have been applied.
+  // This is the only error worth sending the same request again for.
+  message Unavailable {
+    // What went wrong, for a person to read.
+    string reason = 1;
+  }
+
+  // Which error this is. A client that finds none of the kinds it knows
+  // treats the error as `unavailable`.
+  oneof kind {
+    Fenced fenced = 1;
+    Sealed sealed = 2;
+    OutOfOrder out_of_order = 3;
+    ConflictingSeal conflicting_seal = 4;
+    SegmentNotFound segment_not_found = 5;
+    InvalidRequest invalid_request = 6;
+    NoCapacity no_capacity = 7;
+    Draining draining = 8;
+    Storage storage = 9;
+    Unavailable unavailable = 10;
+  }
+}
+
+// Appends batches to the open segment of a stream.
+message AppendRequest {
+  // The segment to append to. A replica without a copy creates one.
+  // Required.
+  SegmentDescriptor segment = 1;
+
+  // The epoch of the writer sending the request. The replica refuses it
+  // with `fenced` once a newer writer has fenced the segment.
+  uint64 writer_epoch = 2;
+
+  // Back-to-back batch frames, in sequence order. May be empty.
+  bytes batch_frames = 3;
+
+  // The writer's current durable sequence: how far replicas may serve
+  // readers. 0 while nothing is durable yet.
+  uint64 durable_sequence = 4;
+}
+
+// The replica's answer to an `AppendRequest`.
+message AppendResponse {
+  // The batches are flushed in the replica's copy.
+  message Success {
+    // The last sequence number flushed in the replica's copy. 0 if the
+    // copy is empty.
+    uint64 local_end = 1;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Reads batches from a segment copy.
+message ReadRequest {
+  // The segment to read. Required.
+  SegmentAddress segment = 1;
+
+  // The first sequence number wanted. At least 1.
+  uint64 from_sequence = 2;
+
+  // A soft cap on the size of `batch_frames` in the answer: the replica
+  // stops adding batches once the cap is reached, so the answer exceeds it
+  // by less than one batch. The replica lowers a cap that could make the
+  // answer exceed the size limit of a message.
+  uint64 max_bytes = 3;
+
+  // How long the replica may hold the request when nothing is readable
+  // yet, in nanoseconds. Absent: the replica answers at once. The replica
+  // caps the wait with a limit of its own.
+  optional uint64 wait_for_records_nanoseconds = 4;
+
+  // How far into the copy the read may go.
+  //
+  // Absent: up to the durable sequence the replica knows. This is what
+  // every reader uses.
+  //
+  // Present: up to the end of the copy, committed or not. Only the writer
+  // that fenced the segment with this epoch may ask for it, to repair the
+  // tail of the segment during failover.
+  optional uint64 recovery_epoch = 5;
+}
+
+// The replica's answer to a `ReadRequest`.
+message ReadResponse {
+  // What the replica could serve. Having nothing to serve is a success
+  // with empty `batch_frames`.
+  message Success {
+    // Back-to-back batch frames. The first one holds `from_sequence` but
+    // may start before it. Empty if nothing was readable.
+    bytes batch_frames = 1;
+
+    // The last sequence number the replica was allowed to serve.
+    uint64 readable_end = 2;
+
+    // The segment's final sequence number. Present only if the replica
+    // knows the segment is sealed. A reader that has consumed it moves to
+    // the next segment.
+    optional uint64 sealed_end = 3;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Raises the fenced epoch of a segment copy.
+message FenceRequest {
+  // The segment to fence. Required.
+  SegmentAddress segment = 1;
+
+  // The epoch of the writer taking over. From now on the replica refuses
+  // appends from any lower epoch.
+  uint64 epoch = 2;
+}
+
+// The replica's answer to a `FenceRequest`, sent only after the new fenced
+// epoch is durable.
+message FenceResponse {
+  // The segment is fenced.
+  message Success {
+    // The last sequence number in the replica's copy. Absent if the
+    // replica has no copy of the segment at all.
+    optional uint64 local_end = 1;
+
+    // The segment's final sequence number. Present only if the replica
+    // knows the segment is already sealed.
+    optional uint64 sealed_end = 2;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Tells a replica the final sequence number of a segment.
+message SealRequest {
+  // The segment that was sealed. Required.
+  SegmentAddress segment = 1;
+
+  // The segment's final sequence number, as recorded in the metadata
+  // store. The replica discards anything above it.
+  uint64 sealed_end = 2;
+}
+
+// The replica's answer to a `SealRequest`.
+message SealResponse {
+  // The sealed end is recorded.
+  message Success {
+    // The last sequence number in the replica's copy after sealing. Absent
+    // if the replica has no copy. Below the sealed end, the copy is
+    // incomplete and needs repair.
+    optional uint64 local_end = 1;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Asks a replica to complete its copy of a sealed segment from another
+// replica.
+message RepairSegmentRequest {
+  // The sealed segment to copy. A replica without a copy creates one.
+  // Required.
+  SegmentDescriptor segment = 1;
+
+  // The segment's final sequence number, as recorded in the metadata
+  // store.
+  uint64 sealed_end = 2;
+
+  // The identity of a replica that holds a good copy: 1 to 128 ASCII
+  // letters, digits, `.`, `_` or `-`.
+  string source_replica_id = 3;
+
+  // The registered address of that replica, as `host:port`.
+  string source_address = 4;
+}
+
+// The replica's answer to a `RepairSegmentRequest`.
+message RepairSegmentResponse {
+  // The copy is complete, flushed and sealed.
+  message Success {
+    // The last sequence number in the repaired copy: the sealed end.
+    uint64 local_end = 1;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Asks a replica to upload its copy of a sealed segment to the object
+// store.
+message UploadSegmentRequest {
+  // The sealed segment to upload. Required.
+  SegmentDescriptor segment = 1;
+
+  // The segment's final sequence number, as recorded in the metadata
+  // store. A copy that is not sealed exactly there is not uploaded.
+  uint64 sealed_end = 2;
+
+  // The key to store the object under: a `/`-separated relative path. An
+  // object already there is replaced.
+  string object_key = 3;
+}
+
+// The replica's answer to an `UploadSegmentRequest`.
+message UploadSegmentResponse {
+  // The object is stored and was read back intact.
+  message Success {
+    // The size of the stored object in bytes, which a reader needs to find
+    // the object's footer.
+    uint64 size_bytes = 1;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Asks a replica what it reports about itself.
+message StatusRequest {}
+
+// The replica's answer to a `StatusRequest`.
+message StatusResponse {
+  // What the replica reports about itself.
+  message Success {
+    // The identity of the replica's data directory: 1 to 128 ASCII letters,
+    // digits, `.`, `_` or `-`.
+    string replica_id = 1;
+
+    // The total size of the replica's disk, in bytes.
+    uint64 capacity_bytes = 2;
+
+    // How much of the disk is unused, in bytes.
+    uint64 free_bytes = 3;
+
+    // Whether the replica is being drained for maintenance.
+    bool is_draining = 4;
+
+    // How many segment copies the replica holds.
+    uint64 segment_count = 5;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Asks a replica to start draining.
+message DrainRequest {}
+
+// The replica's answer to a `DrainRequest`.
+message DrainResponse {
+  // The replica is draining.
+  message Success {}
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// What a replica knows about one of its segment copies.
+message SegmentStatus {
+  // Which segment the copy belongs to. Required.
+  SegmentAddress address = 1;
+
+  // The last sequence number in the copy. Absent if the replica only holds
+  // fencing or sealing state for the segment.
+  optional uint64 local_end = 2;
+
+  // The lowest epoch the replica accepts for the segment.
+  uint64 fenced_epoch = 3;
+
+  // The segment's final sequence number. Present only if the segment is
+  // sealed.
+  optional uint64 sealed_end = 4;
+
+  // How many bytes the copy occupies on disk.
+  uint64 size_bytes = 5;
+
+  // Whether the copy failed a checksum or a flush and must be replaced.
+  bool is_damaged = 6;
+}
+
+// Asks a replica for every segment copy it holds.
+message ListSegmentsRequest {}
+
+// The replica's answer to a `ListSegmentsRequest`.
+message ListSegmentsResponse {
+  // The replica's segment copies.
+  message Success {
+    // One entry per segment copy, sorted by stream and then by segment.
+    repeated SegmentStatus segments = 1;
+  }
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}
+
+// Asks a replica to delete its copy of a segment.
+message DeleteSegmentRequest {
+  // The segment whose copy is deleted. Required.
+  SegmentAddress segment = 1;
+}
+
+// The replica's answer to a `DeleteSegmentRequest`.
+message DeleteSegmentResponse {
+  // The replica holds no copy of the segment any more.
+  message Success {}
+
+  // What happened to the request.
+  oneof outcome {
+    Success success = 1;
+    ReplicaError error = 2;
+  }
+}

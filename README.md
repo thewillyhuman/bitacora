@@ -22,6 +22,7 @@ implementing it are recorded in [docs/decisions](docs/decisions).
 | Path | Contents |
 | --- | --- |
 | `docs/` | The design, the wire and disk formats, decision records, guides |
+| `src/proto/` | The wire protocol, as language-neutral Protocol Buffers definitions |
 | `src/rust/` | The Cargo workspace: one crate per component |
 | `development/` | Scripts and files for working on bitacora locally |
 | `hack/` | Scripts that manage the repository: checks, changelog, releases |

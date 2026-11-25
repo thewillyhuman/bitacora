@@ -1,0 +1,33 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_doc_test")
+load("//src/rust:defs.bzl", "bitacora_library")
+
+exports_files(["Cargo.toml"])
+
+# Runs build.rs, which turns the protocol definitions into Rust code. Cargo
+# runs the same script, so both builds generate the same code, and neither
+# needs a protoc binary: the script compiles the definitions itself.
+cargo_build_script(
+    name = "generated_protocol",
+    srcs = ["build.rs"],
+    data = ["//src/proto:protocol_files"],
+    edition = "2024",
+    deps = all_crate_deps(build = True),
+)
+
+bitacora_library(
+    name = "bitacora_proto",
+    deps = [
+        ":generated_protocol",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+)
+
+# Compiles and runs the examples in the documentation of the public items,
+# so that an example cannot fall behind the code it shows.
+rust_doc_test(
+    name = "bitacora_proto_doc_test",
+    size = "small",
+    crate = ":bitacora_proto",
+)

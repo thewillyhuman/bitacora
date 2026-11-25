@@ -1,0 +1,12 @@
+"""The wire protocol, as language-neutral Protocol Buffers definitions.
+
+Every client and server is generated from these files, whatever its language.
+The directory layout follows the package names: `bitacora/v1/replica.proto`
+holds package `bitacora.v1`.
+"""
+
+filegroup(
+    name = "protocol_files",
+    srcs = glob(["bitacora/**/*.proto"]),
+    visibility = ["//visibility:public"],
+)
