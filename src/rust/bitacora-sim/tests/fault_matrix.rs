@@ -160,8 +160,8 @@ fn cluster_without_faults_commits_and_serves_everything() {
 fn simulation_reads_segments_from_the_object_store() {
     let report = run_without_faults();
     assert!(
-        report.object_store_reads > 0,
-        "no read reached the object store\n{}",
+        report.tiered_segment_reads > 0,
+        "no segment was read from the object store\n{}",
         report.failure_summary()
     );
 }

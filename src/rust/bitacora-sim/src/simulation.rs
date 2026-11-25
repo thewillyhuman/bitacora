@@ -38,6 +38,10 @@ use crate::linearizability::check_linearizability;
 /// The stream every simulation writes to.
 const STREAM: &str = "simulated";
 
+/// Where tiered segments live in the object store. The key-value store's
+/// artifacts are under another prefix.
+const TIERED_SEGMENTS_KEY_PREFIX: &str = "streams/";
+
 /// How often replicas renew their registration.
 const REGISTRATION_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -209,9 +213,10 @@ pub struct SimulationReport {
     pub committed_appends: usize,
     /// How many faults were injected.
     pub faults_injected: usize,
-    /// How many range reads the object store served: whether, and how
-    /// much, the run read tiered segments.
-    pub object_store_reads: u64,
+    /// How many range reads of tiered segments the object store served:
+    /// whether, and how much, the run read segments that had left the
+    /// replicas. Reads of the key-value store's own artifacts do not count.
+    pub tiered_segment_reads: u64,
 }
 
 impl SimulationReport {
@@ -430,7 +435,10 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     background.abort_all();
 
     let mut report = judge(&config, &world.history.events(), settled);
-    report.object_store_reads = world.cluster.artifact_store().served_range_reads();
+    report.tiered_segment_reads = world
+        .cluster
+        .artifact_store()
+        .served_range_reads(TIERED_SEGMENTS_KEY_PREFIX);
     report
 }
 
@@ -471,7 +479,7 @@ fn judge(
         }),
         faults_injected: count(|event| matches!(event, Event::Fault { .. })),
         // Not part of the history; the caller fills it in.
-        object_store_reads: 0,
+        tiered_segment_reads: 0,
     }
 }
 

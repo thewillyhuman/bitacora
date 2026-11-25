@@ -183,7 +183,21 @@ async fn served_range_reads_are_counted() {
     let _first_range = artifact_store.get_range(OBJECT_KEY, 0..1).await;
     let _second_range = artifact_store.get_range(OBJECT_KEY, 1..3).await;
 
-    assert_eq!(artifact_store.served_range_reads(), 2);
+    assert_eq!(artifact_store.served_range_reads(""), 2);
+}
+
+#[tokio::test]
+async fn served_range_reads_are_counted_by_key_prefix() {
+    let artifact_store = store_with_object().await;
+    artifact_store
+        .put_object("elsewhere/object", Bytes::from_static(b"abc"))
+        .await
+        .expect("put");
+
+    let _range_elsewhere = artifact_store.get_range("elsewhere/object", 0..1).await;
+
+    assert_eq!(artifact_store.served_range_reads("elsewhere/"), 1);
+    assert_eq!(artifact_store.served_range_reads(OBJECT_KEY), 0);
 }
 
 #[tokio::test]
@@ -192,7 +206,7 @@ async fn reads_of_whole_objects_are_not_counted_as_range_reads() {
 
     let _whole_object = artifact_store.get_object(OBJECT_KEY).await;
 
-    assert_eq!(artifact_store.served_range_reads(), 0);
+    assert_eq!(artifact_store.served_range_reads(""), 0);
 }
 
 #[tokio::test]
@@ -204,5 +218,5 @@ async fn refused_range_reads_are_not_counted() {
         .get_range(OBJECT_KEY, range_past_the_end)
         .await;
 
-    assert_eq!(artifact_store.served_range_reads(), 0);
+    assert_eq!(artifact_store.served_range_reads(""), 0);
 }

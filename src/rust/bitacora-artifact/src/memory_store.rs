@@ -64,8 +64,8 @@ struct MemoryArtifacts {
     is_unavailable: bool,
     /// While set, no operation of the interface ever answers. Checked before `is_unavailable`.
     is_unresponsive: bool,
-    /// How many range reads were answered with bytes since the store was created.
-    served_range_reads: u64,
+    /// How many range reads of each object were answered with bytes since the store was created.
+    served_range_reads_by_key: BTreeMap<String, u64>,
 }
 
 /// An artifact store that keeps its objects in memory.
@@ -118,7 +118,7 @@ impl MemoryArtifactStore {
     /// use bitacora_artifact::MemoryArtifactStore;
     ///
     /// let artifact_store = MemoryArtifactStore::new();
-    /// assert_eq!(artifact_store.served_range_reads(), 0);
+    /// assert_eq!(artifact_store.served_range_reads(""), 0);
     /// ```
     #[must_use]
     pub fn new() -> Self {
@@ -238,9 +238,15 @@ impl MemoryArtifactStore {
     /// the result of a read does not say where it came from. This count does. Reads that failed, and reads
     /// of whole objects, are not counted.
     ///
+    /// # Arguments
+    ///
+    /// * `key_prefix` - Only reads of objects whose key starts with this are counted. Several kinds of
+    ///   object share a store, each under its own prefix.
+    ///
     /// # Returns
     ///
-    /// The number of [`ArtifactStore::get_range`] calls that returned bytes, over all clones of the store.
+    /// The number of [`ArtifactStore::get_range`] calls that returned bytes of an object whose key starts
+    /// with `key_prefix`, over all clones of the store. An empty prefix counts every range read.
     ///
     /// # Examples
     ///
@@ -257,13 +263,21 @@ impl MemoryArtifactStore {
     ///
     /// artifact_store.get_range("layers/0001", 0..2).await?;
     ///
-    /// assert_eq!(artifact_store.served_range_reads(), 1);
+    /// assert_eq!(artifact_store.served_range_reads("layers/"), 1);
+    /// assert_eq!(artifact_store.served_range_reads("segments/"), 0);
     /// # Ok(())
     /// # }
     /// ```
     #[must_use]
-    pub fn served_range_reads(&self) -> u64 {
-        self.lock_artifacts().served_range_reads
+    pub fn served_range_reads(&self, key_prefix: &str) -> u64 {
+        let artifacts = self.lock_artifacts();
+        let mut served_range_reads = 0;
+        for (object_key, read_count) in &artifacts.served_range_reads_by_key {
+            if object_key.starts_with(key_prefix) {
+                served_range_reads += read_count;
+            }
+        }
+        served_range_reads
     }
 
     /// Locks the store's state, whether or not another holder of the lock panicked.
@@ -332,7 +346,11 @@ impl ArtifactStore for MemoryArtifactStore {
     ) -> Result<Bytes, ArtifactError> {
         let contents = self.get_object(object_key).await?;
         let range_contents = slice_range(object_key, &contents, &byte_range)?;
-        self.lock_artifacts().served_range_reads += 1;
+        *self
+            .lock_artifacts()
+            .served_range_reads_by_key
+            .entry(object_key.to_owned())
+            .or_default() += 1;
         Ok(range_contents)
     }
 
