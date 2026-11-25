@@ -30,6 +30,8 @@ struct MemoryFile {
 struct MemoryDiskState {
     files_by_path: BTreeMap<String, MemoryFile>,
     capacity_bytes: u64,
+    /// While set, every flush fails and persists nothing.
+    are_flushes_failing: bool,
 }
 
 /// An in-memory disk. Clones share the same files, like two handles to one
@@ -59,6 +61,7 @@ impl MemoryDisk {
             state: Arc::new(Mutex::new(MemoryDiskState {
                 files_by_path: BTreeMap::new(),
                 capacity_bytes,
+                are_flushes_failing: false,
             })),
         }
     }
@@ -82,6 +85,12 @@ impl MemoryDisk {
             file.visible.clone_from(&survived);
             file.durable = survived;
         }
+    }
+
+    /// Makes every flush fail, or succeed again. A failed flush persists
+    /// nothing, like a disk that returns an I/O error from `fsync`.
+    pub fn fail_flushes(&self, should_fail: bool) {
+        self.lock().are_flushes_failing = should_fail;
     }
 
     /// Silently corrupts one byte, in both the visible and the durable
@@ -257,6 +266,9 @@ impl DiskFile for MemoryDiskFile {
     }
 
     async fn sync_data(&mut self) -> io::Result<()> {
+        if self.disk.lock().are_flushes_failing {
+            return Err(io::Error::other("injected flush failure"));
+        }
         self.with_file(|file| {
             file.durable.clone_from(&file.visible);
             Ok(())
@@ -379,6 +391,31 @@ mod tests {
             file.read_at(0, 64).await.expect("read"),
             Bytes::from_static(b"flushed-un")
         );
+    }
+
+    #[tokio::test]
+    async fn failing_flush_reports_an_error_and_persists_nothing() {
+        let disk = MemoryDisk::new();
+        let mut file = file_with(&disk, b"flushed").await;
+        file.write_at(7, Bytes::from_static(b"-lost"))
+            .await
+            .expect("write");
+        disk.fail_flushes(true);
+        let flushed = file.sync_data().await;
+        disk.crash();
+        assert!(
+            flushed.is_err()
+                && file.read_at(0, 64).await.expect("read") == Bytes::from_static(b"flushed")
+        );
+    }
+
+    #[tokio::test]
+    async fn flushes_work_again_once_the_failure_is_lifted() {
+        let disk = MemoryDisk::new();
+        let mut file = file_with(&disk, b"flushed").await;
+        disk.fail_flushes(true);
+        disk.fail_flushes(false);
+        assert!(file.sync_data().await.is_ok());
     }
 
     #[tokio::test]
