@@ -19,7 +19,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::actor::{SegmentHandle, WriteFailureHandler};
-use crate::copy::{Admission, RepairPace, SegmentCopy};
+use crate::copy::{Admission, REPAIR_SUFFIX, RepairPace, SegmentCopy};
 use crate::upload::{UploadPace, upload_sealed_copy};
 
 /// The file that ties a data directory to its replica identity.
@@ -122,6 +122,15 @@ impl Replica {
     ) -> Result<Self, ReplicaError> {
         let replica_id = adopt_identity(disk.as_ref(), proposed_replica_id).await?;
         let stored_paths = disk.list_files().await.map_err(storage_error("list"))?;
+        // A repair that was interrupted leaves the copy it was building
+        // behind. It holds nothing that is not elsewhere.
+        for path in &stored_paths {
+            if path.ends_with(REPAIR_SUFFIX) {
+                disk.remove_file(path)
+                    .await
+                    .map_err(storage_error("clean"))?;
+            }
+        }
         let stored_addresses: Vec<SegmentAddress> = {
             let mut addresses: Vec<SegmentAddress> = stored_paths
                 .iter()
@@ -1122,6 +1131,198 @@ mod tests {
             (was_damaged, copy_of(&target).await),
             (true, (Some(109), Some(109), false))
         );
+    }
+
+    /// A target that holds records 100 to 104 of the segment sealed at 109,
+    /// with a bit flipped in its first batch that the scrubber has found.
+    async fn damaged_target(disk: &MemoryDisk, connector: Arc<dyn ReplicaConnector>) -> Replica {
+        let target = open_target(disk, connector).await;
+        target
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        target
+            .seal(SealRequest {
+                segment: SEGMENT,
+                sealed_end: SequenceNumber::new(109),
+            })
+            .await
+            .expect("seal");
+        disk.corrupt_byte(
+            "7/3.seg",
+            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
+            0x20,
+        );
+        target.scrub_sealed_segments().await.expect("scrubs");
+        target
+    }
+
+    /// A damaged copy may still be the only copy of every record it did not
+    /// lose. A repair that cannot finish must not cost them.
+    #[tokio::test]
+    async fn repair_that_cannot_reach_its_source_leaves_a_damaged_copy_as_it_was() {
+        let disk = MemoryDisk::new();
+        let target = damaged_target(&disk, no_peers()).await;
+        let copy_before = disk.durable_content("7/3.seg");
+
+        let repaired = target.repair_segment(repair_to(109)).await;
+
+        assert!(repaired.is_err(), "{repaired:?}");
+        assert_eq!(disk.durable_content("7/3.seg"), copy_before);
+    }
+
+    #[tokio::test]
+    async fn repair_cut_short_by_its_source_leaves_a_damaged_copy_as_it_was() {
+        let (_source_that_ends_at_109, connector) = sealed_source(109).await;
+        let disk = MemoryDisk::new();
+        let target = damaged_target(&disk, connector).await;
+        let copy_before = disk.durable_content("7/3.seg");
+
+        // The source holds records up to 109, so a repair to 119 gets the
+        // first batches and then finds nothing more.
+        let repaired = target.repair_segment(repair_to(119)).await;
+
+        assert!(repaired.is_err(), "{repaired:?}");
+        assert_eq!(disk.durable_content("7/3.seg"), copy_before);
+    }
+
+    #[tokio::test]
+    async fn failed_repair_of_a_damaged_copy_leaves_no_scratch_file() {
+        let disk = MemoryDisk::new();
+        let target = damaged_target(&disk, no_peers()).await;
+
+        let _failed = target.repair_segment(repair_to(109)).await;
+
+        let stored_paths = disk.list_files().await.expect("list");
+        assert!(
+            !stored_paths.contains(&"7/3.seg.repair".to_owned()),
+            "{stored_paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_of_a_damaged_copy_leaves_no_scratch_file() {
+        let (_source, connector) = sealed_source(109).await;
+        let disk = MemoryDisk::new();
+        let target = damaged_target(&disk, connector).await;
+
+        target.repair_segment(repair_to(109)).await.expect("repair");
+
+        let stored_paths = disk.list_files().await.expect("list");
+        assert!(
+            !stored_paths.contains(&"7/3.seg.repair".to_owned()),
+            "{stored_paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_rebuilt_by_repair_survives_a_restart() {
+        let (_source, connector) = sealed_source(109).await;
+        let disk = MemoryDisk::new();
+        let target = damaged_target(&disk, Arc::clone(&connector)).await;
+        target.repair_segment(repair_to(109)).await.expect("repair");
+        target.stop();
+        disk.crash();
+
+        let restarted = open_target(&disk, connector).await;
+
+        assert_eq!(copy_of(&restarted).await, (Some(109), Some(109), false));
+    }
+
+    /// A fence must never be forgotten, whatever happens to the records.
+    #[tokio::test]
+    async fn copy_rebuilt_by_repair_keeps_its_fence() {
+        let (_source, connector) = sealed_source(109).await;
+        let disk = MemoryDisk::new();
+        let target = open_target(&disk, connector).await;
+        target
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        // A heartbeat that makes the records readable.
+        target
+            .append(append_to(SEGMENT, 105, 0, 104))
+            .await
+            .expect("heartbeat");
+        let later_epoch = Epoch::new(EPOCH.get() + 4);
+        target
+            .fence(FenceRequest {
+                segment: SEGMENT,
+                epoch: later_epoch,
+            })
+            .await
+            .expect("fence");
+        disk.corrupt_byte(
+            "7/3.seg",
+            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
+            0x20,
+        );
+        // Reading the damaged batch is what makes the replica notice.
+        let _read_of_the_damage = target.read(read_from(100, None)).await;
+        let was_damaged = copy_of(&target).await.2;
+
+        target.repair_segment(repair_to(109)).await.expect("repair");
+
+        let statuses = target.list_segments().await.expect("lists");
+        assert!(was_damaged, "the test did not get the copy damaged");
+        assert_eq!(statuses[0].fenced_epoch, later_epoch);
+        assert_eq!(statuses[0].local_end, Some(SequenceNumber::new(109)));
+    }
+
+    /// After a refused flush the process cannot trust what it sees of the
+    /// file. Repairing then would replace a copy that is most likely fine
+    /// on disk with whatever the source can give at that moment.
+    #[tokio::test]
+    async fn copy_whose_disk_refused_a_write_is_not_repaired() {
+        let (_source, connector) = sealed_source(109).await;
+        let disk = MemoryDisk::new();
+        let target = open_target(&disk, connector).await;
+        target
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        let copy_before = disk.durable_content("7/3.seg");
+        disk.fail_flushes(true);
+        let _refused_append = target.append(append_to(SEGMENT, 105, 5, 0)).await;
+
+        let repaired = target.repair_segment(repair_to(109)).await;
+
+        assert!(
+            matches!(repaired, Err(ReplicaError::Storage { .. })),
+            "{repaired:?}"
+        );
+        assert_eq!(disk.durable_content("7/3.seg"), copy_before);
+    }
+
+    #[tokio::test]
+    async fn copy_whose_disk_refused_a_write_serves_its_flushed_records_after_a_restart() {
+        let disk = MemoryDisk::new();
+        let target = open_target(&disk, no_peers()).await;
+        target
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        disk.fail_flushes(true);
+        let _refused_append = target.append(append_to(SEGMENT, 105, 5, 0)).await;
+        target.stop();
+        disk.fail_flushes(false);
+        disk.crash();
+
+        let restarted = open_target(&disk, no_peers()).await;
+
+        assert_eq!(copy_of(&restarted).await, (Some(104), None, false));
+    }
+
+    #[tokio::test]
+    async fn scratch_file_of_an_interrupted_repair_is_removed_at_startup() {
+        let disk = MemoryDisk::new();
+        disk.write_file_atomically("7/3.seg.repair", Bytes::from_static(b"half a copy"))
+            .await
+            .expect("the leftover is planted");
+
+        let _replica = open_target(&disk, no_peers()).await;
+
+        assert_eq!(disk.list_files().await.expect("list"), ["replica.id"]);
     }
 
     #[tokio::test]

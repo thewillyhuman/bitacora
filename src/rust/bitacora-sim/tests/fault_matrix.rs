@@ -32,6 +32,11 @@ const REGRESSION_SEEDS: &[u64] = &[
     // After retention deleted every segment, the next one reused the
     // identifier 1 and collided with copies not yet swept from replicas.
     74, 215,
+    // A repair in place threw the damaged copy away before it had fetched
+    // the replacement. The fetch failed, and records that were flushed and
+    // acknowledged on that replica were gone; bit rot on the only other
+    // copy then lost a committed segment.
+    179,
 ];
 
 fn seeds_per_test() -> u64 {

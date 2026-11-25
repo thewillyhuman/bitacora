@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: replica
+note: "Repair no longer discards a damaged segment copy before its replacement is complete, and never repairs a copy whose disk has just refused a write. A failed repair could destroy acknowledged records."
+issues: [3]

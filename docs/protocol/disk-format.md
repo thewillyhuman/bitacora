@@ -15,7 +15,9 @@ a crash.
 
 Identifiers in paths are decimal numbers without padding. A file whose name
 ends in `.tmp` is a write that was interrupted before it was renamed into
-place; it is ignored and may be deleted.
+place; it is ignored and may be deleted. So is `<segment id>.seg.repair`:
+the new copy a repair builds beside a damaged one, and moves over it only
+once it is complete.
 
 `replica.id` is written once, when the replica first starts on an empty
 directory, and never changes. The identity belongs to the directory, not to
