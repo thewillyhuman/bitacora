@@ -209,6 +209,9 @@ impl SegmentCopy {
                 .await?;
         }
 
+        if new_batches.is_empty() {
+            self.flush_mark_on_heartbeat().await?;
+        }
         self.known_durable = self.known_durable.max(request.durable_sequence);
         Ok(AppendResponse {
             local_end: self.local_end_or(local_end),
@@ -549,6 +552,20 @@ impl SegmentCopy {
             self.has_failed_write = true;
             self.damaged_by(&segment_error)
         })
+    }
+
+    /// A heartbeat means the stream is idle. That is the moment to make the
+    /// file's flushed mark cover everything acknowledged: it costs one flush
+    /// when the stream goes idle and nothing after that.
+    async fn flush_mark_on_heartbeat(&mut self) -> Result<(), ReplicaError> {
+        let Some(file) = &mut self.file else {
+            return Ok(());
+        };
+        if let Err(segment_error) = file.flush_mark().await {
+            self.has_failed_write = true;
+            return Err(self.damaged_by(&segment_error));
+        }
+        Ok(())
     }
 
     /// Replaces the sidecar state durably, then adopts it in memory.
@@ -1290,7 +1307,11 @@ mod tests {
     async fn scrub_marks_a_corrupted_copy_as_damaged() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        disk.corrupt_byte(&segment_file_path(SEGMENT), 100, 0x10);
+        disk.corrupt_byte(
+            &segment_file_path(SEGMENT),
+            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
+            0x10,
+        );
         copy.verify().await;
         assert!(copy.status().is_damaged);
     }
@@ -1307,7 +1328,11 @@ mod tests {
     async fn damaged_copy_refuses_every_request() {
         let disk = MemoryDisk::new();
         let mut copy = copy_with_records(&disk).await;
-        disk.corrupt_byte(&segment_file_path(SEGMENT), 100, 0x10);
+        disk.corrupt_byte(
+            &segment_file_path(SEGMENT),
+            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
+            0x10,
+        );
         copy.verify().await;
         let append = copy.append(&append_request(&[(110, 1)], 0), ROOMY).await;
         let fence = copy.fence(NEXT_EPOCH).await;
@@ -1337,6 +1362,41 @@ mod tests {
             .expect("fence");
         disk.corrupt_byte(&segment_state_path(SEGMENT), 15, 0x01);
         assert!(reload(&disk).await.status().is_damaged);
+    }
+
+    /// Damage to records a replica flushed and acknowledged must not come
+    /// back as a healthy, shorter copy: a recovering writer would count on
+    /// it to hold everything committed.
+    #[tokio::test]
+    async fn copy_whose_flushed_records_were_damaged_loads_as_damaged() {
+        let disk = MemoryDisk::new();
+        let mut copy = copy_with_records(&disk).await;
+        copy.append(&append_request(&[], 109), ROOMY)
+            .await
+            .expect("heartbeat");
+        let inside_the_first_batch = bitacora_segment::format::SEGMENT_HEADER_BYTES + 30;
+        disk.corrupt_byte(&segment_file_path(SEGMENT), inside_the_first_batch, 0x01);
+        disk.crash();
+        let mut reloaded = reload(&disk).await;
+        assert!(
+            reloaded.status().is_damaged
+                && matches!(
+                    reloaded.fence(NEXT_EPOCH).await,
+                    Err(ReplicaError::Storage { .. })
+                )
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_to_a_copy_whose_mark_is_current_flushes_nothing() {
+        let disk = MemoryDisk::new();
+        let mut copy = copy_with_records(&disk).await;
+        copy.append(&append_request(&[], 109), ROOMY)
+            .await
+            .expect("heartbeat");
+        disk.fail_flushes(true);
+        let second_heartbeat = copy.append(&append_request(&[], 109), ROOMY).await;
+        assert!(second_heartbeat.is_ok());
     }
 
     // ---- deletion ----

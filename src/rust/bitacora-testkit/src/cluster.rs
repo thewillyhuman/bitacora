@@ -575,7 +575,7 @@ mod tests {
         let cluster = cluster_with_three_records().await;
         let node = &cluster.nodes()[0];
         // Keep the segment header and the first bytes of the only batch.
-        let surviving_bytes = 80;
+        let surviving_bytes = bitacora_segment::format::SEGMENT_HEADER_BYTES + 16;
         node.crash_keeping(|_path, durable, _visible| {
             durable[..durable.len().min(surviving_bytes)].to_vec()
         });

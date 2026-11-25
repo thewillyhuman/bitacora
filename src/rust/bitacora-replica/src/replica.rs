@@ -856,7 +856,11 @@ mod tests {
             })
             .await
             .expect("seal");
-        disk.corrupt_byte("7/3.seg", 100, 0x20);
+        disk.corrupt_byte(
+            "7/3.seg",
+            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
+            0x20,
+        );
         assert_eq!(replica.scrub_sealed_segments().await, Ok(1));
     }
 
@@ -1059,7 +1063,11 @@ mod tests {
             })
             .await
             .expect("seal");
-        disk.corrupt_byte("7/3.seg", 100, 0x20);
+        disk.corrupt_byte(
+            "7/3.seg",
+            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
+            0x20,
+        );
         target.scrub_sealed_segments().await.expect("scrubs");
         let was_damaged = copy_of(&target).await.2;
         target.repair_segment(repair_to(109)).await.expect("repair");

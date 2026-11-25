@@ -12,7 +12,8 @@ use thiserror::Error;
 
 use crate::disk::{Disk, DiskFile};
 use crate::format::{
-    Batch, HeaderError, SEGMENT_HEADER_BYTES, ScanStop, SegmentHeader, scan_valid_prefix,
+    Batch, FlushedMark, HeaderError, SEGMENT_HEADER_BYTES, ScanStop, SegmentHeader,
+    scan_valid_prefix,
 };
 use crate::index::{IndexEntry, SparseIndex};
 
@@ -20,6 +21,12 @@ use crate::index::{IndexEntry, SparseIndex};
 const SCAN_CHUNK_BYTES: usize = 1024 * 1024;
 
 const HEADER_END_OFFSET: u64 = SEGMENT_HEADER_BYTES as u64;
+
+/// The mark of a file whose header is all that is known to be flushed.
+const NOTHING_FLUSHED: FlushedMark = FlushedMark {
+    flushed_bytes: HEADER_END_OFFSET,
+    generation: 0,
+};
 
 /// Why an operation on a segment file failed.
 #[derive(Debug, Error)]
@@ -111,6 +118,11 @@ pub struct SegmentFile {
     /// How much the file grows by when it fills up. Zero lets writes extend
     /// it one batch at a time.
     growth_bytes: u64,
+    /// Where the content ended at the last successful flush.
+    flushed_end_bytes: u64,
+    /// The flushed mark last written to the header. It lags behind
+    /// `flushed_end_bytes` until the next append or [`SegmentFile::flush_mark`].
+    written_mark: FlushedMark,
     /// The last sequence number held, or the position before the segment's
     /// first record if the copy is empty.
     local_end: SequenceNumber,
@@ -164,6 +176,8 @@ impl SegmentFile {
             end_offset_bytes: HEADER_END_OFFSET,
             allocated_bytes,
             growth_bytes: preallocated_bytes,
+            flushed_end_bytes: HEADER_END_OFFSET,
+            written_mark: NOTHING_FLUSHED,
             local_end: header.first_sequence.preceding(),
             index: SparseIndex::new(),
         })
@@ -180,7 +194,11 @@ impl SegmentFile {
     /// # Errors
     ///
     /// Fails if the file is missing, has no valid header, belongs to another
-    /// segment than `expected`, or cannot be read.
+    /// segment than `expected`, or cannot be read. Fails with
+    /// [`SegmentError::Corrupt`] if the valid batches end before the file's
+    /// flushed mark: records that were flushed, and so possibly
+    /// acknowledged, are damaged, and the copy can no longer vouch for what
+    /// it held.
     pub async fn open(
         disk: &dyn Disk,
         path: &str,
@@ -216,6 +234,9 @@ impl SegmentFile {
             end_offset_bytes: HEADER_END_OFFSET,
             allocated_bytes: file_bytes,
             growth_bytes,
+            flushed_end_bytes: HEADER_END_OFFSET,
+            written_mark: FlushedMark::latest_in(header.address, &header_bytes)
+                .unwrap_or(NOTHING_FLUSHED),
             local_end: header.first_sequence.preceding(),
             index: SparseIndex::new(),
         };
@@ -233,12 +254,24 @@ impl SegmentFile {
                 },
             )
             .await?;
-        segment.index = index;
-        segment.local_end = local_end;
-        segment.end_offset_bytes = region_end.offset_bytes;
         let stop = region_end
             .stop
             .expect("the recovery visitor never stops the scan");
+        if region_end.offset_bytes < segment.written_mark.flushed_bytes {
+            return Err(SegmentError::Corrupt {
+                path: path.to_owned(),
+                offset_bytes: region_end.offset_bytes,
+                reason: format!(
+                    "valid records end here, but the file was flushed through byte {}",
+                    segment.written_mark.flushed_bytes
+                ),
+            });
+        }
+        segment.index = index;
+        segment.local_end = local_end;
+        segment.end_offset_bytes = region_end.offset_bytes;
+        // Whatever survived a restart is on the disk.
+        segment.flushed_end_bytes = region_end.offset_bytes;
         Ok((segment, stop))
     }
 
@@ -288,6 +321,9 @@ impl SegmentFile {
         }
         self.grow_to_fit(self.end_offset_bytes + to_u64(total_bytes))
             .await?;
+        // The mark for what earlier flushes covered rides on the flush that
+        // follows this append, at no cost of its own.
+        self.write_mark_if_behind().await?;
         self.file
             .write_at(self.end_offset_bytes, frames.freeze())
             .await
@@ -313,7 +349,28 @@ impl SegmentFile {
         self.file
             .sync_data()
             .await
-            .map_err(io_error("flush", &self.path))
+            .map_err(io_error("flush", &self.path))?;
+        self.flushed_end_bytes = self.end_offset_bytes;
+        Ok(())
+    }
+
+    /// Brings the file's flushed mark up to date and makes it durable, if
+    /// it lags. Called when a stream goes idle, so that the mark covers
+    /// everything acknowledged and damage to any of it is detected when the
+    /// copy is next opened.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`SegmentError::Io`] as [`SegmentFile::flush`] does.
+    pub async fn flush_mark(&mut self) -> Result<(), SegmentError> {
+        if self.flushed_end_bytes <= self.written_mark.flushed_bytes {
+            return Ok(());
+        }
+        self.write_mark_if_behind().await?;
+        self.file
+            .sync_data()
+            .await
+            .map_err(io_error("flush mark", &self.path))
     }
 
     /// Reads whole batch frames, starting with the batch that holds
@@ -406,6 +463,15 @@ impl SegmentFile {
             return Err(not_a_boundary);
         };
 
+        // Lower the mark durably before cutting. In the other order a crash
+        // could leave a file shorter than its mark, which reads as damage.
+        if self.written_mark.flushed_bytes > cut_offset_bytes {
+            self.write_mark(cut_offset_bytes).await?;
+            self.file
+                .sync_data()
+                .await
+                .map_err(io_error("flush mark", &self.path))?;
+        }
         self.file
             .set_length(cut_offset_bytes)
             .await
@@ -413,6 +479,7 @@ impl SegmentFile {
         self.index.forget_from(cut_offset_bytes);
         self.allocated_bytes = cut_offset_bytes;
         self.end_offset_bytes = cut_offset_bytes;
+        self.flushed_end_bytes = self.flushed_end_bytes.min(cut_offset_bytes);
         self.local_end = end;
         Ok(())
     }
@@ -449,6 +516,33 @@ impl SegmentFile {
             )
             .await?;
         self.require_intact(region_end)
+    }
+
+    /// Writes a new flushed mark if the last one written lags behind what
+    /// has been flushed. The write itself is not flushed.
+    async fn write_mark_if_behind(&mut self) -> Result<(), SegmentError> {
+        if self.flushed_end_bytes > self.written_mark.flushed_bytes {
+            self.write_mark(self.flushed_end_bytes).await?;
+        }
+        Ok(())
+    }
+
+    /// Writes a flushed mark saying the file is flushed through
+    /// `flushed_bytes`, into the slot the previous mark does not occupy.
+    async fn write_mark(&mut self, flushed_bytes: u64) -> Result<(), SegmentError> {
+        let mark = FlushedMark {
+            flushed_bytes,
+            generation: self.written_mark.generation.wrapping_add(1),
+        };
+        self.file
+            .write_at(
+                to_u64(mark.slot_offset()),
+                Bytes::copy_from_slice(&mark.encode(self.header.address)),
+            )
+            .await
+            .map_err(io_error("write flushed mark", &self.path))?;
+        self.written_mark = mark;
+        Ok(())
     }
 
     /// Extends the file by whole growth steps until `needed_bytes` fit.
@@ -911,6 +1005,117 @@ mod tests {
         disk.corrupt_byte(PATH, 20, 0x01);
         let opened = SegmentFile::open(&disk, PATH, SEGMENT, PREALLOCATED_BYTES).await;
         assert!(matches!(opened, Err(SegmentError::InvalidHeader { .. })));
+    }
+
+    // ---- damage to flushed records ----
+
+    /// A segment whose three batches were flushed by one request and whose
+    /// fourth by a later one, so that the mark covers the first three.
+    async fn segment_with_a_mark_over_three_batches(disk: &MemoryDisk) -> SegmentFile {
+        let mut segment = segment_with_three_batches(disk).await;
+        segment.append(&[batch(110, 1)]).await.expect("append");
+        segment.flush().await.expect("flush");
+        segment
+    }
+
+    fn damage_the_first_batch(disk: &MemoryDisk) {
+        disk.corrupt_byte(PATH, SEGMENT_HEADER_BYTES + 30, 0x04);
+    }
+
+    #[tokio::test]
+    async fn damage_to_flushed_records_is_found_when_the_copy_is_reopened() {
+        let disk = MemoryDisk::new();
+        segment_with_a_mark_over_three_batches(&disk).await;
+        damage_the_first_batch(&disk);
+        disk.crash();
+        let reopened = SegmentFile::open(&disk, PATH, SEGMENT, PREALLOCATED_BYTES).await;
+        assert!(
+            matches!(reopened, Err(SegmentError::Corrupt { .. })),
+            "the damaged copy was accepted"
+        );
+    }
+
+    /// The mark lags by one flush, so damage to the most recently flushed
+    /// records cannot be told from a torn write until the mark catches up.
+    #[tokio::test]
+    async fn damage_past_the_mark_is_taken_for_a_torn_tail() {
+        let disk = MemoryDisk::new();
+        segment_with_three_batches(&disk).await;
+        damage_the_first_batch(&disk);
+        disk.crash();
+        let (reopened, stop) = reopen(&disk).await;
+        assert!(
+            reopened.local_end() == SequenceNumber::new(FIRST_SEQUENCE - 1)
+                && matches!(stop, ScanStop::Invalid(_))
+        );
+    }
+
+    #[tokio::test]
+    async fn flushing_the_mark_closes_the_window() {
+        let disk = MemoryDisk::new();
+        let mut segment = segment_with_three_batches(&disk).await;
+        segment.flush_mark().await.expect("flush mark");
+        damage_the_first_batch(&disk);
+        disk.crash();
+        let reopened = SegmentFile::open(&disk, PATH, SEGMENT, PREALLOCATED_BYTES).await;
+        assert!(matches!(reopened, Err(SegmentError::Corrupt { .. })));
+    }
+
+    #[tokio::test]
+    async fn mark_that_was_never_flushed_does_not_survive_a_crash() {
+        let disk = MemoryDisk::new();
+        let mut segment = segment_with_three_batches(&disk).await;
+        // The mark for the three batches is written with this append, which
+        // is never flushed.
+        segment.append(&[batch(110, 1)]).await.expect("append");
+        damage_the_first_batch(&disk);
+        disk.crash();
+        let (reopened, _stop) = reopen(&disk).await;
+        assert_eq!(
+            reopened.local_end(),
+            SequenceNumber::new(FIRST_SEQUENCE - 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn torn_tail_after_the_mark_is_not_damage() {
+        let disk = MemoryDisk::new();
+        let mut segment = segment_with_a_mark_over_three_batches(&disk).await;
+        let flushed_bytes = segment.content_bytes();
+        segment.append(&[batch(111, 4)]).await.expect("append");
+        crash_with_torn_tail(&disk, flushed_bytes, 9);
+        let (reopened, _stop) = reopen(&disk).await;
+        assert_eq!(reopened.local_end(), SequenceNumber::new(110));
+    }
+
+    #[tokio::test]
+    async fn truncating_below_the_mark_lowers_it() {
+        let disk = MemoryDisk::new();
+        let mut segment = segment_with_a_mark_over_three_batches(&disk).await;
+        segment
+            .truncate_to(SequenceNumber::new(102))
+            .await
+            .expect("truncate");
+        disk.crash();
+        let (reopened, _stop) = reopen(&disk).await;
+        assert_eq!(reopened.local_end(), SequenceNumber::new(102));
+    }
+
+    #[tokio::test]
+    async fn reopened_copy_keeps_detecting_damage_to_what_it_found() {
+        let disk = MemoryDisk::new();
+        segment_with_a_mark_over_three_batches(&disk).await;
+        disk.crash();
+        let (mut reopened, _stop) = reopen(&disk).await;
+        reopened.flush_mark().await.expect("flush mark");
+        disk.corrupt_byte(
+            PATH,
+            usize::try_from(reopened.content_bytes()).expect("small") - 2,
+            0x04,
+        );
+        disk.crash();
+        let reopened_again = SegmentFile::open(&disk, PATH, SEGMENT, PREALLOCATED_BYTES).await;
+        assert!(matches!(reopened_again, Err(SegmentError::Corrupt { .. })));
     }
 
     // ---- truncation ----

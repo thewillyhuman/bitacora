@@ -5,13 +5,20 @@
 //!
 //! ```text
 //! segment file   header | batch frame*
-//! header         magic 8 | format version u32 | stream id u64 | segment id u64
-//!                | epoch u64 | first sequence u64 | crc32c u32 | zero padding to 64
+//! header         identity | zero padding to 64 | flushed mark | flushed mark
+//!                | zero padding to 128
+//! identity       magic 8 | format version u32 | stream id u64 | segment id u64
+//!                | epoch u64 | first sequence u64 | crc32c u32
+//! flushed mark   flushed bytes u64 | generation u32 | crc32c u32
 //! batch frame    body length u32 | first sequence u64 | record count u32
 //!                | crc32c u32 | body
 //! body           record*
 //! record         payload length u32 | payload
 //! ```
+//!
+//! The identity never changes after the file is created. The two flushed
+//! marks are the only bytes of a segment file that are rewritten: see
+//! [`FlushedMark`].
 //!
 //! A batch checksum covers the stream id, the segment id, the three header
 //! fields before it and the body. The two identifiers are not stored in the
@@ -34,8 +41,14 @@ pub const SEGMENT_MAGIC: [u8; 8] = *b"BITASEG\0";
 /// The segment format this build writes. Older formats stay readable.
 pub const SEGMENT_FORMAT_VERSION: u32 = 1;
 
-/// The size of the segment header, padding included.
-pub const SEGMENT_HEADER_BYTES: usize = 64;
+/// The size of the segment header, flushed marks and padding included.
+pub const SEGMENT_HEADER_BYTES: usize = 128;
+
+/// The size of one encoded [`FlushedMark`].
+pub const FLUSHED_MARK_BYTES: usize = 16;
+
+/// Where the first of the two flushed marks starts in the header.
+const FLUSHED_MARKS_OFFSET: usize = 64;
 
 /// The size of a batch frame header.
 pub const BATCH_HEADER_BYTES: usize = 20;
@@ -148,6 +161,76 @@ impl SegmentHeader {
             first_sequence,
         })
     }
+}
+
+/// A copy's durable note of how far it has been flushed: every byte of the
+/// file before `flushed_bytes` reached the disk.
+///
+/// A replica that restarts cannot otherwise tell a torn write, which is
+/// normal and loses nothing that was acknowledged, from damage to records
+/// it had flushed and acknowledged, which makes its copy unfit to vouch for
+/// what is committed. With the mark, invalid bytes before it are damage,
+/// and invalid bytes after it are an ordinary torn tail.
+///
+/// The mark is written without a flush of its own: it rides on the next
+/// flush of data, or on a flush made when the stream goes idle. It is
+/// therefore allowed to lag behind the truth, never to run ahead of it.
+/// Two slots are written alternately, so that a torn write of one leaves
+/// the other intact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlushedMark {
+    /// How many bytes from the start of the file are known to be flushed.
+    pub flushed_bytes: u64,
+    /// Counts the marks written to this file. The valid mark with the
+    /// highest generation is the current one.
+    pub generation: u32,
+}
+
+impl FlushedMark {
+    /// Where this mark is stored in the file: the two slots alternate with
+    /// the generation.
+    #[must_use]
+    pub const fn slot_offset(self) -> usize {
+        FLUSHED_MARKS_OFFSET + FLUSHED_MARK_BYTES * (self.generation % 2) as usize
+    }
+
+    /// Serializes the mark for `segment`, checksum included.
+    #[must_use]
+    pub fn encode(self, segment: SegmentAddress) -> [u8; FLUSHED_MARK_BYTES] {
+        let mut encoded = [0_u8; FLUSHED_MARK_BYTES];
+        encoded[..U64_BYTES].copy_from_slice(&self.flushed_bytes.to_le_bytes());
+        encoded[U64_BYTES..U64_BYTES + U32_BYTES].copy_from_slice(&self.generation.to_le_bytes());
+        let checksum = flushed_mark_checksum(segment, &encoded);
+        encoded[U64_BYTES + U32_BYTES..].copy_from_slice(&checksum.to_le_bytes());
+        encoded
+    }
+
+    /// Returns the current mark stored in a segment header, or `None` if
+    /// neither slot holds a valid one, as in a file that was never flushed
+    /// past its header.
+    #[must_use]
+    pub fn latest_in(segment: SegmentAddress, header: &[u8]) -> Option<Self> {
+        (0..2)
+            .filter_map(|slot| {
+                let slot_start = FLUSHED_MARKS_OFFSET + slot * FLUSHED_MARK_BYTES;
+                let encoded = header.get(slot_start..slot_start + FLUSHED_MARK_BYTES)?;
+                let stored = read_u32(encoded, U64_BYTES + U32_BYTES);
+                (stored == flushed_mark_checksum(segment, encoded)).then(|| Self {
+                    flushed_bytes: read_u64(encoded, 0),
+                    generation: read_u32(encoded, U64_BYTES),
+                })
+            })
+            .max_by_key(|mark| mark.generation)
+    }
+}
+
+/// Computes the checksum of an encoded flushed mark, skipping the checksum
+/// field. The segment's address is mixed in, so that an all-zero slot is
+/// never valid and a mark copied from another file is refused.
+fn flushed_mark_checksum(segment: SegmentAddress, encoded: &[u8]) -> u32 {
+    let mut checksum = crc32c::crc32c(&segment.stream_id.get().to_le_bytes());
+    checksum = crc32c::crc32c_append(checksum, &segment.segment_id.get().to_le_bytes());
+    crc32c::crc32c_append(checksum, &encoded[..U64_BYTES + U32_BYTES])
 }
 
 /// Why records cannot be encoded as one batch.
@@ -729,6 +812,75 @@ mod tests {
             SegmentHeader::decode(&starts_at_zero.encode()),
             Err(HeaderError::StartsAtEmptyPosition)
         );
+    }
+
+    // ---- flushed mark ----
+
+    fn header_with_marks(marks: &[FlushedMark]) -> Vec<u8> {
+        let mut header_bytes = header().encode().to_vec();
+        for mark in marks {
+            let slot_offset = mark.slot_offset();
+            header_bytes[slot_offset..slot_offset + FLUSHED_MARK_BYTES]
+                .copy_from_slice(&mark.encode(SEGMENT));
+        }
+        header_bytes
+    }
+
+    fn mark(flushed_bytes: u64, generation: u32) -> FlushedMark {
+        FlushedMark {
+            flushed_bytes,
+            generation,
+        }
+    }
+
+    #[test]
+    fn fresh_header_holds_no_flushed_mark() {
+        assert_eq!(FlushedMark::latest_in(SEGMENT, &header().encode()), None);
+    }
+
+    #[test]
+    fn stored_mark_is_read_back() {
+        let header_bytes = header_with_marks(&[mark(4_096, 1)]);
+        assert_eq!(
+            FlushedMark::latest_in(SEGMENT, &header_bytes),
+            Some(mark(4_096, 1))
+        );
+    }
+
+    #[test]
+    fn mark_with_the_highest_generation_is_the_current_one() {
+        let header_bytes = header_with_marks(&[mark(4_096, 4), mark(8_192, 5)]);
+        assert_eq!(
+            FlushedMark::latest_in(SEGMENT, &header_bytes),
+            Some(mark(8_192, 5))
+        );
+    }
+
+    #[test]
+    fn consecutive_marks_use_different_slots() {
+        assert_ne!(mark(0, 4).slot_offset(), mark(0, 5).slot_offset());
+    }
+
+    #[test]
+    fn torn_mark_leaves_the_previous_one_current() {
+        let mut header_bytes = header_with_marks(&[mark(4_096, 4), mark(8_192, 5)]);
+        header_bytes[mark(0, 5).slot_offset() + 3] ^= 0xFF;
+        assert_eq!(
+            FlushedMark::latest_in(SEGMENT, &header_bytes),
+            Some(mark(4_096, 4))
+        );
+    }
+
+    #[test]
+    fn mark_of_another_segment_is_refused() {
+        let header_bytes = header_with_marks(&[mark(4_096, 1)]);
+        assert_eq!(FlushedMark::latest_in(OTHER_SEGMENT, &header_bytes), None);
+    }
+
+    #[test]
+    fn storing_a_mark_leaves_the_header_identity_valid() {
+        let header_bytes = header_with_marks(&[mark(4_096, 1), mark(8_192, 2)]);
+        assert_eq!(SegmentHeader::decode(&header_bytes), Ok(header()));
     }
 
     // ---- batch encoding ----

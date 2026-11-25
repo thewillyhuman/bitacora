@@ -350,7 +350,7 @@ async fn copy_found_damaged_by_the_scrubber_is_found_bad() {
     let node = &cluster.nodes()[0];
     node.disk().corrupt_byte(
         &format!("{}/{}.seg", segment.stream_id, segment.segment_id),
-        100,
+        bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
         0x20,
     );
     node.replica()
@@ -414,7 +414,7 @@ async fn damaged_copy_is_rebuilt_in_place() {
     let node = &cluster.nodes()[0];
     node.disk().corrupt_byte(
         &format!("{}/{}.seg", segment.stream_id, segment.segment_id),
-        100,
+        bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
         0x20,
     );
     let replica = node.replica().expect("the node is running");
@@ -474,7 +474,7 @@ async fn segment_without_a_good_copy_is_left_alone() {
     for node in cluster.nodes() {
         node.disk().corrupt_byte(
             &format!("{}/{}.seg", segment.stream_id, segment.segment_id),
-            100,
+            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
             0x20,
         );
         node.replica()
