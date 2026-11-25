@@ -1,0 +1,4 @@
+change_type: new_component
+component: replica
+note: "Add the replica core with contiguous flushed appends, fencing, sealing, durable-limited reads, admission by free space and drain."
+issues: [1]

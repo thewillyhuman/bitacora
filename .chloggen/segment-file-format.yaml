@@ -1,0 +1,4 @@
+change_type: new_component
+component: segment
+note: "Add the segment file format with checksummed batch frames, crash-recovery scan, sparse index and scrubbing."
+issues: [1]

@@ -1,0 +1,4 @@
+change_type: new_component
+component: meta
+note: "Add the metadata store with conditional writes for epochs, segments, checkpoints, the replica registry and controller leadership, plus failure-domain aware placement."
+issues: [2]

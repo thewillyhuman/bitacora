@@ -1,0 +1,4 @@
+change_type: new_component
+component: client
+note: "Add the client library with a quorum-committing stream writer that rolls on replica failure, writer failover, a stream reader and stream administration."
+issues: [2]

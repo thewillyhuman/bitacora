@@ -1,0 +1,4 @@
+change_type: new_component
+component: build
+note: "Build, lint and test with Bazel using a hermetic Rust toolchain while Cargo.toml stays the source of truth for dependencies and lints."
+issues: [0]

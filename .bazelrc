@@ -29,6 +29,12 @@ build:lint --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
 build:lint --output_groups=+clippy_checks,+rustfmt_checks
 build:lint --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
+# `--config=ci` is what continuous integration runs: everything `lint` does,
+# with output suited to a log file.
+build:ci --config=lint
+build:ci --curses=no
+build:ci --color=yes
+
 # `--config=release` builds the binaries that ship.
 build:release --compilation_mode=opt
 build:release --@rules_rust//rust/settings:lto=thin

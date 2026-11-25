@@ -1,0 +1,38 @@
+# Configuration of chloggen, which builds CHANGELOG.md from one small YAML
+# file per change. Run it through hack/chloggen.sh, which pins its version.
+
+# Where the entries live until a release collects them.
+entries_dir: .chloggen
+
+# The file `hack/chloggen.sh new` copies to start an entry.
+template_yaml: .chloggen/TEMPLATE.yaml
+
+# How a release section is rendered. The default template renders tracking
+# references as issue links; this repository tracks work by roadmap
+# milestone (docs/spec.md, section 18), so ours renders them as M0 to M6.
+summary_template: .chloggen/summary.tmpl
+
+change_logs:
+  user: CHANGELOG.md
+default_change_logs: [user]
+
+# The only values `component` may take: one per crate, plus the areas of the
+# repository that are not crates.
+components:
+  - artifact
+  - bench
+  - build
+  - cli
+  - client
+  - controller
+  - deploy
+  - docs
+  - kv
+  - materializer
+  - meta
+  - model
+  - proto
+  - replica
+  - segment
+  - sim
+  - types

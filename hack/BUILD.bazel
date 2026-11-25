@@ -1,0 +1,13 @@
+"""Scripts that manage the repository, and their tests."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+sh_test(
+    name = "create_release_test",
+    size = "small",
+    srcs = ["tests/create_release_test.sh"],
+    data = [
+        "chloggen.sh",
+        "create_release.sh",
+    ],
+)

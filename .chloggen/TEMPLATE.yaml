@@ -1,0 +1,20 @@
+# One changelog entry. Create it with `hack/chloggen.sh new -f <name>`, fill
+# it in, and commit it with the change it describes.
+
+# One of 'breaking', 'deprecation', 'new_component', 'enhancement', 'bug_fix'.
+change_type:
+
+# The crate or area the change belongs to; see `components` in config.yaml.
+component:
+
+# What changed, in one sentence, from the point of view of someone who uses
+# or operates bitacora. Quote it if it starts with a backtick.
+note:
+
+# The roadmap milestone the change belongs to, as a number from 0 to 6
+# (docs/spec.md, section 18). chloggen calls this field `issues`; it is
+# rendered as M<number> in CHANGELOG.md.
+issues: []
+
+# (Optional) Further lines rendered under the note.
+subtext:

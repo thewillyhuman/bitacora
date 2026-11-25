@@ -1,0 +1,43 @@
+# Builds, lints and tests every change. One Bazel invocation does all three,
+# so what passes here is exactly what `hack/check.sh` checks locally.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: build, lint and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      # Restores Bazel itself, the downloaded dependencies and the action
+      # cache, so an unchanged crate is neither rebuilt nor retested.
+      - uses: bazel-contrib/setup-bazel@0.19.2
+        with:
+          bazelisk-cache: true
+          disk-cache: ci
+          repository-cache: true
+      - run: bazel test --config=ci //...
+
+  changelog:
+    name: changelog entries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.24"
+      - run: hack/chloggen.sh validate
