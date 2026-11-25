@@ -7,15 +7,18 @@
 //! record and reads the whole stream back. The history of the run is then
 //! judged by the checker.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bitacora_client::{
-    AppendError, BitacoraClient, ClientSettings, ReaderSettings, TakeoverPolicy, WriterSettings,
+    AppendError, BitacoraClient, ClientSettings, ReadError, ReaderSettings, TakeoverPolicy,
+    WriterSettings,
 };
 use bitacora_controller::{Controller, ControllerSettings};
-use bitacora_meta::{PlacementPolicy, RetentionPolicy};
+use bitacora_meta::{CopyState, PlacementPolicy, RetentionPolicy};
+use bitacora_segment::Disk;
 use bitacora_testkit::{Cluster, LinkFault};
+use bitacora_types::replica_api::ReplicaApi;
 use bitacora_types::{DeterministicRandom, ReplicationSettings, SequenceNumber, SequenceRange};
 use bytes::Bytes;
 use tokio::sync::watch;
@@ -33,6 +36,14 @@ const APPENDS_IN_FLIGHT: usize = 4;
 
 /// How often replicas renew their registration.
 const REGISTRATION_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How often replicas scrub their sealed segments. Weekly in production;
+/// here often enough to find injected corruption within a run.
+const SCRUB_INTERVAL: Duration = Duration::from_secs(3);
+
+/// The materializer whose checkpoints let the simulated stream be
+/// truncated.
+const MATERIALIZER: &str = "simulated-materializer";
 
 /// Which kinds of fault a run injects (design, section 15, "Faults
 /// injected").
@@ -60,6 +71,10 @@ pub struct FaultMix {
     /// Another compute node takes the stream while the old writer is still
     /// running, as after a pause that outlived its lease.
     pub writer_switches: bool,
+    /// One node's disk silently flips bits in stored segments.
+    pub silent_corruption: bool,
+    /// One node loses its disk for good, once, and returns empty.
+    pub disk_loss: bool,
 }
 
 impl FaultMix {
@@ -74,6 +89,8 @@ impl FaultMix {
         metadata_outages: false,
         writer_crashes: false,
         writer_switches: false,
+        silent_corruption: false,
+        disk_loss: false,
     };
 
     /// Every fault the simulator knows.
@@ -87,6 +104,8 @@ impl FaultMix {
         metadata_outages: true,
         writer_crashes: true,
         writer_switches: true,
+        silent_corruption: true,
+        disk_loss: true,
     };
 
     fn enabled_kinds(self) -> Vec<FaultKind> {
@@ -100,6 +119,8 @@ impl FaultMix {
             (self.metadata_outages, FaultKind::MetadataOutage),
             (self.writer_crashes, FaultKind::WriterCrash),
             (self.writer_switches, FaultKind::WriterSwitch),
+            (self.silent_corruption, FaultKind::SilentCorruption),
+            (self.disk_loss, FaultKind::DiskLoss),
         ]
         .into_iter()
         .filter_map(|(is_enabled, kind)| is_enabled.then_some(kind))
@@ -118,6 +139,8 @@ enum FaultKind {
     MetadataOutage,
     WriterCrash,
     WriterSwitch,
+    SilentCorruption,
+    DiskLoss,
 }
 
 /// What one simulated run looks like.
@@ -249,6 +272,12 @@ pub fn run(config: &SimulationConfig) -> SimulationReport {
 struct World {
     cluster: Cluster,
     history: History,
+    /// What the audit is waiting for, to say so if it never happens.
+    audit_step: Mutex<&'static str>,
+    /// The one node whose disk may corrupt data or be lost. Keeping these
+    /// faults on one node keeps them within what replication is meant to
+    /// survive: at most one copy of any record is destroyed.
+    unlucky_node: usize,
 }
 
 impl World {
@@ -286,6 +315,8 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     let world = Arc::new(World {
         cluster: Cluster::start(config.node_count).await,
         history: History::new(),
+        audit_step: Mutex::new("starting"),
+        unlucky_node: random.index(config.node_count),
     });
     world
         .cluster
@@ -298,6 +329,12 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
         )
         .await
         .expect("a fresh metadata store accepts a stream");
+    world
+        .cluster
+        .metadata()
+        .register_materializer(STREAM, MATERIALIZER)
+        .await
+        .expect("a fresh stream accepts a materializer");
 
     let mut background = JoinSet::new();
     background.spawn(renew_registrations(Arc::clone(&world)));
@@ -306,6 +343,7 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
         Arc::clone(&world),
         random.fork(),
     ));
+    background.spawn(scrub_replicas(Arc::clone(&world)));
 
     let (designated_writer, _) = watch::channel(0_usize);
     let mut crash_signals = Vec::new();
@@ -324,6 +362,7 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     for _reader in 0..config.reader_count {
         clients.spawn(run_reader(Arc::clone(&world), random.fork()));
     }
+    clients.spawn(run_materializer(Arc::clone(&world), random.fork()));
 
     // Chaos.
     let nemesis = tokio::spawn(run_nemesis(
@@ -353,7 +392,10 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
         .fault("healed: every fault removed, every node restarted");
 
     // Audit.
-    let settled = timeout(config.settle_timeout, audit(&world)).await;
+    let settled = match timeout(config.settle_timeout, audit(&world)).await {
+        Ok(audited) => audited,
+        Err(_elapsed) => Err(describe_stuck_cluster(&world, config.settle_timeout).await),
+    };
     background.abort_all();
 
     judge(&config, &world.history.events(), settled)
@@ -363,19 +405,15 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
 fn judge(
     config: &SimulationConfig,
     events: &[TimedEvent],
-    settled: Result<Result<u64, String>, tokio::time::error::Elapsed>,
+    settled: Result<u64, String>,
 ) -> SimulationReport {
     let mut violations = check(events);
     let stuck = match settled {
-        Ok(Ok(audit_session)) => {
+        Ok(audit_session) => {
             violations.extend(check_audit(events, audit_session));
             None
         }
-        Ok(Err(reason)) => Some(reason),
-        Err(_elapsed) => Some(format!(
-            "the healed cluster did not settle within {:?}",
-            config.settle_timeout
-        )),
+        Err(reason) => Some(reason),
     };
     let count = |is_counted: fn(&Event) -> bool| {
         events
@@ -399,6 +437,62 @@ fn judge(
         }),
         faults_injected: count(|event| matches!(event, Event::Fault { .. })),
     }
+}
+
+/// Says what the healed cluster was still waiting for when time ran out.
+async fn describe_stuck_cluster(world: &World, waited: Duration) -> String {
+    use std::fmt::Write as _;
+    let step = *world
+        .audit_step
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut description =
+        format!("the healed cluster did not settle within {waited:?}; it was {step}");
+    if let Ok(stream) = world.cluster.metadata().get_stream(STREAM).await {
+        let _ = write!(
+            description,
+            "; epoch {}, low-water mark {}, standby {:?}, segments:",
+            stream.epoch, stream.low_water_mark, stream.standby_replicas
+        );
+        for segment in &stream.segments {
+            let copies: Vec<String> = segment
+                .copies
+                .iter()
+                .map(|copy| format!("{}={:?}", copy.replica_id, copy.state))
+                .collect();
+            let _ = write!(
+                description,
+                " [{} from {} sealed {:?}: {}]",
+                segment.segment_id,
+                segment.first_sequence,
+                segment.sealed_end(),
+                copies.join(" ")
+            );
+        }
+    }
+    for node in world.cluster.nodes() {
+        let held = match node.replica() {
+            Some(replica) => replica.list_segments().await.map(|statuses| {
+                statuses
+                    .iter()
+                    .map(|status| {
+                        format!(
+                            "{}:end={:?},fenced={},sealed={:?}{}",
+                            status.address.segment_id,
+                            status.local_end.map(SequenceNumber::get),
+                            status.fenced_epoch,
+                            status.sealed_end.map(SequenceNumber::get),
+                            if status.is_damaged { ",DAMAGED" } else { "" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }),
+            None => Ok("down".to_owned()),
+        };
+        let _ = write!(description, "; {} holds {held:?}", node.replica_id());
+    }
+    description
 }
 
 /// Does what every replica does on a timer: renews its registration.
@@ -545,16 +639,100 @@ async fn next_crash(crashes: &mut watch::Receiver<u64>) {
     }
 }
 
+/// Does what every replica does on a schedule: rereads its sealed segments
+/// and marks the copies that fail a checksum.
+async fn scrub_replicas(world: Arc<World>) {
+    loop {
+        sleep(SCRUB_INTERVAL).await;
+        for node in world.cluster.nodes() {
+            if let Some(replica) = node.replica() {
+                // A replica that stops mid-scrub is scrubbed next time.
+                drop(replica.scrub_sealed_segments().await);
+            }
+        }
+    }
+}
+
+/// Stands in for a materializer: follows the stream and commits
+/// checkpoints somewhat behind what it has read, which lets the controller
+/// truncate the stream while everything else is going on.
+async fn run_materializer(world: Arc<World>, mut random: DeterministicRandom) {
+    let metadata = world.cluster.metadata();
+    let reader = world.client("materializer").open_reader(STREAM);
+    loop {
+        let Ok(stream) = metadata.get_stream(STREAM).await else {
+            sleep(Duration::from_millis(500)).await;
+            continue;
+        };
+        let Ok(acquired) = metadata
+            .acquire_checkpoint(stream.stream_id, MATERIALIZER)
+            .await
+        else {
+            sleep(Duration::from_millis(500)).await;
+            continue;
+        };
+        let mut checkpoint = acquired.checkpoint;
+        let mut applied = checkpoint;
+        let Ok(mut following) = reader.follow_from(checkpoint.next()).await else {
+            continue;
+        };
+        let session = world.history.reader_started(checkpoint.next());
+        loop {
+            let commit_at = Instant::now() + Duration::from_millis(random.between(500, 4_000));
+            loop {
+                match timeout_at(commit_at, following.next()).await {
+                    Ok(Some(Ok(record))) => {
+                        world
+                            .history
+                            .record_read(session, record.sequence, record.payload);
+                        applied = record.sequence;
+                    }
+                    Ok(Some(Err(ReadError::Truncated { low_water_mark }))) => {
+                        // The log only promises to keep what lies above the
+                        // committed checkpoint. Losing that is a violation.
+                        world
+                            .history
+                            .truncated_past_checkpoint(checkpoint, low_water_mark);
+                        return;
+                    }
+                    Ok(Some(Err(_)) | None) => return,
+                    Err(_time_to_commit) => break,
+                }
+            }
+            // Checkpoint a little behind what was applied, as a real
+            // materializer that flushes artifacts in the background would.
+            let lag = random.between(0, 40);
+            let next_checkpoint =
+                SequenceNumber::new(applied.get().saturating_sub(lag)).max(checkpoint);
+            let committed = metadata
+                .commit_checkpoint(
+                    stream.stream_id,
+                    MATERIALIZER,
+                    acquired.fencing_token,
+                    next_checkpoint,
+                    None,
+                )
+                .await;
+            if committed.is_ok() {
+                checkpoint = next_checkpoint;
+            }
+        }
+    }
+}
+
 /// One reader: follows the stream in sessions, sometimes starting again
 /// from an earlier position to exercise reads of sealed segments.
 async fn run_reader(world: Arc<World>, mut random: DeterministicRandom) {
     let reader = world.client("reader").open_reader(STREAM);
     let mut read_through = SequenceNumber::ZERO;
+    // The lowest position known to be readable still.
+    let mut readable_from = SequenceNumber::FIRST;
     loop {
+        let resume_at = read_through.next().max(readable_from);
         let from_sequence = if random.chance(1, 4) {
-            SequenceNumber::new(random.between(1, read_through.get().max(1)))
+            SequenceNumber::new(random.between(readable_from.get(), resume_at.get()))
         } else {
-            read_through.next()
+            resume_at
         };
         let Ok(mut following) = reader.follow_from(from_sequence).await else {
             sleep(Duration::from_millis(random.between(100, 1_000))).await;
@@ -562,17 +740,29 @@ async fn run_reader(world: Arc<World>, mut random: DeterministicRandom) {
         };
         let session = world.history.reader_started(from_sequence);
         let session_ends_at = Instant::now() + Duration::from_secs(random.between(5, 40));
-        while let Ok(Some(Ok(record))) = timeout_at(session_ends_at, following.next()).await {
-            world
-                .history
-                .record_read(session, record.sequence, record.payload);
-            read_through = read_through.max(record.sequence);
+        loop {
+            match timeout_at(session_ends_at, following.next()).await {
+                Ok(Some(Ok(record))) => {
+                    world
+                        .history
+                        .record_read(session, record.sequence, record.payload);
+                    read_through = read_through.max(record.sequence);
+                }
+                Ok(Some(Err(ReadError::Truncated { low_water_mark }))) => {
+                    readable_from = readable_from.max(low_water_mark);
+                    break;
+                }
+                Ok(Some(Err(_)) | None) | Err(_) => break,
+            }
         }
     }
 }
 
 /// Injects faults at random moments and undoes each one after a random
 /// time, until it is stopped.
+// One flat arm per kind of fault reads better than the same schedule spread
+// over a dozen small functions.
+#[allow(clippy::too_many_lines)]
 async fn run_nemesis(
     world: Arc<World>,
     config: SimulationConfig,
@@ -587,6 +777,7 @@ async fn run_nemesis(
     let mean_gap_millis =
         u64::try_from(config.mean_time_between_faults.as_millis()).unwrap_or(u64::MAX);
     let mut repairs = JoinSet::new();
+    let mut has_lost_a_disk = false;
     loop {
         sleep(Duration::from_millis(
             random.between(0, mean_gap_millis.saturating_mul(2)),
@@ -602,16 +793,13 @@ async fn run_nemesis(
                 if !node.is_running() {
                     continue;
                 }
-                if kind == FaultKind::TornCrash {
-                    world.history.fault(describe("crashes with torn writes"));
-                    let mut torn = random.fork();
-                    node.crash_keeping(|path, durable, visible| {
-                        tear_unflushed_writes(path, durable, visible, &mut torn)
-                    });
+                let is_torn = kind == FaultKind::TornCrash;
+                world.history.fault(describe(if is_torn {
+                    "crashes with torn writes"
                 } else {
-                    world.history.fault(describe("crashes"));
-                    node.crash();
-                }
+                    "crashes"
+                }));
+                crash_node(&world, node_number, is_torn, &mut random);
                 let world = Arc::clone(&world);
                 repairs.spawn(async move {
                     sleep(lasts_for).await;
@@ -667,6 +855,23 @@ async fn run_nemesis(
                     .fault(format!("compute node {compute_node} crashes"));
                 crash_signals[compute_node].send_modify(|crash_count| *crash_count += 1);
             }
+            FaultKind::SilentCorruption => corrupt_a_stored_byte(&world, &mut random).await,
+            FaultKind::DiskLoss => {
+                if has_lost_a_disk {
+                    continue;
+                }
+                has_lost_a_disk = true;
+                let unlucky_node = world.unlucky_node;
+                world
+                    .history
+                    .fault(format!("node {unlucky_node} loses its disk for good"));
+                world.cluster.nodes()[unlucky_node].lose_disk();
+                let world = Arc::clone(&world);
+                repairs.spawn(async move {
+                    sleep(lasts_for).await;
+                    world.cluster.nodes()[unlucky_node].restart().await;
+                });
+            }
             FaultKind::WriterSwitch => {
                 let next_writer = (*designated_writer.borrow() + 1) % config.compute_node_count;
                 world.history.fault(format!(
@@ -676,6 +881,48 @@ async fn run_nemesis(
             }
         }
     }
+}
+
+/// Kills a node's replica process. A torn crash leaves part of what was
+/// not flushed on its disk, damaged.
+fn crash_node(world: &World, node_number: usize, is_torn: bool, random: &mut DeterministicRandom) {
+    let node = &world.cluster.nodes()[node_number];
+    if is_torn {
+        let mut torn = random.fork();
+        node.crash_keeping(|path, durable, visible| {
+            tear_unflushed_writes(path, durable, visible, &mut torn)
+        });
+    } else {
+        node.crash();
+    }
+}
+
+/// Flips one bit of one byte in one segment file on the unlucky node's
+/// disk, without anyone being told.
+async fn corrupt_a_stored_byte(world: &World, random: &mut DeterministicRandom) {
+    let disk = world.cluster.nodes()[world.unlucky_node].disk();
+    let segment_files: Vec<String> = disk
+        .list_files()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|path| path.rsplit('.').next() == Some("seg"))
+        .collect();
+    let Some(path) = random.choose(&segment_files) else {
+        return;
+    };
+    let file_bytes = disk
+        .durable_content(path)
+        .map_or(0, |content| content.len());
+    if file_bytes == 0 {
+        return;
+    }
+    let offset = random.index(file_bytes);
+    world.history.fault(format!(
+        "node {} silently corrupts byte {offset} of {path}",
+        world.unlucky_node
+    ));
+    disk.corrupt_byte(path, offset, 0x40);
 }
 
 /// Decides what a torn crash leaves in one file: everything that was
@@ -690,29 +937,24 @@ fn tear_unflushed_writes(
 ) -> Vec<u8> {
     let is_segment_file = path.rsplit('.').next() == Some("seg");
     let longest = durable.len().max(visible.len());
-    let is_unflushed = |index: &usize| durable.get(*index) != visible.get(*index);
-    let (true, Some(first_unflushed_byte)) = (is_segment_file, (0..longest).find(is_unflushed))
-    else {
+    // What was written since the last flush need not be one run of bytes:
+    // an append also rewrites the flushed mark in the header.
+    let unflushed_bytes: Vec<usize> = (0..longest)
+        .filter(|index| durable.get(*index) != visible.get(*index))
+        .collect();
+    if !is_segment_file || unflushed_bytes.is_empty() {
         return durable.to_vec();
-    };
-    let last_unflushed_byte = (0..longest)
-        .rfind(is_unflushed)
-        .unwrap_or(first_unflushed_byte);
-    let torn_at =
-        first_unflushed_byte + random.index(last_unflushed_byte - first_unflushed_byte + 1);
+    }
+    let torn_position = random.index(unflushed_bytes.len());
+    let torn_at = unflushed_bytes[torn_position];
 
     let written_byte = |index: usize| visible.get(index).copied().unwrap_or(0);
     let mut survived = durable.to_vec();
     if survived.len() <= torn_at {
         survived.resize(torn_at + 1, 0);
     }
-    for (index, survived_byte) in survived
-        .iter_mut()
-        .enumerate()
-        .take(torn_at)
-        .skip(first_unflushed_byte)
-    {
-        *survived_byte = written_byte(index);
+    for index in &unflushed_bytes[..torn_position] {
+        survived[*index] = written_byte(*index);
     }
     survived[torn_at] = !written_byte(torn_at);
     survived
@@ -722,6 +964,13 @@ fn tear_unflushed_writes(
 /// stream is read back. Returns the session of that read, or why the
 /// cluster could not do it.
 async fn audit(world: &World) -> Result<u64, String> {
+    let now_waiting_for = |step: &'static str| {
+        *world
+            .audit_step
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = step;
+    };
+    now_waiting_for("opening a writer and committing a final record");
     let client = world.client("auditor");
     let mut attempt = 0_u64;
     let (final_sequence, _final_writer) = loop {
@@ -753,6 +1002,7 @@ async fn audit(world: &World) -> Result<u64, String> {
         sleep(Duration::from_millis(500)).await;
     };
 
+    now_waiting_for("reading the whole stream back");
     let reader = client.open_reader(STREAM);
     loop {
         // Whatever was truncated can no longer be read; the audit covers
@@ -768,7 +1018,56 @@ async fn audit(world: &World) -> Result<u64, String> {
                     .history
                     .record_read(session, record.sequence, record.payload);
             }
+            check_truncation(world, low_water_mark).await?;
+            now_waiting_for("waiting for every sealed segment to have all its copies good");
+            wait_for_full_replication(world).await;
             return Ok(session);
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// I5 Safe truncation: the low-water mark must not have passed the
+/// materializer's committed checkpoint.
+async fn check_truncation(world: &World, low_water_mark: SequenceNumber) -> Result<(), String> {
+    let metadata = world.cluster.metadata();
+    let stream = metadata
+        .get_stream(STREAM)
+        .await
+        .map_err(|meta_error| meta_error.to_string())?;
+    let checkpoint = metadata
+        .get_checkpoint(stream.stream_id, MATERIALIZER)
+        .await
+        .map_err(|meta_error| meta_error.to_string())?
+        .checkpoint;
+    if low_water_mark > checkpoint.next() {
+        world
+            .history
+            .truncated_past_checkpoint(checkpoint, low_water_mark);
+    }
+    Ok(())
+}
+
+/// Waits until the controller has brought every sealed segment back to a
+/// full set of good copies (design, section 18, the exit gate of M3). It
+/// returns only then; the caller bounds the wait.
+async fn wait_for_full_replication(world: &World) {
+    loop {
+        if let Ok(stream) = world.cluster.metadata().get_stream(STREAM).await {
+            let is_fully_replicated = stream
+                .segments
+                .iter()
+                .filter(|segment| segment.sealed.is_some())
+                .all(|segment| {
+                    segment.copies.len() == stream.replication.replica_count()
+                        && segment
+                            .copies
+                            .iter()
+                            .all(|copy| copy.state == CopyState::Good)
+                });
+            if is_fully_replicated {
+                return;
+            }
         }
         sleep(Duration::from_millis(500)).await;
     }
@@ -827,6 +1126,20 @@ mod tests {
     }
 
     #[test]
+    fn tearing_leaves_flushed_bytes_between_two_unflushed_writes_alone() {
+        let durable = b"mark-A|flushed-data|\0\0\0\0".to_vec();
+        let visible = b"mark-B|flushed-data|tail".to_vec();
+        for seed in 0..50 {
+            let survived = torn(&durable, &visible, seed);
+            assert_eq!(
+                survived[6..20],
+                durable[6..20],
+                "seed {seed} damaged flushed bytes"
+            );
+        }
+    }
+
+    #[test]
     fn file_without_unflushed_writes_is_left_alone() {
         let flushed = b"everything was flushed".to_vec();
         assert_eq!(torn(&flushed, &flushed, 1), flushed);
@@ -850,6 +1163,6 @@ mod tests {
 
     #[test]
     fn full_fault_mix_enables_every_kind() {
-        assert_eq!(FaultMix::ALL.enabled_kinds().len(), 9);
+        assert_eq!(FaultMix::ALL.enabled_kinds().len(), 11);
     }
 }

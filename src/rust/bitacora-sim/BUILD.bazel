@@ -6,6 +6,7 @@ SIMULATION_DEPS = [
     "//src/rust/bitacora-client:bitacora_client",
     "//src/rust/bitacora-controller:bitacora_controller",
     "//src/rust/bitacora-meta:bitacora_meta",
+    "//src/rust/bitacora-segment:bitacora_segment",
     "//src/rust/bitacora-testkit:bitacora_testkit",
     "//src/rust/bitacora-types:bitacora_types",
 ]

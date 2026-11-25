@@ -14,7 +14,18 @@ const DEFAULT_SEEDS_PER_TEST: u64 = 6;
 
 /// Seeds that once found a bug. Each stays here forever, with the bug it
 /// found.
-const REGRESSION_SEEDS: &[u64] = &[];
+const REGRESSION_SEEDS: &[u64] = &[
+    // Bit rot in an open segment made a replica restart with a shorter
+    // copy that it took for a torn tail; recovery sealed below committed
+    // records. Fixed by the flushed mark in the segment header.
+    13,
+    // A node rebuilt with an empty disk answered a fence in the name of
+    // its old identity. Fixed by connecting to replicas by identity.
+    67,
+    // After retention deleted every segment, the next one reused the
+    // identifier 1 and collided with copies not yet swept from replicas.
+    74, 215,
+];
 
 fn seeds_per_test() -> u64 {
     std::env::var("BITA_SIM_SEEDS")
@@ -62,7 +73,8 @@ fn seeds_that_once_found_a_bug_stay_fixed() {
     }
 }
 
-/// Replays the single seed named by `BITA_SIM_SEED`, to reproduce a failure:
+/// Replays the single seed named by `BITA_SIM_SEED`, to reproduce a failure.
+/// Add `--test_env=BITA_SIM_DUMP=1` to print the whole history.
 ///
 /// ```sh
 /// bazel test //src/rust/bitacora-sim:fault_matrix_test \
@@ -84,6 +96,13 @@ fn replays_the_seed_named_in_the_environment() {
         report.events.len(),
         report.fingerprint()
     );
+    // With BITA_SIM_DUMP set, the whole history is printed; run the test
+    // with --nocapture (or --test_output=all) to see it.
+    if std::env::var_os("BITA_SIM_DUMP").is_some() {
+        for timed in &report.events {
+            println!("{:>10.3?} {:?}", timed.at, timed.event);
+        }
+    }
     assert_clean(&report);
 }
 
@@ -172,6 +191,14 @@ fn each_fault_alone_holds_the_invariants() {
         },
         FaultMix {
             writer_switches: true,
+            ..none
+        },
+        FaultMix {
+            silent_corruption: true,
+            ..none
+        },
+        FaultMix {
+            disk_loss: true,
             ..none
         },
     ] {

@@ -1,0 +1,4 @@
+change_type: enhancement
+component: sim
+note: "Simulate disk loss, silent corruption, scrubbing and truncation, and require every sealed segment to return to a full set of good copies after healing."
+issues: [3]

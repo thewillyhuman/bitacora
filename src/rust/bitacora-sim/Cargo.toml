@@ -13,6 +13,7 @@ publish = false
 bitacora-client.workspace = true
 bitacora-controller.workspace = true
 bitacora-meta.workspace = true
+bitacora-segment.workspace = true
 bitacora-testkit.workspace = true
 bitacora-types.workspace = true
 bytes.workspace = true

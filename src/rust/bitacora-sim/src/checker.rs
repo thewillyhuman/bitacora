@@ -73,6 +73,14 @@ pub enum Violation {
         /// The older epoch.
         later_epoch: Epoch,
     },
+    /// I5 Safe truncation: records above a registered materializer's
+    /// checkpoint were deleted.
+    TruncatedPastCheckpoint {
+        /// The materializer's committed checkpoint.
+        checkpoint: SequenceNumber,
+        /// The low-water mark that passed it.
+        low_water_mark: SequenceNumber,
+    },
     /// A reader observed a record nobody appended.
     UnknownRecord {
         /// The session that read it.
@@ -193,6 +201,13 @@ fn observe(events: &[TimedEvent], violations: &mut Vec<Violation>) -> Observatio
                     }
                 }
             }
+            Event::TruncatedPastCheckpoint {
+                checkpoint,
+                low_water_mark,
+            } => violations.push(Violation::TruncatedPastCheckpoint {
+                checkpoint: *checkpoint,
+                low_water_mark: *low_water_mark,
+            }),
             Event::Fault { .. } => {}
         }
     }
@@ -287,13 +302,21 @@ fn require_epochs_in_order(
 /// Checks that the reader of `audit_session`, which read the whole stream
 /// after the cluster was healed, was handed every record that was ever
 /// reported as committed (I1 Durability).
+///
+/// Records below the position the audit started at were truncated; whether
+/// that was allowed is I5, which [`check`] judges.
 #[must_use]
 pub fn check_audit(events: &[TimedEvent], audit_session: u64) -> Vec<Violation> {
     let mut audited: BTreeMap<SequenceNumber, Bytes> = BTreeMap::new();
+    let mut audited_from = SequenceNumber::FIRST;
     let mut payload_by_operation: BTreeMap<u64, Bytes> = BTreeMap::new();
     let mut committed: Vec<(u64, SequenceNumber)> = Vec::new();
     for timed in events {
         match &timed.event {
+            Event::ReaderStarted {
+                session,
+                from_sequence,
+            } if *session == audit_session => audited_from = *from_sequence,
             Event::RecordRead {
                 session,
                 sequence,
@@ -313,6 +336,7 @@ pub fn check_audit(events: &[TimedEvent], audit_session: u64) -> Vec<Violation> 
     }
     committed
         .into_iter()
+        .filter(|(_operation, sequence)| *sequence >= audited_from)
         .filter(|(operation, sequence)| {
             audited.get(sequence) != payload_by_operation.get(operation)
         })
@@ -579,6 +603,31 @@ mod tests {
             [Violation::CommittedRecordMissing {
                 operation: lost,
                 sequence: SequenceNumber::new(2),
+            }]
+        );
+    }
+
+    #[test]
+    fn audit_does_not_miss_records_truncated_before_it_started() {
+        let mut script = Script::default();
+        script.append("a", Some(committed(1, 1)));
+        script.append("b", Some(committed(2, 1)));
+        script.read(9, 2, &[(2, "b")]);
+        assert_eq!(check_audit(&script.events, 9), Vec::new());
+    }
+
+    #[test]
+    fn truncation_past_a_checkpoint_is_reported() {
+        let mut script = Script::default();
+        script.push(Event::TruncatedPastCheckpoint {
+            checkpoint: SequenceNumber::new(10),
+            low_water_mark: SequenceNumber::new(15),
+        });
+        assert_eq!(
+            check(&script.events),
+            [Violation::TruncatedPastCheckpoint {
+                checkpoint: SequenceNumber::new(10),
+                low_water_mark: SequenceNumber::new(15),
             }]
         );
     }

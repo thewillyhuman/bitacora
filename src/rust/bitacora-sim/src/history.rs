@@ -64,6 +64,14 @@ pub enum Event {
         /// The record's payload.
         payload: Bytes,
     },
+    /// A registered materializer was told that records above its committed
+    /// checkpoint are gone.
+    TruncatedPastCheckpoint {
+        /// The materializer's committed checkpoint.
+        checkpoint: SequenceNumber,
+        /// The stream's low-water mark, above `checkpoint + 1`.
+        low_water_mark: SequenceNumber,
+    },
     /// The simulator did something to the cluster. Not judged; it explains
     /// the events around it when a seed fails.
     Fault {
@@ -145,6 +153,19 @@ impl History {
             session,
             sequence,
             payload,
+        });
+    }
+
+    /// Records that the low-water mark passed a registered materializer's
+    /// committed checkpoint.
+    pub fn truncated_past_checkpoint(
+        &self,
+        checkpoint: SequenceNumber,
+        low_water_mark: SequenceNumber,
+    ) {
+        self.record(Event::TruncatedPastCheckpoint {
+            checkpoint,
+            low_water_mark,
         });
     }
 
