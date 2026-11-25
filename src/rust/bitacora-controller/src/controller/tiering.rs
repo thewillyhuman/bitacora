@@ -88,6 +88,13 @@ fn tiered_objects_prefix(stream_id: StreamId) -> String {
     format!("streams/{stream_id}/segments/")
 }
 
+/// The key prefix of everything the materializers of a stream wrote: their layers, artifacts and
+/// manifests. The materializer framework owns the layout below it (`docs/protocol/object-store.md`); the
+/// controller only needs the prefix, to remove what a deleted stream leaves behind.
+fn materializer_objects_prefix(stream_id: StreamId) -> String {
+    format!("materializers/{stream_id}/")
+}
+
 /// Whether a segment should be uploaded now.
 ///
 /// A segment is uploaded once it is sealed, holds records, is still above the low-water mark, has a full
@@ -373,7 +380,8 @@ impl Controller {
         Ok(())
     }
 
-    /// Deletes every tiered segment a deleted stream left in the object store.
+    /// Deletes everything a deleted stream left in the object store: its tiered segments and what its
+    /// materializers wrote.
     ///
     /// # Returns
     ///
@@ -384,10 +392,31 @@ impl Controller {
         let Some(artifact_store) = &self.artifact_store else {
             return true;
         };
-        let key_prefix = tiered_objects_prefix(stream_id);
+        let mut is_everything_deleted = true;
+        for key_prefix in [
+            tiered_objects_prefix(stream_id),
+            materializer_objects_prefix(stream_id),
+        ] {
+            if !self
+                .delete_objects_under(artifact_store.as_ref(), &key_prefix)
+                .await
+            {
+                is_everything_deleted = false;
+            }
+        }
+        is_everything_deleted
+    }
+
+    /// Deletes every object whose key starts with `key_prefix`. Returns whether none is left; `false` if
+    /// the store could not be listed or an object could not be deleted, both of which are logged.
+    async fn delete_objects_under(
+        &self,
+        artifact_store: &dyn ArtifactStore,
+        key_prefix: &str,
+    ) -> bool {
         let listing = timeout(
             self.settings.request_timeout,
-            artifact_store.list_prefix(&key_prefix),
+            artifact_store.list_prefix(key_prefix),
         )
         .await;
         let Ok(Ok(objects)) = listing else {
@@ -396,10 +425,7 @@ impl Controller {
         };
         let mut is_everything_deleted = true;
         for object in &objects {
-            if !self
-                .delete_object(artifact_store.as_ref(), &object.object_key)
-                .await
-            {
+            if !self.delete_object(artifact_store, &object.object_key).await {
                 is_everything_deleted = false;
             }
         }

@@ -640,6 +640,59 @@ async fn deleted_stream_leaves_nothing_in_the_object_store() {
     );
 }
 
+/// What a stream's materializers wrote is garbage once the stream is gone: its checkpoints are deleted
+/// with it, so nothing refers to those objects any more.
+#[tokio::test(start_paused = true)]
+async fn deleted_stream_leaves_no_materializer_artifacts_in_the_object_store() {
+    let cluster = cluster_with_tiered_segments().await;
+    let stream_id = stream(&cluster).await.stream_id;
+    cluster
+        .artifact_store()
+        .put_object(
+            &format!("materializers/{stream_id}/pages/00000000000000000001/0000000001-layer"),
+            bytes::Bytes::from_static(b"a layer file"),
+        )
+        .await
+        .expect("the artifact is stored");
+    cluster
+        .metadata()
+        .delete_stream(STREAM)
+        .await
+        .expect("deleted");
+
+    run_tiering_pass(&cluster).await;
+
+    assert_eq!(stored_object_keys(&cluster).await, Vec::<String>::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn artifacts_of_other_streams_survive_the_deletion_of_a_stream() {
+    let cluster = cluster_with_tiered_segments().await;
+    let another_stream_id = stream(&cluster).await.stream_id.get() + 1;
+    let artifact_of_another_stream =
+        format!("materializers/{another_stream_id}/pages/00000000000000000001/0000000001-layer");
+    cluster
+        .artifact_store()
+        .put_object(
+            &artifact_of_another_stream,
+            bytes::Bytes::from_static(b"a layer file"),
+        )
+        .await
+        .expect("the artifact is stored");
+    cluster
+        .metadata()
+        .delete_stream(STREAM)
+        .await
+        .expect("deleted");
+
+    run_tiering_pass(&cluster).await;
+
+    assert_eq!(
+        stored_object_keys(&cluster).await,
+        [artifact_of_another_stream]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn deleted_stream_is_remembered_while_the_object_store_is_down() {
     let cluster = cluster_with_tiered_segments().await;

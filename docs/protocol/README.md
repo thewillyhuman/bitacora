@@ -12,6 +12,7 @@ a page disagree, that is a bug in one of them.
 | [replication.md](replication.md) | The rules: appending, committing, rolling, taking over, reading |
 | [disk-format.md](disk-format.md) | A replica's data directory: segment files and their state |
 | [tiered-object.md](tiered-object.md) | A sealed segment in the object store |
+| [object-store.md](object-store.md) | Which keys the object store holds and who owns them |
 | [metadata.md](metadata.md) | The keys and records of the metadata store |
 | [wire.md](wire.md) | The gRPC services a replica offers |
 
