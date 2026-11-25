@@ -180,6 +180,35 @@ async fn connecting_without_any_endpoint_is_refused() {
     ));
 }
 
+#[tokio::test]
+async fn key_value_store_without_any_endpoint_is_refused() {
+    let config = ClusterConfig {
+        etcd_endpoints: Vec::new(),
+        ..local_config()
+    };
+
+    let connected = connect_key_value_store(&config).await;
+
+    assert!(matches!(
+        connected.err(),
+        Some(ConnectError::InvalidMetadataStore(_))
+    ));
+}
+
+/// A daemon that instruments its metadata store builds it on this store. Like a client, it must start
+/// while etcd is down.
+#[tokio::test]
+async fn key_value_store_is_handed_out_while_etcd_is_down() {
+    let nobody_listens_here = ClusterConfig {
+        etcd_endpoints: vec!["http://127.0.0.1:1".to_owned()],
+        ..local_config()
+    };
+
+    let connected = connect_key_value_store(&nobody_listens_here).await;
+
+    assert!(connected.is_ok());
+}
+
 /// A client must start while etcd is down and work once it is back: connecting sends nothing.
 #[tokio::test]
 async fn connecting_succeeds_while_etcd_is_down() {

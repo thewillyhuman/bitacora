@@ -77,13 +77,26 @@ def bitacora_library(
         deps = test_deps + all_crate_deps(normal_dev = True),
     )
 
-def bitacora_binary(name, srcs, deps = [], **kwargs):
-    """Declares a binary crate.
+def bitacora_binary(
+        name,
+        srcs,
+        deps = [],
+        test_deps = [],
+        test_data = [],
+        test_size = "small",
+        **kwargs):
+    """Declares a binary crate and the test target for its unit tests.
+
+    The test target is named after the binary with underscores and `_test`:
+    `bita-replica` is tested by `bita_replica_test`.
 
     Args:
         name: the binary name as typed at a shell, for example `bita-replica`.
-        srcs: the binary's source files.
+        srcs: the binary's source files, unit tests included.
         deps: first-party crates the binary depends on.
+        test_deps: first-party crates only the unit tests depend on.
+        test_data: files the unit tests read at run time.
+        test_size: Bazel test size of the unit tests.
         **kwargs: passed through to `rust_binary`.
     """
     _declare_lints()
@@ -93,9 +106,26 @@ def bitacora_binary(name, srcs, deps = [], **kwargs):
         aliases = aliases(),
         lint_config = _LINTS,
         proc_macro_deps = all_crate_deps(proc_macro = True),
+        # What `--version` prints. Bazel does not read Cargo.toml for it, so
+        # it comes from MODULE.bazel, which a release bumps together with
+        # the Cargo workspace.
+        version = native.module_version(),
         visibility = ["//visibility:public"],
         deps = deps + all_crate_deps(normal = True),
         **kwargs
+    )
+    rust_test(
+        name = name.replace("-", "_") + "_test",
+        size = test_size,
+        aliases = aliases(
+            normal_dev = True,
+            proc_macro_dev = True,
+        ),
+        crate = ":" + name,
+        data = test_data,
+        lint_config = _LINTS,
+        proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+        deps = test_deps + all_crate_deps(normal_dev = True),
     )
 
 def bitacora_integration_test(name, srcs, deps = [], size = "small", **kwargs):

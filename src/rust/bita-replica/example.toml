@@ -1,0 +1,67 @@
+# Configuration of one bita-replica. Start it with:
+#
+#   bita-replica --config /etc/bitacora/replica.toml
+#
+# A setting that is misspelled or unknown stops the replica at start.
+
+# The identity a new, empty data directory gets. A directory that was used
+# before keeps the identity it was first opened with, whatever this says.
+# ASCII letters, digits, '.', '_' and '-'.
+replica_id = "replica-a"
+
+# Where segment files live. One replica process per data directory.
+data_directory = "/var/lib/bitacora/replica"
+
+# Where the replica accepts gRPC connections from writers, readers, the
+# controller and other replicas.
+listen_address = "0.0.0.0:7000"
+
+# The address the replica registers under: what everybody else connects to.
+# It must be `host:port` and reachable from every other process.
+advertised_address = "replica-a.example.org:7000"
+
+# Where this replica is, widest domain first: zone, rack, host. Placement
+# never puts two copies of a segment in the same narrowest domain.
+failure_domains = ["zone-a", "rack-12", "replica-a.example.org"]
+
+# Where Prometheus scrapes /metrics and probes ask /healthz and /readyz.
+metrics_listen_address = "0.0.0.0:9100"
+
+# How often the replica renews its registration, with its free space. The
+# controller presumes a replica dead after three missed renewals by default.
+registration_interval_seconds = 5
+
+# How often every sealed segment is reread and checked against its checksums.
+# One week.
+scrub_interval_seconds = 604800
+
+# Where the cluster is. Every process of one cluster has the same table.
+[cluster]
+etcd_endpoints = [
+    "http://10.0.0.1:2379",
+    "http://10.0.0.2:2379",
+    "http://10.0.0.3:2379",
+]
+etcd_key_prefix = "/bitacora/"
+
+# The object store sealed segments are tiered to. Leave the table out for a
+# cluster without tiering.
+[cluster.object_store]
+kind = "local_directory"
+path = "/var/lib/bitacora/objects"
+
+[log]
+# error, warn, info, debug or trace.
+level = "info"
+# json for machines, text for a person at a terminal.
+format = "json"
+
+[storage]
+# How much disk a new segment file reserves, and grows by when full.
+preallocated_segment_bytes = 67108864
+# From this share of used disk on, the replica accepts no new segments.
+refuse_new_segments_at_used_percent = 85
+# From this share on it refuses every append, and writers roll elsewhere.
+refuse_appends_at_used_percent = 95
+# How fast one repair may copy, so that it cannot starve appends. 0 is no limit.
+repair_bytes_per_second = 134217728

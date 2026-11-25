@@ -1,0 +1,4 @@
+change_type: new_component
+component: replica
+note: "Add the bita-replica daemon: it serves a replica over gRPC from a local data directory, registers it in etcd, scrubs sealed segments on a schedule, and exposes metrics, liveness and readiness."
+issues: [5]

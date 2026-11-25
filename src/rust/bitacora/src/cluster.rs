@@ -15,6 +15,7 @@
 //! - [`connect`]: builds a [`BitacoraClient`] for the cluster.
 //! - [`connect_metadata`], [`open_object_store`], [`replica_connector`]: the three parts, for processes
 //!   that are not clients (replicas, the controller, operator tools).
+//! - [`connect_key_value_store`]: the store below the metadata store, for a daemon that instruments it.
 //! - [`ConnectError`]: why a configuration cannot be used.
 //!
 //! # How it works
@@ -49,7 +50,7 @@ use std::sync::Arc;
 use bitacora_artifact::{ArtifactError, ArtifactStore, LocalArtifactStore};
 use bitacora_artifact_s3::{InvalidS3Settings, S3ArtifactStore, S3Settings};
 use bitacora_client::{BitacoraClient, ClientSettings};
-use bitacora_meta::MetadataStore;
+use bitacora_meta::{KeyValueStore, MetadataStore};
 use bitacora_meta_etcd::{EtcdKeyValueStore, EtcdSettings, InvalidEtcdSettings};
 use bitacora_proto::{GrpcConnectorSettings, GrpcReplicaConnector};
 use bitacora_types::SystemClock;
@@ -223,10 +224,35 @@ pub async fn connect(
 /// Returns [`ConnectError::InvalidMetadataStore`] if the etcd settings can never work. An etcd that is
 /// down is not an error here; requests to the store fail until it is back.
 pub async fn connect_metadata(config: &ClusterConfig) -> Result<MetadataStore, ConnectError> {
+    let key_value_store = connect_key_value_store(config).await?;
+    Ok(MetadataStore::new(key_value_store))
+}
+
+/// Opens the key-value store in etcd that the cluster's metadata store is built on.
+///
+/// A daemon uses this instead of [`connect_metadata`] when it wants to put something between the
+/// metadata store and etcd, such as a decorator that records metrics. It then builds the metadata store
+/// itself with `MetadataStore::new`.
+///
+/// # Arguments
+///
+/// * `config` - Where the cluster is. Only the etcd fields are used.
+///
+/// # Returns
+///
+/// The store, with the cluster's key prefix applied to every key.
+///
+/// # Errors
+///
+/// Returns [`ConnectError::InvalidMetadataStore`] if the etcd settings can never work. An etcd that is
+/// down is not an error here; requests to the store fail until it is back.
+pub async fn connect_key_value_store(
+    config: &ClusterConfig,
+) -> Result<Arc<dyn KeyValueStore>, ConnectError> {
     let mut etcd_settings = EtcdSettings::new(config.etcd_endpoints.clone());
     etcd_settings.key_prefix.clone_from(&config.etcd_key_prefix);
     let key_value_store = EtcdKeyValueStore::connect(etcd_settings).await?;
-    Ok(MetadataStore::new(Arc::new(key_value_store)))
+    Ok(Arc::new(key_value_store))
 }
 
 /// Opens the object store that `config` names.

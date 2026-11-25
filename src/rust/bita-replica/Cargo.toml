@@ -1,0 +1,35 @@
+[package]
+name = "bita-replica"
+description = "The bitacora replica daemon: one storage node of the log, serving gRPC from a local data directory."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bita-replica"
+path = "src/main.rs"
+
+[dependencies]
+bitacora.workspace = true
+bitacora-artifact.workspace = true
+bitacora-meta.workspace = true
+bitacora-process.workspace = true
+bitacora-proto.workspace = true
+bitacora-replica.workspace = true
+bitacora-segment.workspace = true
+bitacora-types.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tracing.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+toml.workspace = true
+
+[lints]
+workspace = true

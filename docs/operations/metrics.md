@@ -91,6 +91,21 @@ Exposed by `bita-replica` for its data directory.
 A `sync_data` failure is serious: the replica stops, because after a failed flush the durable content
 of the file is unknown.
 
+## Replica daemon
+
+Exposed by `bita-replica` about itself, next to the request metrics of the `replica` subsystem.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `bitacora_replica_segment_copies` | gauge | Segment copies the replica holds |
+| `bitacora_replica_damaged_segment_copies` | gauge | Copies that failed a checksum or a flush and await replacement by the controller |
+| `bitacora_replica_draining` | gauge | 1 while the replica is draining, 0 otherwise |
+| `bitacora_replica_registrations_total` | counter | Renewals of the replica's registration that reached the metadata store |
+| `bitacora_replica_registration_failures_total` | counter | Renewals that failed. A replica that cannot renew is presumed dead by the controller after its liveness window |
+| `bitacora_replica_scrubs_total` | counter | Completed scrubs of the sealed segments |
+
+The first three are refreshed on every registration renewal; the damaged copies also after every scrub.
+
 ## What is not measured
 
 - **Append latency per stream**, the user-facing number of the design. It is only known where appends

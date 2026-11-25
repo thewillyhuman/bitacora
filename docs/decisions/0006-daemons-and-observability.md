@@ -95,6 +95,39 @@ daemon sets when it can do its work and clears when the shutdown signal
 arrives, so that a process that is starting or stopping is left out, not
 restarted.
 
+### The replica daemon
+
+`bita-replica` (`src/rust/bita-replica`) is the process around the replica
+library. Four decisions shape it.
+
+Ready means registered. `/readyz` answers 200 once the first registration
+reached the metadata store, because only then can writers and the controller
+find the replica. If etcd is down at start, the replica serves the clients
+that already know it and is not ready until it registers. A replica that
+loses etcd later stays ready: it still serves what it has. Readiness goes
+away for good when the shutdown signal arrives.
+
+The registration survives a clean shutdown. A restart for an upgrade brings
+the replica back with the same identity and the same data. Removing the
+registration on the way out would tell the controller that the copies are
+gone and start re-replicating them, which is exactly what a rolling upgrade
+must not cause. The registry already has the two ways a replica leaves it:
+an operator removes it, or the controller gives up its copies after it has
+been silent for `replica_lost_after`.
+
+A refused write or flush stops the process, with exit code 1. After a failed
+flush the durable content of the file is unknown, and a retry can falsely
+succeed (section 7). The restart rescans the data directory and the
+controller repairs what is short.
+
+The exit code tells a supervisor what to do: 0 for a stop that was asked for,
+1 for a failure worth a restart, 2 for a command line or configuration file
+that only a person can fix.
+
+The daemon's `run` takes its disk, stores and sockets as arguments. That is
+what lets the whole daemon run inside a test, on in-memory stores and
+loopback ports, without etcd.
+
 ## What is not implemented
 
 - **Traces.** No daemon emits OpenTelemetry traces. Log events carry the

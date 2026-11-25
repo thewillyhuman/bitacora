@@ -7,8 +7,9 @@ The crate an application depends on to use a bitacora cluster.
 - The cluster configuration (`ClusterConfig`, `ObjectStoreConfig`): where etcd is, which key prefix the
   cluster uses there, and which object store sealed segments are tiered to.
 - `connect`: from that configuration to a `BitacoraClient`.
-- The same wiring in parts (`connect_metadata`, `open_object_store`, `replica_connector`) for the
-  daemons and tools of this repository, so that every process reads the configuration the same way.
+- The same wiring in parts (`connect_metadata`, `connect_key_value_store`, `open_object_store`,
+  `replica_connector`) for the daemons and tools of this repository, so that every process reads the
+  configuration the same way.
 
 It re-exports the client's API, so an application needs no other bitacora crate.
 

@@ -13,8 +13,8 @@
 //! - [`connect`] and [`ClusterConfig`]: from a configuration to a [`BitacoraClient`].
 //! - The client's API, re-exported: [`BitacoraClient`], [`StreamWriter`], [`StreamReader`],
 //!   [`StreamAdmin`], their settings and errors, and the value types they use.
-//! - [`connect_metadata`], [`open_object_store`], [`replica_connector`]: the same wiring in parts, for
-//!   processes that are not clients.
+//! - [`connect_metadata`], [`connect_key_value_store`], [`open_object_store`], [`replica_connector`]:
+//!   the same wiring in parts, for processes that are not clients.
 //!
 //! # How it works
 //!
@@ -46,5 +46,5 @@ pub use bitacora_client::{
 pub use bitacora_types::{LogRecord, SequenceNumber, SequenceRange};
 pub use cluster::{
     ClusterConfig, ConnectError, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig, connect,
-    connect_metadata, open_object_store, replica_connector,
+    connect_key_value_store, connect_metadata, open_object_store, replica_connector,
 };
