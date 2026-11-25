@@ -199,6 +199,51 @@ The record format, the bucket page format, the bucket count (64) and the
 hash (CRC-32C of the key) are constants of the crate, not settings. Changing
 any of them for an existing store would silently lose keys.
 
+## Linearizability is checked by an in-tree search, per key
+
+The simulator's compute nodes are bitacora-kv front ends. Every call and its
+result is recorded, and `check_linearizability` judges the record: for each
+key it searches for an order of the calls in which a call that finished
+before another began comes first and every read returns the value of the
+last write before it. The search is that of Wing and Gong with Lowe's
+memory of visited states.
+
+Why in-tree. The model is one register per key, the search is about two
+hundred lines, and the repository already has the rule that tests add no
+dependency that is not deterministic. Porcupine and Knossos are the known
+tools; neither is a Rust library that could run inside `bazel test`.
+
+Why per key. Keys are independent, so their histories can be judged apart.
+That keeps each search to a few hundred calls.
+
+How writes of unknown outcome are treated. A put or delete whose caller was
+told "unknown", or whose client crashed, may take effect at any moment after
+it began, including long after its caller gave up, or never. The search may
+place it anywhere after its start or leave it out. An unknown put whose
+value no read ever returned is dropped before the search: no read depends
+on it, so leaving it out of an order never breaks the order. This is sound
+because every put of a simulation writes a value of its own, and it is what
+keeps the search fast. Unknown deletes are kept, and are tried last.
+
+The search has a budget of states. Running out of it is reported as a
+violation of its own kind, never as a pass.
+
+How the two checkers share one stream. A put is also recorded as an append,
+with the payload the store will write, so the log checker (I1 to I4) still
+sees every record that carries data. Barriers and deletes have the same
+payload every time; they are declared to the history as fillers, which the
+log checker does not attribute to an append but still holds to "readers
+agree" and "readers see a gapless prefix".
+
+How the checker is shown to work. Besides unit tests on hand-written
+histories, two deliberate mistakes can be switched on in the simulated
+compute nodes (`InjectedBug`): reads that skip the barrier, and writes of
+unknown outcome reported as done. The fault matrix requires each to be
+caught within a few seeds.
+
+Not simulated yet: outages of the artifact store, and a read replica that
+tails the stream without writing.
+
 ## One addition to the core contract
 
 `Materializer::wants_checkpoint` (default `false`) lets an instance ask for

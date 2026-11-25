@@ -5,12 +5,19 @@
 //! prints everything needed to replay it, and is then added to
 //! [`REGRESSION_SEEDS`] for good.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use bitacora_sim::{FaultMix, SimulationConfig, SimulationReport, run};
+use bitacora_sim::{
+    Event, FaultMix, InjectedBug, KvOutcome, SimulationConfig, SimulationReport, Violation, run,
+};
+use bitacora_types::SequenceNumber;
 
 /// How many seeds each of the four fault-matrix tests runs by default.
 const DEFAULT_SEEDS_PER_TEST: u64 = 6;
+
+/// How many seeds a deliberately broken store gets to be caught in.
+const SEEDS_TO_CATCH_A_BUG: u64 = 4;
 
 /// Seeds that once found a bug. Each stays here forever, with the bug it
 /// found.
@@ -106,15 +113,31 @@ fn replays_the_seed_named_in_the_environment() {
     assert_clean(&report);
 }
 
+/// A run of twenty seconds without any fault. Several tests look at it; it
+/// is made once.
+fn run_without_faults() -> &'static SimulationReport {
+    static REPORT: OnceLock<SimulationReport> = OnceLock::new();
+    REPORT.get_or_init(|| {
+        run(&SimulationConfig {
+            faults: FaultMix::NONE,
+            chaos_duration: Duration::from_secs(20),
+            ..SimulationConfig::with_seed(1)
+        })
+    })
+}
+
+/// A standard run with every kind of fault. Several tests look at it; it is
+/// made once.
+fn run_with_every_fault() -> &'static SimulationReport {
+    static REPORT: OnceLock<SimulationReport> = OnceLock::new();
+    REPORT.get_or_init(|| run(&SimulationConfig::with_seed(2)))
+}
+
 #[test]
 fn cluster_without_faults_commits_and_serves_everything() {
-    let report = run(&SimulationConfig {
-        faults: FaultMix::NONE,
-        chaos_duration: Duration::from_secs(20),
-        ..SimulationConfig::with_seed(1)
-    });
+    let report = run_without_faults();
     assert!(
-        report.is_clean() && report.committed_appends > 1_000,
+        report.is_clean() && report.committed_appends > 300,
         "{} committed appends\n{}",
         report.committed_appends,
         report.failure_summary()
@@ -126,16 +149,101 @@ fn cluster_without_faults_commits_and_serves_everything() {
 /// truncation overtaking every upload, must not pass silently.
 #[test]
 fn simulation_reads_segments_from_the_object_store() {
-    let report = run(&SimulationConfig {
-        faults: FaultMix::NONE,
-        chaos_duration: Duration::from_secs(20),
-        ..SimulationConfig::with_seed(1)
-    });
+    let report = run_without_faults();
     assert!(
         report.object_store_reads > 0,
         "no read reached the object store\n{}",
         report.failure_summary()
     );
+}
+
+/// How many calls to the key-value store in `report` ended with an outcome
+/// that `is_counted` accepts.
+fn kv_outcomes(report: &SimulationReport, is_counted: fn(&KvOutcome) -> bool) -> usize {
+    report
+        .events
+        .iter()
+        .filter(|timed| match &timed.event {
+            Event::KvReturned { outcome, .. } => is_counted(outcome),
+            _ => false,
+        })
+        .count()
+}
+
+#[test]
+fn run_without_faults_answers_reads_and_makes_writes() {
+    let report = run_without_faults();
+    let reads_answered = kv_outcomes(report, |outcome| matches!(outcome, KvOutcome::Read { .. }));
+    let writes_made = kv_outcomes(report, |outcome| matches!(outcome, KvOutcome::Written));
+    assert!(
+        reads_answered > 300 && writes_made > 300,
+        "{reads_answered} reads answered, {writes_made} writes made"
+    );
+}
+
+/// A run in which the faults left the store unusable throughout would pass
+/// every check and test nothing.
+#[test]
+fn run_with_every_fault_still_answers_reads_and_makes_writes() {
+    let report = run_with_every_fault();
+    let reads_answered = kv_outcomes(report, |outcome| matches!(outcome, KvOutcome::Read { .. }));
+    let writes_made = kv_outcomes(report, |outcome| matches!(outcome, KvOutcome::Written));
+    assert!(
+        reads_answered > 300 && writes_made > 300,
+        "{reads_answered} reads answered, {writes_made} writes made"
+    );
+}
+
+/// The store's checkpoints are what lets the log be truncated. A run in
+/// which that never happened would not have tested the store against
+/// truncation at all.
+#[test]
+fn log_is_truncated_behind_the_store_during_a_run() {
+    let report = run_with_every_fault();
+    // The audit reads the stream from wherever it still starts.
+    let log_start_at_the_audit = report
+        .events
+        .iter()
+        .rev()
+        .find_map(|timed| match &timed.event {
+            Event::ReaderStarted { from_sequence, .. } => Some(*from_sequence),
+            _ => None,
+        })
+        .expect("the audit reads the stream");
+    assert!(
+        log_start_at_the_audit > SequenceNumber::new(100),
+        "the log still starts at {log_start_at_the_audit}"
+    );
+}
+
+/// Whether a run of `seed` in which the compute nodes make `injected_bug`
+/// produces a history that the linearizability check rejects.
+fn bug_is_caught(injected_bug: InjectedBug, seed: u64) -> bool {
+    let report = run(&SimulationConfig {
+        injected_bug,
+        chaos_duration: Duration::from_secs(30),
+        ..SimulationConfig::with_seed(seed)
+    });
+    report
+        .violations
+        .iter()
+        .any(|violation| matches!(violation, Violation::NotLinearizable { .. }))
+}
+
+/// A check that passes every history proves nothing. These two tests break
+/// the store's use on purpose and require the simulation to notice.
+#[test]
+fn reads_that_skip_the_barrier_are_caught() {
+    let is_caught =
+        (0..SEEDS_TO_CATCH_A_BUG).any(|seed| bug_is_caught(InjectedBug::ReadsSkipTheBarrier, seed));
+    assert!(is_caught, "stale reads went unnoticed");
+}
+
+#[test]
+fn writes_of_unknown_outcome_reported_as_done_are_caught() {
+    let is_caught = (0..SEEDS_TO_CATCH_A_BUG)
+        .any(|seed| bug_is_caught(InjectedBug::UnknownWritesReportedDone, seed));
+    assert!(is_caught, "lost writes went unnoticed");
 }
 
 #[test]

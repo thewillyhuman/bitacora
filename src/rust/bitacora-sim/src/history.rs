@@ -29,6 +29,58 @@ pub enum AppendOutcome {
     NotAppended,
 }
 
+/// One call to the key-value store, as its caller made it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KvCall {
+    /// `put(key, value)`.
+    Put {
+        /// The key written.
+        key: Bytes,
+        /// The value written, unique within the simulation.
+        value: Bytes,
+    },
+    /// `delete(key)`.
+    Delete {
+        /// The key removed.
+        key: Bytes,
+    },
+    /// `get(key)`, the linearizable read.
+    Get {
+        /// The key read.
+        key: Bytes,
+    },
+}
+
+impl KvCall {
+    /// The key the call is about.
+    #[must_use]
+    pub const fn key(&self) -> &Bytes {
+        match self {
+            Self::Put { key, .. } | Self::Delete { key } | Self::Get { key } => key,
+        }
+    }
+}
+
+/// How a call to the key-value store ended, as its caller learned it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KvOutcome {
+    /// The write was reported as done.
+    Written,
+    /// The store could not tell whether the write was made. It may take
+    /// effect at any time after the call, or never.
+    WriteUnknown,
+    /// The store refused the write. It must never take effect.
+    NotWritten,
+    /// The read returned this value, or `None` for a key that does not
+    /// exist.
+    Read {
+        /// What the read returned.
+        value: Option<Bytes>,
+    },
+    /// The read gave no answer.
+    ReadFailed,
+}
+
 /// One thing a client did or saw.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -71,6 +123,30 @@ pub enum Event {
         checkpoint: SequenceNumber,
         /// The stream's low-water mark, above `checkpoint + 1`.
         low_water_mark: SequenceNumber,
+    },
+    /// A payload was declared a filler: a record that carries no information
+    /// of its own and may appear in the stream any number of times, such as
+    /// the barrier a key-value read appends. The log checker does not ask
+    /// who appended a filler.
+    FillerDeclared {
+        /// The payload every such record has.
+        payload: Bytes,
+    },
+    /// A client called an operation of the key-value store. A call that
+    /// never gets a matching [`Event::KvReturned`] belongs to a client that
+    /// crashed.
+    KvInvoked {
+        /// Identifies the call.
+        operation: u64,
+        /// What was called.
+        call: KvCall,
+    },
+    /// An operation of the key-value store returned.
+    KvReturned {
+        /// The call that returned.
+        operation: u64,
+        /// What it returned.
+        outcome: KvOutcome,
     },
     /// The simulator did something to the cluster. Not judged; it explains
     /// the events around it when a seed fails.
@@ -167,6 +243,31 @@ impl History {
             checkpoint,
             low_water_mark,
         });
+    }
+
+    /// Declares that records with this payload are fillers: they may appear
+    /// in the stream any number of times without anyone having recorded
+    /// their append.
+    pub fn declare_filler(&self, payload: Bytes) {
+        self.record(Event::FillerDeclared { payload });
+    }
+
+    /// Records that a client is about to call the key-value store, and
+    /// returns the identifier to finish the call with.
+    #[must_use]
+    pub fn kv_invoked(&self, call: KvCall) -> u64 {
+        let operation = {
+            let mut recorded = self.lock();
+            recorded.next_operation += 1;
+            recorded.next_operation
+        };
+        self.record(Event::KvInvoked { operation, call });
+        operation
+    }
+
+    /// Records how the key-value call `operation` ended.
+    pub fn kv_returned(&self, operation: u64, outcome: KvOutcome) {
+        self.record(Event::KvReturned { operation, outcome });
     }
 
     /// Records something the simulator did to the cluster.

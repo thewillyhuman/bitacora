@@ -1,39 +1,42 @@
 //! One simulated run of a whole cluster (design, section 15, layer 2).
 //!
-//! Replicas, the controller, writers and readers all run in one thread on a
-//! simulated clock, network and disk, driven by a seed. A run has three
-//! phases: chaos, during which a nemesis injects faults while clients work;
-//! healing, which removes every fault; and an audit, which writes a final
-//! record and reads the whole stream back. The history of the run is then
-//! judged by the checker.
+//! Replicas, the controller, compute nodes and readers all run in one thread
+//! on a simulated clock, network and disk, driven by a seed. The compute
+//! nodes serve a key-value store on the stream (see `kv_workload.rs`), so
+//! the materializer framework runs under the same faults as the log. A run
+//! has three phases: chaos, during which a nemesis injects faults while
+//! clients work; healing, which removes every fault; and an audit, which
+//! writes a final record, reads the whole stream back and reads every key.
+//! The history of the run is then judged by the log checker and by the
+//! linearizability check.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
 use bitacora_client::{
-    AppendError, BitacoraClient, ClientSettings, ReadError, ReaderSettings, TakeoverPolicy,
-    WriterSettings,
+    BitacoraClient, ClientSettings, ReadError, ReaderSettings, TakeoverPolicy, WriterSettings,
 };
 use bitacora_controller::{Controller, ControllerSettings};
+use bitacora_kv::{KV_MATERIALIZER, KvDependencies, KvStore};
 use bitacora_meta::{CopyState, PlacementPolicy, RetentionPolicy, SegmentRecord, StreamRecord};
 use bitacora_segment::Disk;
 use bitacora_testkit::{Cluster, LinkFault};
 use bitacora_types::replica_api::ReplicaApi;
 use bitacora_types::{DeterministicRandom, ReplicationSettings, SequenceNumber, SequenceRange};
-use bytes::Bytes;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 use crate::checker::{Violation, check, check_audit};
 use crate::history::{AppendOutcome, Event, History, TimedEvent};
+use crate::kv_workload::{
+    ComputeNode, InjectedBug, commit_final_record, declare_fillers, read_every_key, store_settings,
+};
+use crate::linearizability::check_linearizability;
 
 /// The stream every simulation writes to.
 const STREAM: &str = "simulated";
-
-/// How many appends one compute node keeps in flight.
-const APPENDS_IN_FLIGHT: usize = 4;
 
 /// How often replicas renew their registration.
 const REGISTRATION_INTERVAL: Duration = Duration::from_secs(2);
@@ -41,10 +44,6 @@ const REGISTRATION_INTERVAL: Duration = Duration::from_secs(2);
 /// How often replicas scrub their sealed segments. Weekly in production;
 /// here often enough to find injected corruption within a run.
 const SCRUB_INTERVAL: Duration = Duration::from_secs(3);
-
-/// The materializer whose checkpoints let the simulated stream be
-/// truncated.
-const MATERIALIZER: &str = "simulated-materializer";
 
 /// Which kinds of fault a run injects (design, section 15, "Faults
 /// injected").
@@ -170,6 +169,9 @@ pub struct SimulationConfig {
     pub faults: FaultMix,
     /// The average simulated time between two faults.
     pub mean_time_between_faults: Duration,
+    /// A mistake the compute nodes make on purpose. A correct run has
+    /// none; the simulator's own tests set one to show it is caught.
+    pub injected_bug: InjectedBug,
 }
 
 impl SimulationConfig {
@@ -186,6 +188,7 @@ impl SimulationConfig {
             settle_timeout: Duration::from_mins(5),
             faults: FaultMix::ALL,
             mean_time_between_faults: Duration::from_millis(700),
+            injected_bug: InjectedBug::None,
         }
     }
 }
@@ -291,8 +294,9 @@ struct World {
 }
 
 impl World {
-    /// The cluster's object store, as the clients and the controller of
-    /// the run are given it.
+    /// The cluster's object store, as the clients, the controller and the
+    /// key-value stores of the run are given it. Sealed segments are tiered
+    /// to it, and the stores keep their layers and manifests in it.
     fn artifact_store(&self) -> Arc<dyn ArtifactStore> {
         Arc::new(self.cluster.artifact_store().clone())
     }
@@ -325,6 +329,15 @@ impl World {
         )
         .with_artifact_store(self.artifact_store())
     }
+
+    /// What a key-value store opened by `identity` is built from.
+    fn store_dependencies(&self, identity: &str) -> KvDependencies {
+        KvDependencies {
+            client: self.client(identity),
+            metadata: self.cluster.metadata().clone(),
+            artifact_store: self.artifact_store(),
+        }
+    }
 }
 
 async fn simulate(config: SimulationConfig) -> SimulationReport {
@@ -346,12 +359,10 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
         )
         .await
         .expect("a fresh metadata store accepts a stream");
-    world
-        .cluster
-        .metadata()
-        .register_materializer(STREAM, MATERIALIZER)
+    KvStore::initialize(world.cluster.metadata(), STREAM)
         .await
         .expect("a fresh stream accepts a materializer");
+    declare_fillers(&world.history);
 
     let mut background = JoinSet::new();
     background.spawn(renew_registrations(Arc::clone(&world)));
@@ -368,18 +379,20 @@ async fn simulate(config: SimulationConfig) -> SimulationReport {
     for compute_node in 0..config.compute_node_count {
         let (crash_signal, crashes) = watch::channel(0_u64);
         crash_signals.push(crash_signal);
-        clients.spawn(run_compute_node(
-            Arc::clone(&world),
-            compute_node,
-            random.fork(),
-            designated_writer.subscribe(),
-            crashes,
-        ));
+        let node = ComputeNode {
+            node_number: compute_node,
+            stream: STREAM,
+            dependencies: world.store_dependencies(&format!("compute-{compute_node}")),
+            history: world.history.clone(),
+            injected_bug: config.injected_bug,
+            random: random.fork(),
+            puts_made: 0,
+        };
+        clients.spawn(node.run(designated_writer.subscribe(), crashes));
     }
     for _reader in 0..config.reader_count {
         clients.spawn(run_reader(Arc::clone(&world), random.fork()));
     }
-    clients.spawn(run_materializer(Arc::clone(&world), random.fork()));
 
     // Chaos.
     let nemesis = tokio::spawn(run_nemesis(
@@ -428,6 +441,7 @@ fn judge(
     settled: Result<u64, String>,
 ) -> SimulationReport {
     let mut violations = check(events);
+    violations.extend(check_linearizability(events));
     let stuck = match settled {
         Ok(audit_session) => {
             violations.extend(check_audit(events, audit_session));
@@ -576,98 +590,6 @@ async fn stop_replicas_whose_disk_failed(world: Arc<World>, mut random: Determin
     }
 }
 
-/// One compute node: while it is the designated writer it keeps a writer
-/// open and appends records; when it is told to crash it drops everything
-/// and starts over.
-async fn run_compute_node(
-    world: Arc<World>,
-    compute_node: usize,
-    mut random: DeterministicRandom,
-    mut designated_writer: watch::Receiver<usize>,
-    mut crashes: watch::Receiver<u64>,
-) {
-    let client = world.client(&format!("compute-{compute_node}"));
-    let mut records_appended = 0_u64;
-    loop {
-        // Only the designated node tries to become the writer. A node that
-        // loses the designation is not told: it finds out by being fenced.
-        while *designated_writer.borrow_and_update() != compute_node {
-            if designated_writer.changed().await.is_err() {
-                return;
-            }
-        }
-        let policy = if random.chance(1, 2) {
-            TakeoverPolicy::Force
-        } else {
-            TakeoverPolicy::WaitForLeaseExpiry
-        };
-        let writer = match client.open_writer(STREAM, policy).await {
-            Ok(writer) => Arc::new(writer),
-            Err(_open_error) => {
-                sleep(Duration::from_millis(random.between(100, 1_000))).await;
-                continue;
-            }
-        };
-        let epoch = writer.epoch();
-        crashes.borrow_and_update();
-
-        let mut appends: JoinSet<bool> = JoinSet::new();
-        let was_crashed = loop {
-            while appends.len() < APPENDS_IN_FLIGHT {
-                records_appended += 1;
-                let payload =
-                    Bytes::from(format!("compute-{compute_node}-record-{records_appended}"));
-                let operation = world.history.append_invoked(payload.clone());
-                let writer = Arc::clone(&writer);
-                let history = world.history.clone();
-                appends.spawn(async move {
-                    let (outcome, can_continue) = match writer.append(payload).await {
-                        Ok(sequence) => (AppendOutcome::Committed { sequence, epoch }, true),
-                        Err(AppendError::Closed | AppendError::Rejected(_)) => {
-                            (AppendOutcome::NotAppended, false)
-                        }
-                        Err(AppendError::Fenced | AppendError::Indeterminate { .. }) => {
-                            (AppendOutcome::Unknown, false)
-                        }
-                    };
-                    history.append_finished(operation, outcome);
-                    can_continue
-                });
-            }
-            tokio::select! {
-                biased;
-                () = next_crash(&mut crashes) => break true,
-                Some(finished) = appends.join_next() => {
-                    if !finished.unwrap_or(false) {
-                        break false;
-                    }
-                }
-            }
-            sleep(Duration::from_millis(random.between(0, 8))).await;
-        };
-
-        // A crashed node forgets its appends in flight: nobody ever learns
-        // their outcome, so the history leaves them unfinished.
-        appends.abort_all();
-        while appends.join_next().await.is_some() {}
-        drop(writer);
-        let restart_delay = if was_crashed {
-            random.between(100, 5_000)
-        } else {
-            random.between(10, 300)
-        };
-        sleep(Duration::from_millis(restart_delay)).await;
-    }
-}
-
-/// Resolves when the compute node is told to crash. If nobody is left to
-/// tell it, it never resolves.
-async fn next_crash(crashes: &mut watch::Receiver<u64>) {
-    if crashes.changed().await.is_err() {
-        std::future::pending::<()>().await;
-    }
-}
-
 /// Does what every replica does on a schedule: rereads its sealed segments
 /// and marks the copies that fail a checksum.
 async fn scrub_replicas(world: Arc<World>) {
@@ -677,73 +599,6 @@ async fn scrub_replicas(world: Arc<World>) {
             if let Some(replica) = node.replica() {
                 // A replica that stops mid-scrub is scrubbed next time.
                 drop(replica.scrub_sealed_segments().await);
-            }
-        }
-    }
-}
-
-/// Stands in for a materializer: follows the stream and commits
-/// checkpoints somewhat behind what it has read, which lets the controller
-/// truncate the stream while everything else is going on.
-async fn run_materializer(world: Arc<World>, mut random: DeterministicRandom) {
-    let metadata = world.cluster.metadata();
-    let reader = world.client("materializer").open_reader(STREAM);
-    loop {
-        let Ok(stream) = metadata.get_stream(STREAM).await else {
-            sleep(Duration::from_millis(500)).await;
-            continue;
-        };
-        let Ok(acquired) = metadata
-            .acquire_checkpoint(stream.stream_id, MATERIALIZER)
-            .await
-        else {
-            sleep(Duration::from_millis(500)).await;
-            continue;
-        };
-        let mut checkpoint = acquired.checkpoint;
-        let mut applied = checkpoint;
-        let Ok(mut following) = reader.follow_from(checkpoint.next()).await else {
-            continue;
-        };
-        let session = world.history.reader_started(checkpoint.next());
-        loop {
-            let commit_at = Instant::now() + Duration::from_millis(random.between(500, 4_000));
-            loop {
-                match timeout_at(commit_at, following.next()).await {
-                    Ok(Some(Ok(record))) => {
-                        world
-                            .history
-                            .record_read(session, record.sequence, record.payload);
-                        applied = record.sequence;
-                    }
-                    Ok(Some(Err(ReadError::Truncated { low_water_mark }))) => {
-                        // The log only promises to keep what lies above the
-                        // committed checkpoint. Losing that is a violation.
-                        world
-                            .history
-                            .truncated_past_checkpoint(checkpoint, low_water_mark);
-                        return;
-                    }
-                    Ok(Some(Err(_)) | None) => return,
-                    Err(_time_to_commit) => break,
-                }
-            }
-            // Checkpoint a little behind what was applied, as a real
-            // materializer that flushes artifacts in the background would.
-            let lag = random.between(0, 40);
-            let next_checkpoint =
-                SequenceNumber::new(applied.get().saturating_sub(lag)).max(checkpoint);
-            let committed = metadata
-                .commit_checkpoint(
-                    stream.stream_id,
-                    MATERIALIZER,
-                    acquired.fencing_token,
-                    next_checkpoint,
-                    None,
-                )
-                .await;
-            if committed.is_ok() {
-                checkpoint = next_checkpoint;
             }
         }
     }
@@ -1000,9 +855,10 @@ fn tear_unflushed_writes(
     survived
 }
 
-/// After healing: a fresh writer commits one last record, then the whole
-/// stream is read back. Returns the session of that read, or why the
-/// cluster could not do it.
+/// After healing: a fresh key-value store commits one last record, the
+/// whole stream is read back, and every key is read through the store.
+/// Returns the session of the stream read, or why the cluster could not
+/// do it.
 async fn audit(world: &World) -> Result<u64, String> {
     let now_waiting_for = |step: &'static str| {
         *world
@@ -1010,40 +866,33 @@ async fn audit(world: &World) -> Result<u64, String> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = step;
     };
-    now_waiting_for("opening a writer and committing a final record");
-    let client = world.client("auditor");
+    now_waiting_for("opening a store and committing a final record");
     let mut attempt = 0_u64;
-    let (final_sequence, _final_writer) = loop {
+    let (final_sequence, final_store) = loop {
         attempt += 1;
-        if let Ok(writer) = client.open_writer(STREAM, TakeoverPolicy::Force).await {
-            let payload = Bytes::from(format!("final-record-{attempt}"));
-            let operation = world.history.append_invoked(payload.clone());
-            let appended = timeout(Duration::from_secs(20), writer.append(payload)).await;
-            match appended {
-                Ok(Ok(sequence)) => {
-                    world.history.append_finished(
-                        operation,
-                        AppendOutcome::Committed {
-                            sequence,
-                            epoch: writer.epoch(),
-                        },
-                    );
-                    // The writer stays open until the audit read is done,
-                    // so its heartbeats keep the durable sequence current.
-                    break (sequence, writer);
-                }
-                Ok(Err(_)) | Err(_) => {
-                    world
-                        .history
-                        .append_finished(operation, AppendOutcome::Unknown);
-                }
-            }
+        let opened = KvStore::open(
+            world.store_dependencies("auditor"),
+            STREAM,
+            store_settings(TakeoverPolicy::Force),
+        )
+        .await;
+        if let Ok(store) = opened
+            && let Some(sequence) = commit_final_record(&store, &world.history, attempt).await
+        {
+            // The store stays open until the audit is done, so its
+            // writer's heartbeats keep the durable sequence current.
+            break (sequence, store);
         }
         sleep(Duration::from_millis(500)).await;
     };
 
+    now_waiting_for("reading every key through the store");
+    while !read_every_key(&final_store, &world.history).await {
+        sleep(Duration::from_millis(500)).await;
+    }
+
     now_waiting_for("reading the whole stream back");
-    let reader = client.open_reader(STREAM);
+    let reader = world.client("auditor").open_reader(STREAM);
     loop {
         // Whatever was truncated can no longer be read; the audit covers
         // the rest.
@@ -1076,7 +925,7 @@ async fn check_truncation(world: &World, low_water_mark: SequenceNumber) -> Resu
         .await
         .map_err(|meta_error| meta_error.to_string())?;
     let checkpoint = metadata
-        .get_checkpoint(stream.stream_id, MATERIALIZER)
+        .get_checkpoint(stream.stream_id, KV_MATERIALIZER)
         .await
         .map_err(|meta_error| meta_error.to_string())?
         .checkpoint;

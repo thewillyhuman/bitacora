@@ -4,7 +4,7 @@
 //! epochs in the metadata store or faults, so it cannot be fooled by a bug
 //! that the system itself believes in.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bitacora_types::{Epoch, SequenceNumber};
 use bytes::Bytes;
@@ -81,6 +81,22 @@ pub enum Violation {
         /// The low-water mark that passed it.
         low_water_mark: SequenceNumber,
     },
+    /// The calls to the key-value store on one key, and what they returned,
+    /// cannot be explained by any order in which they could have taken
+    /// effect one at a time.
+    NotLinearizable {
+        /// The key whose history has no such order.
+        key: Bytes,
+        /// The finished call that no order explored could get past.
+        stuck_at_operation: u64,
+    },
+    /// The search for an order of the calls on one key was given up. It
+    /// counts as a failure: a history that cannot be judged is not known
+    /// to be correct.
+    LinearizabilityUndecided {
+        /// The key whose history was too tangled to judge.
+        key: Bytes,
+    },
     /// A reader observed a record nobody appended.
     UnknownRecord {
         /// The session that read it.
@@ -119,6 +135,9 @@ struct Observations {
     appends_by_payload: BTreeMap<Bytes, Append>,
     /// What the stream holds at each sequence number, and who read it first.
     stream: BTreeMap<SequenceNumber, (Bytes, u64)>,
+    /// The payloads declared to be fillers: nobody has to have appended
+    /// them, and they may repeat.
+    fillers: BTreeSet<Bytes>,
 }
 
 /// Checks a history against the invariants every reader and writer can
@@ -208,7 +227,12 @@ fn observe(events: &[TimedEvent], violations: &mut Vec<Violation>) -> Observatio
                 checkpoint: *checkpoint,
                 low_water_mark: *low_water_mark,
             }),
-            Event::Fault { .. } => {}
+            Event::FillerDeclared { payload } => {
+                observations.fillers.insert(payload.clone());
+            }
+            // Calls to the key-value store are judged on their own, by the
+            // linearizability check.
+            Event::KvInvoked { .. } | Event::KvReturned { .. } | Event::Fault { .. } => {}
         }
     }
     observations
@@ -219,6 +243,9 @@ fn observe(events: &[TimedEvent], violations: &mut Vec<Violation>) -> Observatio
 fn explain_reads_by_appends(observations: &Observations, violations: &mut Vec<Violation>) {
     let mut first_sequence_of_operation: BTreeMap<u64, SequenceNumber> = BTreeMap::new();
     for (sequence, (payload, session)) in &observations.stream {
+        if observations.fillers.contains(payload) {
+            continue;
+        }
         let Some(append) = observations.appends_by_payload.get(payload) else {
             violations.push(Violation::UnknownRecord {
                 session: *session,
@@ -554,6 +581,40 @@ mod tests {
                 session: 3,
                 sequence: SequenceNumber::new(4),
             }]
+        );
+    }
+
+    #[test]
+    fn filler_nobody_recorded_appending_is_not_reported() {
+        let mut script = correct_history();
+        script.push(Event::FillerDeclared {
+            payload: Bytes::from("barrier"),
+        });
+        script.read(3, 4, &[(4, "barrier")]);
+        assert_eq!(check(&script.events), []);
+    }
+
+    #[test]
+    fn filler_may_appear_at_several_sequences() {
+        let mut script = correct_history();
+        script.push(Event::FillerDeclared {
+            payload: Bytes::from("barrier"),
+        });
+        script.read(3, 4, &[(4, "barrier"), (5, "barrier")]);
+        assert_eq!(check(&script.events), []);
+    }
+
+    #[test]
+    fn readers_must_still_agree_on_where_a_filler_is() {
+        let mut script = correct_history();
+        script.push(Event::FillerDeclared {
+            payload: Bytes::from("barrier"),
+        });
+        script.read(3, 3, &[(3, "barrier")]);
+        assert!(
+            check(&script.events)
+                .iter()
+                .any(|violation| matches!(violation, Violation::ReadersDisagree { .. }))
         );
     }
 

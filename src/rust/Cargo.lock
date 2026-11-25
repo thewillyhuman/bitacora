@@ -265,6 +265,8 @@ dependencies = [
  "bitacora-artifact",
  "bitacora-client",
  "bitacora-controller",
+ "bitacora-kv",
+ "bitacora-materializer",
  "bitacora-meta",
  "bitacora-segment",
  "bitacora-testkit",

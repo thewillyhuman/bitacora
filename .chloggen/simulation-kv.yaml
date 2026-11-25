@@ -1,0 +1,4 @@
+change_type: enhancement
+component: sim
+note: "Run bitacora-kv as the simulated workload and check every history for linearizability, with the real materializer runner driving checkpoints and truncation."
+issues: [4]
