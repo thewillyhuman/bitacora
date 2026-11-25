@@ -1,0 +1,25 @@
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
+
+exports_files(["Cargo.toml"])
+
+bitacora_library(
+    name = "bitacora_artifact_s3",
+    deps = ["//src/rust/bitacora-artifact:bitacora_artifact"],
+)
+
+# Runs the store against a real S3 server, which the test starts on a free
+# local port. Medium because it starts a process and talks to it over
+# localhost; it still finishes in seconds, hence the short timeout.
+bitacora_integration_test(
+    name = "s3_test",
+    size = "medium",
+    timeout = "short",
+    srcs = glob(["tests/s3/*.rs"]),
+    crate_root = "tests/s3/main.rs",
+    data = ["//src/rust:s3_server"],
+    env = {"BITA_S3_SERVER_BINARY": "$(rootpath //src/rust:s3_server)"},
+    deps = [
+        ":bitacora_artifact_s3",
+        "//src/rust/bitacora-artifact:bitacora_artifact",
+    ],
+)

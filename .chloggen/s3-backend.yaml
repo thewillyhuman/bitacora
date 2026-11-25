@@ -1,0 +1,4 @@
+change_type: new_component
+component: artifact
+note: "Add the S3 backend of the artifact store as the crate bitacora-artifact-s3, for any S3-compatible service, tested against a real S3 server that Bazel fetches and pins."
+issues: [3]

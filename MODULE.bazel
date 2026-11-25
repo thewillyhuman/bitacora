@@ -32,6 +32,7 @@ crate.from_cargo(
         "//src/rust:Cargo.toml",
         "//src/rust/bitacora:Cargo.toml",
         "//src/rust/bitacora-artifact:Cargo.toml",
+        "//src/rust/bitacora-artifact-s3:Cargo.toml",
         "//src/rust/bitacora-client:Cargo.toml",
         "//src/rust/bitacora-controller:Cargo.toml",
         "//src/rust/bitacora-kv:Cargo.toml",
@@ -136,4 +137,33 @@ http_archive(
     build_file_content = PROTOC_BUILD_FILE,
     sha256 = "8b8f18bd2b30346efbc698dd5a73dd7c805f3ef8380f6dfc95c768f3f1852f6a",
     urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-aarch_64.zip"],
+)
+
+# The Versity S3 Gateway, which the tests of the artifact store's S3 backend
+# start: one program that serves a local directory over the S3 protocol. The
+# checksums are the ones in the checksums.txt file of the release.
+S3_SERVER_BUILD_FILE = """exports_files(["versitygw"], visibility = ["//visibility:public"])"""
+
+http_archive(
+    name = "versitygw_macos_arm64",
+    build_file_content = S3_SERVER_BUILD_FILE,
+    sha256 = "678555913e0eb574f38d1daef36fcc584392e9ae2bb966ee6d3d6bbab1e14c31",
+    strip_prefix = "versitygw_v1.11.0_Darwin_arm64",
+    urls = ["https://github.com/versity/versitygw/releases/download/v1.11.0/versitygw_v1.11.0_Darwin_arm64.tar.gz"],
+)
+
+http_archive(
+    name = "versitygw_linux_x86_64",
+    build_file_content = S3_SERVER_BUILD_FILE,
+    sha256 = "1f075c9dc92fef232f5b3c7465711ddc5e1b062b2b6df4a3bd246a4be5b35b52",
+    strip_prefix = "versitygw_v1.11.0_Linux_x86_64",
+    urls = ["https://github.com/versity/versitygw/releases/download/v1.11.0/versitygw_v1.11.0_Linux_x86_64.tar.gz"],
+)
+
+http_archive(
+    name = "versitygw_linux_arm64",
+    build_file_content = S3_SERVER_BUILD_FILE,
+    sha256 = "8bd88019511c288de3ce2e5f0efb86f4092a98f7067371a1a8fa461ec0cc161b",
+    strip_prefix = "versitygw_v1.11.0_Linux_arm64",
+    urls = ["https://github.com/versity/versitygw/releases/download/v1.11.0/versitygw_v1.11.0_Linux_arm64.tar.gz"],
 )

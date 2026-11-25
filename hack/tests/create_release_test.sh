@@ -46,6 +46,7 @@ edition = "2024"
 [workspace.dependencies]
 bitacora-types = { path = "bitacora-types", version = "0.0.0" }
 bitacora-meta-etcd = { path = "bitacora-meta-etcd", version = "0.0.0" }
+bitacora-artifact-s3 = { path = "bitacora-artifact-s3", version = "0.0.0" }
 serde = { version = "1", features = ["derive"] }
 EOF
     cat >"${repository}/MODULE.bazel" <<'EOF'
@@ -132,6 +133,8 @@ assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" \
     'bitacora-types = { path = "bitacora-types", version = "1.2.3" }'
 assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" \
     'bitacora-meta-etcd = { path = "bitacora-meta-etcd", version = "1.2.3" }'
+assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" \
+    'bitacora-artifact-s3 = { path = "bitacora-artifact-s3", version = "1.2.3" }'
 assert_contains "$(cat "${repository}/src/rust/Cargo.toml")" 'serde = { version = "1"'
 assert_contains "$(cat "${repository}/MODULE.bazel")" 'version = "1.2.3",'
 assert_contains "$(cat "${repository}/MODULE.bazel")" 'bazel_dep(name = "rules_rust", version = "0.75.0")'

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "bitacora",
     "bitacora-artifact",
+    "bitacora-artifact-s3",
     "bitacora-client",
     "bitacora-controller",
     "bitacora-kv",
@@ -30,6 +31,7 @@ authors = ["Guillermo Facundo Colunga"]
 # First-party crates.
 bitacora = { path = "bitacora", version = "0.0.0" }
 bitacora-artifact = { path = "bitacora-artifact", version = "0.0.0" }
+bitacora-artifact-s3 = { path = "bitacora-artifact-s3", version = "0.0.0" }
 bitacora-client = { path = "bitacora-client", version = "0.0.0" }
 bitacora-controller = { path = "bitacora-controller", version = "0.0.0" }
 bitacora-kv = { path = "bitacora-kv", version = "0.0.0" }
@@ -50,8 +52,18 @@ bytes = "1"
 crc32c = "0.6"
 etcd-client = "0.21"
 fs4 = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The S3 client. Its `aws` feature would bring aws-lc-rs, a large C library,
+# for signing and for TLS; `aws-base` with `ring` is the same client on the
+# smaller ring.
+object_store = { version = "0.14", default-features = false, features = ["aws-base", "reqwest", "ring"] }
 prost = "0.14"
 protox = "0.10"
+# Named only to choose how object_store's HTTP client does TLS: rustls with
+# the platform's trusted roots and no built-in cryptography, which
+# bitacora-artifact-s3 supplies from ring.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

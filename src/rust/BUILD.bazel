@@ -53,6 +53,20 @@ alias(
     visibility = ["//visibility:public"],
 )
 
+# An S3 server, for tests that need a real one: the Versity S3 Gateway.
+alias(
+    name = "s3_server",
+    actual = select(
+        {
+            ":linux_arm64": "@versitygw_linux_arm64//:versitygw",
+            ":linux_x86_64": "@versitygw_linux_x86_64//:versitygw",
+            ":macos_arm64": "@versitygw_macos_arm64//:versitygw",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)
+
 # The protocol buffer compiler, for the build script of etcd-client.
 alias(
     name = "protoc",

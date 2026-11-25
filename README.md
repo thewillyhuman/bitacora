@@ -42,8 +42,9 @@ bazel test --config=lint //...  # what continuous integration runs
 `Cargo.toml` stays the source of truth for dependencies and lint levels, so
 `cargo` and rust-analyzer work in `src/rust/` as in any Cargo workspace.
 Unlike Bazel, they use what the machine has: the etcd client needs `protoc`
-on the path to build, and the tests that need etcd run only when
-`BITA_ETCD_BINARY` names an etcd program.
+on the path to build, the S3 client needs a C compiler, and the tests that
+need a server run only when a variable names its program: `BITA_ETCD_BINARY`
+for etcd, `BITA_S3_SERVER_BINARY` for the Versity S3 Gateway.
 
 ## Changelog and releases
 
