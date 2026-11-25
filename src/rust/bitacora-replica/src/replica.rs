@@ -66,6 +66,7 @@ pub struct Replica {
     settings: ReplicaSettings,
     registry: Mutex<Registry>,
     is_draining: AtomicBool,
+    is_stopped: AtomicBool,
     last_space_measurement: Mutex<Option<(Instant, DiskSpace)>>,
     on_write_failure: WriteFailureHandler,
 }
@@ -135,6 +136,7 @@ impl Replica {
             settings,
             registry: Mutex::new(registry),
             is_draining: AtomicBool::new(false),
+            is_stopped: AtomicBool::new(false),
             last_space_measurement: Mutex::new(None),
             on_write_failure,
         })
@@ -144,6 +146,19 @@ impl Replica {
     #[must_use]
     pub const fn replica_id(&self) -> &ReplicaId {
         &self.replica_id
+    }
+
+    /// Stops every segment task at once, as when the process is killed.
+    ///
+    /// Requests in flight get no answer, nothing more reaches the disk, and
+    /// every later request fails as [`ReplicaError::Unavailable`]. What was
+    /// flushed stays on the disk for the next [`Replica::open`].
+    pub fn stop(&self) {
+        self.is_stopped.store(true, Ordering::Relaxed);
+        let mut registry = self.lock_registry();
+        registry.tasks.abort_all();
+        registry.handles_by_address.clear();
+        tracing::info!(replica_id = %self.replica_id, "replica stopped");
     }
 
     /// Rereads every sealed copy and marks the ones that fail a checksum as
@@ -193,12 +208,24 @@ impl Replica {
             .cloned()
     }
 
+    fn fail_if_stopped(&self) -> Result<(), ReplicaError> {
+        if self.is_stopped.load(Ordering::Relaxed) {
+            return Err(ReplicaError::Unavailable {
+                reason: "the replica is stopped".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Returns the task of the copy at `address`, starting one for a copy
     /// the replica has nothing stored for yet.
-    fn handle_or_spawn(&self, address: SegmentAddress) -> SegmentHandle {
+    fn handle_or_spawn(&self, address: SegmentAddress) -> Result<SegmentHandle, ReplicaError> {
         let mut registry = self.lock_registry();
+        // Checked under the registry lock, so that no task can be started
+        // after `stop` has aborted them all.
+        self.fail_if_stopped()?;
         if let Some(handle) = registry.handles_by_address.get(&address) {
-            return handle.clone();
+            return Ok(handle.clone());
         }
         let copy = SegmentCopy::absent(
             address,
@@ -212,7 +239,7 @@ impl Replica {
             Arc::clone(&self.on_write_failure),
         );
         registry.handles_by_address.insert(address, handle.clone());
-        handle
+        Ok(handle)
     }
 
     /// Measures the disk's free space, reusing a recent measurement.
@@ -298,12 +325,13 @@ impl ReplicaApi for Replica {
             may_create_segments: used_percent < self.settings.refuse_new_segments_at_used_percent,
             used_percent,
         };
-        self.handle_or_spawn(request.segment.address)
+        self.handle_or_spawn(request.segment.address)?
             .append(request, admission)
             .await
     }
 
     async fn read(&self, request: ReadRequest) -> Result<ReadResponse, ReplicaError> {
+        self.fail_if_stopped()?;
         let Some(handle) = self.existing_handle(request.segment) else {
             return Err(ReplicaError::SegmentNotFound {
                 segment: request.segment,
@@ -321,18 +349,19 @@ impl ReplicaApi for Replica {
     }
 
     async fn fence(&self, request: FenceRequest) -> Result<FenceResponse, ReplicaError> {
-        self.handle_or_spawn(request.segment)
+        self.handle_or_spawn(request.segment)?
             .fence(request.epoch)
             .await
     }
 
     async fn seal(&self, request: SealRequest) -> Result<SealResponse, ReplicaError> {
-        self.handle_or_spawn(request.segment)
+        self.handle_or_spawn(request.segment)?
             .seal(request.sealed_end)
             .await
     }
 
     async fn delete_segment(&self, segment: SegmentAddress) -> Result<(), ReplicaError> {
+        self.fail_if_stopped()?;
         let Some(handle) = self.existing_handle(segment) else {
             return Ok(());
         };
@@ -343,6 +372,7 @@ impl ReplicaApi for Replica {
     }
 
     async fn list_segments(&self) -> Result<Vec<SegmentStatus>, ReplicaError> {
+        self.fail_if_stopped()?;
         let mut stored_copies = Vec::new();
         for handle in self.all_handles() {
             if let Some(status) = handle.status().await? {
@@ -353,6 +383,7 @@ impl ReplicaApi for Replica {
     }
 
     async fn status(&self) -> Result<ReplicaStatus, ReplicaError> {
+        self.fail_if_stopped()?;
         let space = self.disk.space().await.map_err(storage_error("measure"))?;
         let segment_count = self.list_segments().await?.len();
         Ok(ReplicaStatus {
@@ -365,6 +396,7 @@ impl ReplicaApi for Replica {
     }
 
     async fn drain(&self) -> Result<(), ReplicaError> {
+        self.fail_if_stopped()?;
         self.is_draining.store(true, Ordering::Relaxed);
         tracing::info!(replica_id = %self.replica_id, "replica is draining");
         Ok(())
@@ -833,6 +865,68 @@ mod tests {
                 && reported_failures.load(Ordering::Relaxed) == 1,
             "failed: {failed:?}, after: {after_failure:?}"
         );
+    }
+
+    // ---- stopping ----
+
+    #[tokio::test]
+    async fn stopped_replica_refuses_every_request() {
+        let replica = open_replica(&MemoryDisk::new(), "replica-a").await;
+        replica
+            .append(append_to(SEGMENT, 100, 5, 104))
+            .await
+            .expect("append");
+        replica.stop();
+        let append = replica.append(append_to(SEGMENT, 105, 1, 0)).await;
+        let read = replica.read(read_from(100, None)).await;
+        let list = replica.list_segments().await;
+        assert!(
+            matches!(append, Err(ReplicaError::Unavailable { .. }))
+                && matches!(read, Err(ReplicaError::Unavailable { .. }))
+                && matches!(list, Err(ReplicaError::Unavailable { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_replica_leaves_flushed_records_for_the_next_start() {
+        let disk = MemoryDisk::new();
+        let replica = open_replica(&disk, "replica-a").await;
+        replica
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        replica.stop();
+        disk.crash();
+        let restarted = open_replica(&disk, "replica-a").await;
+        let local_ends: Vec<_> = restarted
+            .list_segments()
+            .await
+            .expect("list")
+            .iter()
+            .map(|status| status.local_end)
+            .collect();
+        assert_eq!(local_ends, [Some(SequenceNumber::new(104))]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_waiting_on_a_stopped_replica_fails_instead_of_hanging() {
+        let replica = Arc::new(open_replica(&MemoryDisk::new(), "replica-a").await);
+        replica
+            .append(append_to(SEGMENT, 100, 5, 0))
+            .await
+            .expect("append");
+        let waiting_reader = {
+            let replica = Arc::clone(&replica);
+            tokio::spawn(async move {
+                replica
+                    .read(read_from(100, Some(Duration::from_secs(10))))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        replica.stop();
+        let answer = waiting_reader.await.expect("reader finishes");
+        assert!(matches!(answer, Err(ReplicaError::Unavailable { .. })));
     }
 
     // ---- path parsing ----
