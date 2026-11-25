@@ -133,6 +133,33 @@ Not done: compression of layers, a cache of page images in the page store
 (the compute node caches hot pages), and read-only followers that tail the
 log without checkpointing.
 
+## Compaction merges artifacts; it does not rebuild from the log
+
+`ArtifactBuilder` has a fourth method next to the three of the design:
+`merge_artifacts(inputs, artifacts)`, which writes one artifact holding what
+several neighbouring artifacts hold together. `ArtifactCatalog` calls it for
+the oldest run of `merge_fan_in` neighbours in the same size tier, at most
+once per checkpoint.
+
+Why a merge and not "ask the builder to rebuild a range". A rebuild would
+read the log again, and the log below the committed checkpoint may already
+be truncated: the artifacts are then the only copy of those records.
+
+Why size tiers. A checkpoint must persist everything applied, so it seals
+whatever the builder holds, however little. Frequent checkpoints therefore
+make small artifacts. Merging neighbours of similar size keeps the number of
+artifacts logarithmic in the data and rewrites each record a bounded number
+of times. Only neighbours are merged, so the catalog stays in log order.
+
+Why one merge per checkpoint. It bounds what a checkpoint does. A backlog of
+merges is worked off over the following checkpoints, also those that have
+nothing new to seal.
+
+The catalog never deletes. A merged-away artifact is dropped from the next
+manifest and the sweep after that manifest's commit deletes it, so a query
+that still reads the old artifact loses it only after the catalog that
+replaces it is durable.
+
 ## One addition to the core contract
 
 `Materializer::wants_checkpoint` (default `false`) lets an instance ask for

@@ -10,9 +10,9 @@ queried, and makes it safe to truncate the log behind it (design, section 11).
   (`MaterializerRunner`).
 - A materializer's corner of the artifact store (`ArtifactNamespace`) and the
   deletion of what is no longer used in it (`sweep_orphans`).
-- The adapter for engines that update pages and log redo records
-  (`PageStore`), which most page-based workloads use instead of the bare
-  contract.
+- The two adapters most workloads use instead of the bare contract:
+  `PageStore` for engines that update pages and log redo records, and
+  `ArtifactCatalog` for append-only data that compacts into files.
 
 It does not own the log, the metadata records or the artifact store itself;
 it uses them through `bitacora-client`, `bitacora-meta` and
@@ -68,6 +68,17 @@ below N and applies the page's later records up to N. Layers older than the
 oldest image kept are dropped; the sequence of that image is the horizon,
 below which pages can no longer be read.
 
+### Immutable artifacts
+
+`ArtifactCatalog` implements the contract for a workload that only says how
+records become a file (`ArtifactBuilder`). The catalog is the list of files in
+log order, each covering a range of sequence numbers. A checkpoint seals what
+the builder holds into one more file, then merges the oldest run of
+neighbours of similar size into one larger file, at most one run per
+checkpoint. Merging reads the files, never the log, because the log below the
+checkpoint may be gone. Files a merge replaced are dropped from the manifest
+and deleted by the sweep after the commit.
+
 ## Invariants
 
 - A checkpoint is committed only after its artifacts and manifest are stored.
@@ -81,6 +92,8 @@ below which pages can no longer be read.
   that its writer may still commit.
 - A page read at any sequence from the horizon to the last record applied
   sees exactly the records up to it, whatever was flushed or dropped since.
+- An artifact catalog covers every record from the first one applied to the
+  last checkpoint, without gap or overlap, also across crashes and merges.
 
 ## Which file holds what
 
@@ -93,6 +106,7 @@ below which pages can no longer be read.
 | `sweeper.rs` | `sweep_orphans` and the rule for what is garbage |
 | `layer.rs` | The layer files of the page adapter |
 | `page_store.rs` | `PageMaterializer`, `PageStore`, `PageReader` |
+| `artifact_catalog.rs` | `ArtifactBuilder`, `ArtifactCatalog`, `CatalogView` |
 | `test_harness.rs` | The in-process cluster the tests of this crate share |
 
 Tests sit next to the file they test, in `<file>_test.rs`.

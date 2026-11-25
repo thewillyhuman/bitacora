@@ -17,6 +17,9 @@
 //! - What cleans up after it: [`sweep_orphans`], with [`SweepReport`] and [`SweepError`].
 //! - The adapter for engines with pages and redo records: [`PageMaterializer`], [`PageStore`],
 //!   [`PageReader`], with [`LayeringPolicy`] and [`PageReadError`].
+//! - The adapter for append-only data that compacts into files: [`ArtifactBuilder`],
+//!   [`ArtifactCatalog`], [`CatalogView`], with [`CatalogEntry`], [`ArtifactDescriptor`],
+//!   [`CompactionPolicy`] and [`decode_catalog`].
 //! - The stored form of a manifest: [`encode_manifest`] and [`decode_manifest`].
 //!
 //! # How it fits together
@@ -38,6 +41,7 @@
 //! design document leaves open.
 #![warn(clippy::missing_docs_in_private_items)]
 
+mod artifact_catalog;
 mod contract;
 mod layer;
 mod manifest;
@@ -49,6 +53,10 @@ mod sweeper;
 #[cfg(test)]
 mod test_harness;
 
+pub use artifact_catalog::{
+    ArtifactBuilder, ArtifactCatalog, ArtifactDescriptor, CatalogEntry, CatalogView,
+    CompactionPolicy, decode_catalog,
+};
 pub use contract::{CheckpointManifest, Materializer, MaterializerError};
 pub use manifest::{decode_manifest, encode_manifest};
 pub use namespace::{ArtifactNamespace, namespace_prefix, token_of_artifact};

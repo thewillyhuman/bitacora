@@ -1,0 +1,4 @@
+change_type: enhancement
+component: materializer
+note: "Add the artifact catalog adapter: immutable artifacts that cover the log without gap or overlap, with size-tiered compaction of small artifacts."
+issues: [4]
