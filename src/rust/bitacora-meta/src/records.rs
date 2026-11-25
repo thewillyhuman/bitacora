@@ -301,6 +301,11 @@ pub struct LeaderRecord {
     pub holder: String,
     /// When its leadership lapses unless renewed.
     pub expires_at: Timestamp,
+    /// Since when the holder has led without a lapse. Renewals keep it;
+    /// taking over, also from one's own lapsed leadership, sets it anew.
+    /// `None` only in a record written before this field existed.
+    #[serde(default)]
+    pub leading_since: Option<Timestamp>,
 }
 
 #[cfg(test)]

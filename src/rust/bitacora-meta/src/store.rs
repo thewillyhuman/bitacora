@@ -758,9 +758,10 @@ impl MetadataStore {
         now: Timestamp,
         expires_at: Timestamp,
     ) -> Result<bool, MetaError> {
-        let claim = LeaderRecord {
+        let mut claim = LeaderRecord {
             holder: candidate.to_owned(),
             expires_at,
+            leading_since: Some(now),
         };
         let condition = match self.key_value_store.get(CONTROLLER_LEADER_KEY).await? {
             None => Condition::IsAbsent {
@@ -770,6 +771,12 @@ impl MetadataStore {
                 let leader: LeaderRecord = decode(CONTROLLER_LEADER_KEY, &stored.value)?;
                 if leader.holder != candidate && leader.expires_at > now {
                     return Ok(false);
+                }
+                // A renewal continues the leadership; anything else starts
+                // a new one, also for an instance that let its own lapse.
+                let is_renewal = leader.holder == candidate && leader.expires_at > now;
+                if is_renewal && leader.leading_since.is_some() {
+                    claim.leading_since = leader.leading_since;
                 }
                 Condition::HasRevision {
                     key: CONTROLLER_LEADER_KEY.to_owned(),
@@ -1984,8 +1991,98 @@ mod tests {
                 Ok(Some(LeaderRecord {
                     holder: "controller-1".to_owned(),
                     expires_at: LEADERSHIP_EXPIRY,
+                    leading_since: Some(NOW),
                 }))
             )
+        );
+    }
+
+    /// When the current leader was last read from the store.
+    async fn leading_since(store: &MetadataStore) -> Option<Timestamp> {
+        store
+            .get_leader()
+            .await
+            .expect("store is available")
+            .expect("somebody leads")
+            .leading_since
+    }
+
+    #[tokio::test]
+    async fn renewal_keeps_the_moment_the_leadership_began() {
+        let (store, _key_value_store) = new_store();
+        store
+            .try_lead("controller-1", NOW, LEADERSHIP_EXPIRY)
+            .await
+            .expect("store is available");
+        let renewed_at = Timestamp::from_unix_millis(4_000);
+        store
+            .try_lead(
+                "controller-1",
+                renewed_at,
+                Timestamp::from_unix_millis(9_000),
+            )
+            .await
+            .expect("store is available");
+        assert_eq!(leading_since(&store).await, Some(NOW));
+    }
+
+    #[tokio::test]
+    async fn takeover_starts_a_new_leadership() {
+        let (store, _key_value_store) = new_store();
+        store
+            .try_lead("controller-1", NOW, LEADERSHIP_EXPIRY)
+            .await
+            .expect("store is available");
+        store
+            .try_lead(
+                "controller-2",
+                LEADERSHIP_EXPIRY,
+                Timestamp::from_unix_millis(11_000),
+            )
+            .await
+            .expect("store is available");
+        assert_eq!(leading_since(&store).await, Some(LEADERSHIP_EXPIRY));
+    }
+
+    #[tokio::test]
+    async fn leader_that_let_its_leadership_lapse_starts_a_new_one() {
+        let (store, _key_value_store) = new_store();
+        store
+            .try_lead("controller-1", NOW, LEADERSHIP_EXPIRY)
+            .await
+            .expect("store is available");
+        let after_the_lapse = Timestamp::from_unix_millis(20_000);
+        store
+            .try_lead(
+                "controller-1",
+                after_the_lapse,
+                Timestamp::from_unix_millis(25_000),
+            )
+            .await
+            .expect("store is available");
+        assert_eq!(leading_since(&store).await, Some(after_the_lapse));
+    }
+
+    #[tokio::test]
+    async fn leader_record_written_before_the_start_was_recorded_is_still_read() {
+        let (store, key_value_store) = new_store();
+        key_value_store
+            .transact(
+                Vec::new(),
+                vec![Mutation::Put {
+                    key: CONTROLLER_LEADER_KEY.to_owned(),
+                    value: Bytes::from_static(br#"{"holder":"controller-1","expires_at":6000}"#),
+                }],
+            )
+            .await
+            .expect("store is available");
+        assert_eq!(
+            store.get_leader().await,
+            Ok(Some(LeaderRecord {
+                holder: "controller-1".to_owned(),
+                expires_at: LEADERSHIP_EXPIRY,
+                leading_since: None,
+            }))
         );
     }
 

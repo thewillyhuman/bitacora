@@ -168,11 +168,13 @@ label, and spreads over the wider ones when there are enough of them.
 ## Leader record
 
 ```json
-{"holder": "controller-1", "expires_at": 1795000010000}
+{"holder": "controller-1", "expires_at": 1795000010000, "leading_since": 1794999000000}
 ```
 
 A controller leads if it wrote this record and it has not expired, and takes
-over when it has. Leadership only avoids duplicate work: every write a
+over when it has. `leading_since` is when the holder began to lead without a
+lapse; a renewal keeps it. It may be absent in a record written by an older
+controller. Leadership only avoids duplicate work: every write a
 controller makes is conditional on what it read, so two controllers that
 both believe they lead cannot corrupt anything.
 

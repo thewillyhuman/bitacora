@@ -58,7 +58,15 @@ const GOLDEN_REPLICA: &str = concat!(
 );
 
 /// The leader record of schema version 1.
-const GOLDEN_LEADER: &str = r#"{"holder":"controller-1","expires_at":1795000010000}"#;
+const GOLDEN_LEADER: &str = concat!(
+    r#"{"holder":"controller-1","expires_at":1795000010000,"#,
+    r#""leading_since":1794999000000}"#,
+);
+
+/// A leader record as it was written before `leading_since` existed. Controllers are upgraded one at a
+/// time, so a new one must read what an old one wrote.
+const GOLDEN_LEADER_WITHOUT_ITS_START: &str =
+    r#"{"holder":"controller-1","expires_at":1795000010000}"#;
 
 /// The deleted-stream record of schema version 1.
 const GOLDEN_DELETED_STREAM: &str = r#"{"stream_id":7,"name":"orders"}"#;
@@ -160,6 +168,7 @@ fn leader() -> LeaderRecord {
     LeaderRecord {
         holder: "controller-1".to_owned(),
         expires_at: Timestamp::from_unix_millis(1_795_000_010_000),
+        leading_since: Some(Timestamp::from_unix_millis(1_794_999_000_000)),
     }
 }
 
@@ -227,6 +236,20 @@ fn leader_record_of_schema_version_1_is_read() {
     let read: LeaderRecord = serde_json::from_str(GOLDEN_LEADER).expect("the golden text is valid");
 
     assert_eq!(read, leader());
+}
+
+#[test]
+fn leader_record_written_before_its_start_was_recorded_is_read() {
+    let read: LeaderRecord =
+        serde_json::from_str(GOLDEN_LEADER_WITHOUT_ITS_START).expect("the golden text is valid");
+
+    assert_eq!(
+        read,
+        LeaderRecord {
+            leading_since: None,
+            ..leader()
+        }
+    );
 }
 
 #[test]
