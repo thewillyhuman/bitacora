@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use bitacora_artifact::MemoryArtifactStore;
 use bitacora_meta::{
     MemoryKeyValueStore, MetaError, MetadataStore, RECORD_SCHEMA_VERSION, ReplicaRecord,
 };
@@ -74,6 +75,9 @@ pub struct Node {
     link: Arc<Link>,
     settings: ReplicaSettings,
     connector: ClusterConnector,
+    /// The cluster's object store, which the node's replica uploads
+    /// sealed segments to.
+    artifact_store: MemoryArtifactStore,
     has_failed_write: Arc<AtomicBool>,
 }
 
@@ -83,13 +87,21 @@ impl Node {
         failure_domains: Vec<String>,
         settings: ReplicaSettings,
         connector: ClusterConnector,
+        artifact_store: MemoryArtifactStore,
     ) -> Self {
         let replica_id =
             ReplicaId::new(format!("replica-{node_number}")).expect("valid identifier");
         let disk = MemoryDisk::new();
         let has_failed_write = Arc::new(AtomicBool::new(false));
-        let replica =
-            open_replica(&disk, &replica_id, settings, &connector, &has_failed_write).await;
+        let replica = open_replica(
+            &disk,
+            &replica_id,
+            settings,
+            &connector,
+            &artifact_store,
+            &has_failed_write,
+        )
+        .await;
         let node = Self {
             node_number,
             address: format!("{replica_id}:7000"),
@@ -102,6 +114,7 @@ impl Node {
             link: Arc::new(Link::new(replica)),
             settings,
             connector,
+            artifact_store,
             has_failed_write,
         };
         node.connector
@@ -219,6 +232,7 @@ impl Node {
             &replica_id,
             self.settings,
             &self.connector,
+            &self.artifact_store,
             &self.has_failed_write,
         )
         .await;
@@ -285,6 +299,7 @@ async fn open_replica(
     replica_id: &ReplicaId,
     settings: ReplicaSettings,
     connector: &ClusterConnector,
+    artifact_store: &MemoryArtifactStore,
     has_failed_write: &Arc<AtomicBool>,
 ) -> Arc<Replica> {
     let has_failed_write = Arc::clone(has_failed_write);
@@ -296,7 +311,8 @@ async fn open_replica(
         Arc::new(move |_segment, _reason| has_failed_write.store(true, Ordering::Relaxed)),
     )
     .await
-    .expect("a replica opens on a memory disk");
+    .expect("a replica opens on a memory disk")
+    .with_artifact_store(Arc::new(artifact_store.clone()));
     Arc::new(replica)
 }
 
@@ -307,6 +323,7 @@ pub struct Cluster {
     clock: Arc<VirtualClock>,
     nodes: Vec<Node>,
     connector: ClusterConnector,
+    artifact_store: MemoryArtifactStore,
 }
 
 impl Cluster {
@@ -337,6 +354,7 @@ impl Cluster {
         let key_value_store = MemoryKeyValueStore::new();
         let metadata = MetadataStore::new(Arc::new(key_value_store.clone()));
         let connector = ClusterConnector::default();
+        let artifact_store = MemoryArtifactStore::new();
         let mut nodes = Vec::with_capacity(node_count);
         for node_number in 0..node_count {
             nodes.push(
@@ -345,6 +363,7 @@ impl Cluster {
                     failure_domains_of(node_number),
                     settings,
                     connector.clone(),
+                    artifact_store.clone(),
                 )
                 .await,
             );
@@ -355,6 +374,7 @@ impl Cluster {
             clock: Arc::new(VirtualClock::new()),
             nodes,
             connector,
+            artifact_store,
         };
         cluster
             .renew_registrations()
@@ -367,6 +387,14 @@ impl Cluster {
     #[must_use]
     pub const fn key_value_store(&self) -> &MemoryKeyValueStore {
         &self.key_value_store
+    }
+
+    /// The object store every node uploads sealed segments to. It is
+    /// shared, like a bucket, and outlives any node's disk. Use it to read
+    /// what was uploaded and to simulate outages.
+    #[must_use]
+    pub const fn artifact_store(&self) -> &MemoryArtifactStore {
+        &self.artifact_store
     }
 
     /// The metadata store.
@@ -426,7 +454,10 @@ impl Cluster {
 mod tests {
     use std::time::Duration;
 
-    use bitacora_types::replica_api::{AppendRequest, ReplicaError, SegmentDescriptor};
+    use bitacora_artifact::ArtifactStore as _;
+    use bitacora_types::replica_api::{
+        AppendRequest, ReplicaError, SealRequest, SegmentDescriptor, UploadRequest,
+    };
     use bitacora_types::{Epoch, SegmentId, StreamId};
     use bytes::Bytes;
     use tokio::time::Instant;
@@ -604,6 +635,40 @@ mod tests {
                 && status.segment_count == 0,
             "{status:?}"
         );
+    }
+
+    /// The object store is the cluster's backup: what a node uploaded must
+    /// still be there after the node's disk is gone.
+    #[tokio::test(start_paused = true)]
+    async fn uploaded_segment_outlives_the_disk_of_the_node_that_uploaded_it() {
+        let cluster = cluster_with_three_records().await;
+        let node = &cluster.nodes()[0];
+        let sealed_end = SequenceNumber::new(3);
+        node.link()
+            .seal(SealRequest {
+                segment: SEGMENT,
+                sealed_end,
+            })
+            .await
+            .expect("seal");
+        node.link()
+            .upload_segment(UploadRequest {
+                segment: append(1, 3).segment,
+                sealed_end,
+                object_key: "streams/1/segments/1".to_owned(),
+            })
+            .await
+            .expect("upload");
+
+        node.lose_disk();
+        node.restart().await;
+
+        let stored_objects = cluster
+            .artifact_store()
+            .list_prefix("streams/1/")
+            .await
+            .expect("the object store is up");
+        assert_eq!(stored_objects.len(), 1);
     }
 
     /// A rebuilt node must not answer in the name of the node it replaced:

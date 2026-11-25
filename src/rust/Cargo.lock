@@ -116,6 +116,7 @@ name = "bitacora-testkit"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bitacora-artifact",
  "bitacora-meta",
  "bitacora-replica",
  "bitacora-segment",

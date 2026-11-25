@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+bitacora-artifact.workspace = true
 bitacora-meta.workspace = true
 bitacora-replica.workspace = true
 bitacora-segment.workspace = true

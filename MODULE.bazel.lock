@@ -480,7 +480,7 @@
           "REPO_MAPPING:rules_rust+,bazel_tools bazel_tools",
           "REPO_MAPPING:rules_rust+,rules_cc rules_cc+",
           "REPO_MAPPING:rules_rust+,rules_rust rules_rust+",
-          "FILE:@@//src/rust/Cargo.lock 33441d6bc67657cb36726f7a27665b25bdab3e89ea8415aecf1e61abefafaf92",
+          "FILE:@@//src/rust/Cargo.lock dabb73f8a67085ac0d726f43a627dec282251343e6382ddb48acdf7bfece4cbc",
           "FILE:@@//src/rust/Cargo.toml ad6c823f105fad3dbce1386662545c3a983836a8b58ad91f9227b17283047fb1",
           "FILE:@@//src/rust/bitacora-artifact/Cargo.toml e83177a94547395268a4dc7b223002c699f8fc3f7ea9abe8f43117f091c1949c",
           "FILE:@@//src/rust/bitacora-client/Cargo.toml 77c94cd6bc98e17378397b35ba7619d305562d1c168f40a6d6f8954231729337",
@@ -490,7 +490,7 @@
           "FILE:@@//src/rust/bitacora-replica/Cargo.toml c2ee929dd06346e553a778787e43719c33ec0adff83cb1940ecbf4bfbc0b7657",
           "FILE:@@//src/rust/bitacora-segment/Cargo.toml 7502d0547f80f25ca82873686cb1f338f8e9cc070a9e4c54fff1a37c557e7652",
           "FILE:@@//src/rust/bitacora-sim/Cargo.toml 3310fa9a5c8948fa6e001a7d2136844b06242301c73006dfc1b1e92cc837d5d3",
-          "FILE:@@//src/rust/bitacora-testkit/Cargo.toml b93acf7d89f715351cff20dd8a6b2861aef143e55decca0947d3ea1d556bcd0e",
+          "FILE:@@//src/rust/bitacora-testkit/Cargo.toml 5e0b48fc560f87c36305e3689be8c938d6483a5cb9385e12abb76694370e471e",
           "FILE:@@//src/rust/bitacora-types/Cargo.toml c7cad694ea3a2fa8ba5bf6873a433fb02710b70fe4cf8e227e016cc43d586c51"
         ],
         "generatedRepoSpecs": {
