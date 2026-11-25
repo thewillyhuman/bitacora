@@ -1,0 +1,36 @@
+# Bazel settings for bitacora. Personal overrides go in user.bazelrc.
+
+common --enable_platform_specific_config
+
+# Reproducible actions: do not leak the caller's environment into them.
+build --incompatible_strict_action_env
+
+# Speed. Pipelining lets dependent crates start as soon as metadata exists,
+# and the disk cache survives `bazel clean` and branch switches. Continuous
+# integration saves and restores the same directory.
+build --@rules_rust//rust/settings:pipelined_compilation=True
+build --disk_cache=~/.cache/bitacora/bazel-disk
+common --repository_cache=~/.cache/bitacora/bazel-repository
+
+# One configuration file per tool, shared with cargo.
+build --@rules_rust//rust/settings:clippy.toml=//src/rust:clippy.toml
+build --@rules_rust//rust/settings:rustfmt.toml=//src/rust:rustfmt.toml
+
+test --test_output=errors
+
+# rustc supports macOS 10.12 and later; Bazel's default target is older.
+build:macos --macos_minimum_os=12.0
+build:macos --host_macos_minimum_os=12.0
+
+# `--config=lint` adds clippy and rustfmt to whatever is being built, and
+# turns every warning into an error. Continuous integration always uses it.
+build:lint --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:lint --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
+build:lint --output_groups=+clippy_checks,+rustfmt_checks
+build:lint --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+
+# `--config=release` builds the binaries that ship.
+build:release --compilation_mode=opt
+build:release --@rules_rust//rust/settings:lto=thin
+
+try-import %workspace%/user.bazelrc

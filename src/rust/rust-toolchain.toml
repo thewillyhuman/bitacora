@@ -1,0 +1,5 @@
+# What cargo and rust-analyzer use. Bazel pins the same version in
+# //:MODULE.bazel; change both together.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

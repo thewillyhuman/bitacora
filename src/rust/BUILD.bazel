@@ -1,0 +1,11 @@
+"""The Cargo workspace. Each crate is one Bazel package below this one."""
+
+exports_files(
+    [
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+    ],
+    visibility = ["//visibility:public"],
+)
