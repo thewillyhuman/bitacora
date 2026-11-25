@@ -445,3 +445,84 @@ async fn follower_rides_out_a_metadata_outage() {
         before_outage == [1, 2] && during_outage.is_err() && take(&mut following, 1).await == [3]
     );
 }
+
+// ---- batches and known lag ----
+
+#[tokio::test(start_paused = true)]
+async fn follower_hands_out_the_records_at_hand_as_one_batch() {
+    let cluster = Cluster::start(3).await;
+    let writer = open_writer(&cluster, "compute-1").await;
+    append_numbered(&writer, 5).await;
+    settle(HEARTBEAT_SETTLE).await;
+    let mut following = reader(&cluster)
+        .follow_from(SequenceNumber::FIRST)
+        .await
+        .expect("follows");
+    let batch = following
+        .next_batch()
+        .await
+        .expect("the stream goes on")
+        .expect("the records are readable");
+    assert_eq!(sequences(&batch), [1, 2, 3, 4, 5]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_after_a_single_record_holds_the_rest() {
+    let cluster = Cluster::start(3).await;
+    let writer = open_writer(&cluster, "compute-1").await;
+    append_numbered(&writer, 4).await;
+    settle(HEARTBEAT_SETTLE).await;
+    let mut following = reader(&cluster)
+        .follow_from(SequenceNumber::FIRST)
+        .await
+        .expect("follows");
+    take(&mut following, 1).await;
+    let rest = following
+        .next_batch()
+        .await
+        .expect("the stream goes on")
+        .expect("the records are readable");
+    assert_eq!(sequences(&rest), [2, 3, 4]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_below_the_low_water_mark_is_the_truncation_error() {
+    let cluster = Cluster::start(3).await;
+    let writer = open_writer(&cluster, "compute-1").await;
+    append_numbered(&writer, 5).await;
+    truncate_below(&cluster, 4).await;
+    let mut following = reader(&cluster)
+        .follow_from(SequenceNumber::new(2))
+        .await
+        .expect("follows");
+    assert_eq!(
+        following.next_batch().await,
+        Some(Err(ReadError::Truncated {
+            low_water_mark: SequenceNumber::new(4)
+        }))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn follower_that_has_read_nothing_knows_no_committed_record() {
+    let cluster = Cluster::start(3).await;
+    let following = reader(&cluster)
+        .follow_from(SequenceNumber::FIRST)
+        .await
+        .expect("follows");
+    assert_eq!(following.durable_sequence(), SequenceNumber::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn follower_learns_how_far_the_stream_is_committed_from_its_first_read() {
+    let cluster = Cluster::start(3).await;
+    let writer = open_writer(&cluster, "compute-1").await;
+    append_numbered(&writer, 5).await;
+    settle(HEARTBEAT_SETTLE).await;
+    let mut following = reader(&cluster)
+        .follow_from(SequenceNumber::FIRST)
+        .await
+        .expect("follows");
+    take(&mut following, 1).await;
+    assert_eq!(following.durable_sequence(), SequenceNumber::new(5));
+}

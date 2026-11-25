@@ -168,6 +168,34 @@ impl RecordStream {
     }
 }
 
+impl RecordStream {
+    /// Waits for the next committed records and returns all that are at
+    /// hand: at least one, and as many as the last answer of a replica
+    /// brought. A materializer applies them as one slice.
+    ///
+    /// Errors and the end of the stream are reported as by
+    /// [`RecordStream::next`].
+    pub async fn next_batch(&mut self) -> Option<Result<Vec<LogRecord>, ReadError>> {
+        let first_record = match self.next().await? {
+            Ok(first_record) => first_record,
+            Err(read_error) => return Some(Err(read_error)),
+        };
+        let mut records = Vec::with_capacity(1 + self.buffered_records.len());
+        records.push(first_record);
+        records.extend(self.buffered_records.drain(..));
+        Some(Ok(records))
+    }
+
+    /// The highest sequence number this follower knows to be committed:
+    /// what the replicas it asked and the stream's sealed segments have
+    /// told it so far. The gap between it and the last record handed out
+    /// is how far the follower knows it lags. It never moves backwards.
+    #[must_use]
+    pub fn durable_sequence(&self) -> SequenceNumber {
+        self.cursor.known_durable_sequence()
+    }
+}
+
 /// What one fetch brought back.
 enum Fetched {
     /// One or more records, starting at the cursor's position.
@@ -218,6 +246,9 @@ struct Cursor {
     /// The object of the tiered segment being read from the object store,
     /// kept open so that its footer and index are fetched once.
     open_tiered_segment: Option<(SegmentId, TieredSegment)>,
+    /// The highest position a replica has said it may serve: committed
+    /// for certain, though the stream may be further along.
+    highest_readable_end: SequenceNumber,
 }
 
 impl Cursor {
@@ -237,7 +268,21 @@ impl Cursor {
             connected_segment: None,
             preferred_replica: 0,
             open_tiered_segment: None,
+            highest_readable_end: SequenceNumber::ZERO,
         })
+    }
+
+    /// The highest sequence number known to be committed: the furthest a
+    /// replica has served up to, or the end of the last sealed segment in
+    /// the metadata as last read.
+    fn known_durable_sequence(&self) -> SequenceNumber {
+        let mut known_durable = self.highest_readable_end;
+        for segment in &self.stream.segments {
+            if let Some(sealed_end) = segment.sealed_end() {
+                known_durable = known_durable.max(sealed_end);
+            }
+        }
+        known_durable
     }
 
     /// Fetches the records at the cursor's position and moves past them.
@@ -428,7 +473,7 @@ impl Cursor {
 
     /// Sends one read to one replica and classifies its answer.
     async fn ask(
-        &self,
+        &mut self,
         replica: &ConnectedReplica,
         segment: &SegmentRecord,
         tail_wait: Option<Duration>,
@@ -450,6 +495,7 @@ impl Cursor {
             Ok(Err(replica_error)) => return ReplicaAnswer::Failed(replica_error.to_string()),
             Err(_elapsed) => return ReplicaAnswer::Failed("request timed out".to_owned()),
         };
+        self.highest_readable_end = self.highest_readable_end.max(response.readable_end);
         // The reader verifies every batch checksum itself (design, section
         // 6, step 4): the replica is not trusted to have done it.
         let batches = match decode_frames(address, &response.batch_frames) {
