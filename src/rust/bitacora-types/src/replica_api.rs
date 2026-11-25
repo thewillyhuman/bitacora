@@ -224,7 +224,9 @@ pub struct RepairRequest {
     /// The segment's final sequence number, as recorded in the metadata
     /// store.
     pub sealed_end: SequenceNumber,
-    /// The registered address of a replica that holds a good copy.
+    /// The identity of a replica that holds a good copy.
+    pub source_replica_id: ReplicaId,
+    /// The registered address of that replica.
     pub source_address: String,
 }
 
@@ -306,23 +308,33 @@ pub trait ReplicaApi: Send + Sync {
     async fn drain(&self) -> Result<(), ReplicaError>;
 }
 
-/// Turns a replica's registered address into a handle to talk to it.
+/// Turns a replica's registration into a handle to talk to it.
 ///
 /// Connecting is lazy and never fails: an unreachable replica shows up as
 /// [`ReplicaError::Unavailable`] on the first request.
 pub trait ReplicaConnector: Send + Sync {
-    /// Returns a handle to the replica listening at `address`.
-    fn connect(&self, address: &str) -> Arc<dyn ReplicaApi>;
+    /// Returns a handle to the replica `replica_id`, which listens at
+    /// `address`.
+    ///
+    /// The handle must only ever reach that replica. An address can come to
+    /// be served by another one: a node whose disk was replaced returns at
+    /// the same address under a new identity, holding none of the copies
+    /// the old identity held. If it answered in the old one's name, a
+    /// recovering writer would take its empty copies for real ones. Every
+    /// request through the handle must therefore fail as
+    /// [`ReplicaError::Unavailable`] unless the replica that answers is
+    /// `replica_id`.
+    fn connect(&self, replica_id: &ReplicaId, address: &str) -> Arc<dyn ReplicaApi>;
 }
 
-/// A connector over a fixed set of replica handles, keyed by address.
+/// A connector over a fixed set of replica handles.
 ///
-/// It serves in-process clusters: tests, the simulator and single-binary
-/// deployments. An address it does not know behaves like a replica that is
-/// down.
+/// It serves in-process setups where the replicas never change: unit tests
+/// and single-binary deployments. A replica it does not know, by identity
+/// and address together, behaves like one that is down.
 #[derive(Clone, Default)]
 pub struct StaticReplicaConnector {
-    replicas_by_address: BTreeMap<String, Arc<dyn ReplicaApi>>,
+    replicas_by_address: BTreeMap<String, (ReplicaId, Arc<dyn ReplicaApi>)>,
 }
 
 impl StaticReplicaConnector {
@@ -332,16 +344,26 @@ impl StaticReplicaConnector {
         Self::default()
     }
 
-    /// Makes `replica` reachable at `address`, replacing any previous one.
-    pub fn register(&mut self, address: impl Into<String>, replica: Arc<dyn ReplicaApi>) {
-        self.replicas_by_address.insert(address.into(), replica);
+    /// Makes `replica`, whose identity is `replica_id`, reachable at
+    /// `address`, replacing any previous one.
+    pub fn register(
+        &mut self,
+        replica_id: ReplicaId,
+        address: impl Into<String>,
+        replica: Arc<dyn ReplicaApi>,
+    ) {
+        self.replicas_by_address
+            .insert(address.into(), (replica_id, replica));
     }
 }
 
 impl ReplicaConnector for StaticReplicaConnector {
-    fn connect(&self, address: &str) -> Arc<dyn ReplicaApi> {
+    fn connect(&self, replica_id: &ReplicaId, address: &str) -> Arc<dyn ReplicaApi> {
         match self.replicas_by_address.get(address) {
-            Some(replica) => Arc::clone(replica),
+            Some((registered_id, replica)) if registered_id == replica_id => Arc::clone(replica),
+            Some((registered_id, _replica)) => Arc::new(UnreachableReplica::new(format!(
+                "{address} is replica {registered_id}, not {replica_id}"
+            ))),
             None => Arc::new(UnreachableReplica::new(format!(
                 "no replica is reachable at {address}"
             ))),
@@ -419,10 +441,27 @@ impl ReplicaApi for UnreachableReplica {
 mod tests {
     use super::*;
 
+    fn replica_id(name: &str) -> ReplicaId {
+        ReplicaId::new(name).expect("valid identifier")
+    }
+
+    fn connector_with_replica_a() -> StaticReplicaConnector {
+        let mut connector = StaticReplicaConnector::new();
+        connector.register(
+            replica_id("replica-a"),
+            "replica-a:7000",
+            Arc::new(UnreachableReplica::new("the registered handle answered")),
+        );
+        connector
+    }
+
     #[tokio::test]
     async fn unknown_address_behaves_like_a_replica_that_is_down() {
         let connector = StaticReplicaConnector::new();
-        let status = connector.connect("replica-a:7000").status().await;
+        let status = connector
+            .connect(&replica_id("replica-a"), "replica-a:7000")
+            .status()
+            .await;
         assert_eq!(
             status,
             Err(ReplicaError::Unavailable {
@@ -432,17 +471,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registered_address_reaches_its_replica() {
-        let mut connector = StaticReplicaConnector::new();
-        connector.register(
-            "replica-a:7000",
-            Arc::new(UnreachableReplica::new("the registered handle answered")),
-        );
-        let status = connector.connect("replica-a:7000").status().await;
+    async fn registered_replica_is_reached_at_its_address() {
+        let status = connector_with_replica_a()
+            .connect(&replica_id("replica-a"), "replica-a:7000")
+            .status()
+            .await;
         assert_eq!(
             status,
             Err(ReplicaError::Unavailable {
                 reason: "the registered handle answered".to_owned()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn address_served_by_another_replica_behaves_like_one_that_is_down() {
+        let status = connector_with_replica_a()
+            .connect(&replica_id("replica-a-disk-1"), "replica-a:7000")
+            .status()
+            .await;
+        assert_eq!(
+            status,
+            Err(ReplicaError::Unavailable {
+                reason: "replica-a:7000 is replica replica-a, not replica-a-disk-1".to_owned()
             })
         );
     }

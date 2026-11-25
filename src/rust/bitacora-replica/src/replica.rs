@@ -383,7 +383,9 @@ impl ReplicaApi for Replica {
 
     async fn repair_segment(&self, request: RepairRequest) -> Result<RepairResponse, ReplicaError> {
         let admission = self.admit_write().await?;
-        let source = self.connector.connect(&request.source_address);
+        let source = self
+            .connector
+            .connect(&request.source_replica_id, &request.source_address);
         let pace = RepairPace {
             chunk_bytes: self.settings.repair_chunk_bytes,
             bytes_per_second: self.settings.repair_bytes_per_second,
@@ -936,7 +938,11 @@ mod tests {
             .await
             .expect("seal");
         let mut connector = StaticReplicaConnector::new();
-        connector.register(SOURCE_ADDRESS, Arc::clone(&source) as Arc<dyn ReplicaApi>);
+        connector.register(
+            source.replica_id().clone(),
+            SOURCE_ADDRESS,
+            Arc::clone(&source) as Arc<dyn ReplicaApi>,
+        );
         (source, Arc::new(connector))
     }
 
@@ -964,6 +970,7 @@ mod tests {
                 first_sequence: SequenceNumber::new(FIRST_SEQUENCE),
             },
             sealed_end: SequenceNumber::new(sealed_end),
+            source_replica_id: ReplicaId::new("source").expect("valid identifier"),
             source_address: SOURCE_ADDRESS.to_owned(),
         }
     }

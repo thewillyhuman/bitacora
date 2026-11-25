@@ -204,7 +204,9 @@ impl Controller {
             if !replica.is_alive(now, self.settings.placement.liveness_window) {
                 continue;
             }
-            let client = self.connector.connect(&replica.address);
+            let client = self
+                .connector
+                .connect(&replica.replica_id, &replica.address);
             match timeout(self.settings.request_timeout, client.list_segments()).await {
                 Ok(Ok(statuses)) => {
                     copies_by_replica.insert(
@@ -401,9 +403,10 @@ impl Controller {
                 let request = RepairRequest {
                     segment: segment.descriptor(stream.stream_id),
                     sealed_end,
+                    source_replica_id: source.replica_id.clone(),
                     source_address: source.address.clone(),
                 };
-                let client = self.connector.connect(&target.address);
+                let client = self.connector.connect(&target.replica_id, &target.address);
                 let repaired =
                     timeout(self.settings.repair_timeout, client.repair_segment(request)).await;
                 match repaired {
@@ -623,7 +626,9 @@ impl Controller {
     /// Asks a replica to delete its copy of a segment. Returns whether it
     /// did.
     async fn delete_copy(&self, replica: &ReplicaRecord, address: SegmentAddress) -> bool {
-        let client = self.connector.connect(&replica.address);
+        let client = self
+            .connector
+            .connect(&replica.replica_id, &replica.address);
         let deleted = timeout(
             self.settings.request_timeout,
             client.delete_segment(address),
@@ -660,7 +665,9 @@ impl Controller {
             held.and_then(|status| status.local_end)
         } else {
             // Tell the replica; its answer says what it holds afterwards.
-            let client = self.connector.connect(&registration.address);
+            let client = self
+                .connector
+                .connect(&registration.replica_id, &registration.address);
             let request = SealRequest {
                 segment: address,
                 sealed_end,

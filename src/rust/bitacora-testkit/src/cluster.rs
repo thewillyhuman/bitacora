@@ -16,7 +16,7 @@ use bitacora_types::replica_api::{
 use bitacora_types::{Clock, ReplicaId, SegmentAddress, SequenceNumber};
 
 use crate::clock::VirtualClock;
-use crate::link::{Link, LinkFault};
+use crate::link::{AddressedLink, Link, LinkFault};
 
 /// Reaches the cluster's nodes through their links.
 ///
@@ -37,7 +37,7 @@ impl ClusterConnector {
 }
 
 impl ReplicaConnector for ClusterConnector {
-    fn connect(&self, address: &str) -> Arc<dyn ReplicaApi> {
+    fn connect(&self, replica_id: &ReplicaId, address: &str) -> Arc<dyn ReplicaApi> {
         let link = self
             .links_by_address
             .lock()
@@ -45,7 +45,10 @@ impl ReplicaConnector for ClusterConnector {
             .get(address)
             .cloned();
         match link {
-            Some(link) => link,
+            Some(link) => Arc::new(AddressedLink {
+                link,
+                expected_replica_id: replica_id.clone(),
+            }),
             None => Arc::new(UnreachableReplica::new(format!(
                 "no node is reachable at {address}"
             ))),
@@ -474,7 +477,11 @@ mod tests {
     async fn connector_reaches_a_node_through_its_link() {
         let cluster = cluster_with_three_records().await;
         let node = &cluster.nodes()[0];
-        let status = cluster.connector().connect(node.address()).status().await;
+        let status = cluster
+            .connector()
+            .connect(&node.replica_id(), node.address())
+            .status()
+            .await;
         assert_eq!(
             status.map(|status| status.replica_id),
             Ok(node.replica_id())
@@ -589,6 +596,31 @@ mod tests {
                 && status.replica_id == node.replica_id()
                 && status.segment_count == 0,
             "{status:?}"
+        );
+    }
+
+    /// A rebuilt node must not answer in the name of the node it replaced:
+    /// it holds none of the copies the old identity held.
+    #[tokio::test(start_paused = true)]
+    async fn rebuilt_node_does_not_answer_for_its_old_identity() {
+        let cluster = cluster_with_three_records().await;
+        let node = &cluster.nodes()[0];
+        let old_identity = node.replica_id();
+        node.lose_disk();
+        node.restart().await;
+        let connector = cluster.connector();
+        let as_old_identity = connector
+            .connect(&old_identity, node.address())
+            .list_segments()
+            .await;
+        let as_new_identity = connector
+            .connect(&node.replica_id(), node.address())
+            .list_segments()
+            .await;
+        assert!(
+            matches!(as_old_identity, Err(ReplicaError::Unavailable { .. }))
+                && as_new_identity == Ok(Vec::new()),
+            "as the old identity: {as_old_identity:?}"
         );
     }
 

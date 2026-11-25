@@ -37,7 +37,9 @@ impl ClientContext {
                     .iter()
                     .find(|replica| replica.replica_id == copy.replica_id);
                 let client: Arc<dyn ReplicaApi> = match registration {
-                    Some(replica) => self.connector.connect(&replica.address),
+                    Some(replica) => self
+                        .connector
+                        .connect(&replica.replica_id, &replica.address),
                     None => Arc::new(UnreachableReplica::new(format!(
                         "replica {} is not registered",
                         copy.replica_id
