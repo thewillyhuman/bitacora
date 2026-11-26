@@ -41,8 +41,13 @@ const DEFAULT_SEEDS_PER_TEST: u64 = 6;
 /// How many tests the budget of seeds is split over, so that they run in parallel.
 const SLICE_COUNT: u64 = 4;
 
-/// How many seeds a deliberately broken store gets to be caught in.
-const SEEDS_TO_CATCH_A_BUG: u64 = 4;
+/// How many seeds a deliberately broken store gets to be caught in. The tests stop at the first seed that catches it.
+///
+/// A broken store is not caught by every seed: a write of unknown outcome that is reported as done only shows when it
+/// was in fact lost and a later read says so, which about one seed in three produces. A budget of four seeds held
+/// only as long as one of the first four happened to be such a seed, and stopped holding when placement began to
+/// spread streams by key, which changed every history. Sixteen seeds leave no room for that kind of luck.
+const SEEDS_TO_CATCH_A_BUG: u64 = 16;
 
 /// How many appends, answered reads and made writes a run must at least have for the test of it to mean something. A
 /// healthy run has several times as many.

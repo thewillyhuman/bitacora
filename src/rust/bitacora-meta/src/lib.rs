@@ -17,7 +17,8 @@
 //!   records they are made of: what is stored.
 //! - [`KeyValueStore`]: the small interface a backend implements, with [`MemoryKeyValueStore`] for tests and
 //!   simulation.
-//! - [`choose_replica_set`] and [`choose_additional_replica`]: placement, a pure function of the replica registry.
+//! - [`choose_replica_set`] and [`choose_additional_replica`]: placement, a pure function of the replica registry
+//!   and of a key, [`placement_key_of_segment`] or [`placement_key_of_new_stream`], that says what is placed.
 //! - [`MetadataSnapshot`]: the whole store as one object, for backup.
 //!
 //! # How it works
@@ -63,7 +64,10 @@ pub use key_value::{
 };
 pub use keys::MAX_NAME_LENGTH_BYTES;
 pub use memory_store::MemoryKeyValueStore;
-pub use placement::{PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set, spread_of};
+pub use placement::{
+    PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set, placement_key_of_new_stream,
+    placement_key_of_segment, spread_of,
+};
 pub use records::{
     CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
     RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,

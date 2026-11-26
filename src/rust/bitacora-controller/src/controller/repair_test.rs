@@ -174,6 +174,46 @@ async fn lost_copy_without_a_spare_replica_is_good_again_when_its_replica_return
 /// Nodes 1 and 4 share zone 1.
 const THREE_ZONES: FailureDomainLayout = FailureDomainLayout::HostsInZones { zone_count: 3 };
 
+/// The two nodes of zone 1 of the zoned cluster.
+const NODES_OF_ZONE_1: [usize; 2] = [1, 4];
+
+/// The copy of the first segment that is in zone 1 of the zoned cluster.
+struct CopyInZone1 {
+    /// Where the copy is in the segment's replica set.
+    position: usize,
+    /// The node of zone 1 that holds it.
+    holder_node: usize,
+    /// The node of zone 1 that does not.
+    other_node: usize,
+}
+
+/// Finds the copy of the first segment in zone 1. Which of the zone's two nodes holds it is placement's choice.
+///
+/// # Panics
+///
+/// Panics if neither node of zone 1 holds a copy, which would mean the segment is not spread over the three zones.
+async fn copy_in_zone_1(cluster: &Cluster) -> CopyInZone1 {
+    let holders = holders_of_the_first_segment(cluster).await;
+    let replicas_of_zone_1 = cluster.replica_ids(&NODES_OF_ZONE_1);
+    for (position, holder) in holders.iter().enumerate() {
+        if *holder == replicas_of_zone_1[0] {
+            return CopyInZone1 {
+                position,
+                holder_node: NODES_OF_ZONE_1[0],
+                other_node: NODES_OF_ZONE_1[1],
+            };
+        }
+        if *holder == replicas_of_zone_1[1] {
+            return CopyInZone1 {
+                position,
+                holder_node: NODES_OF_ZONE_1[1],
+                other_node: NODES_OF_ZONE_1[0],
+            };
+        }
+    }
+    panic!("the first replica set holds one copy per zone, but none in zone 1: {holders:?}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
     let small_segment_files = ReplicaSettings {
@@ -187,19 +227,14 @@ async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
     append(&writer, 3).await;
     writer.close().await.expect("closing seals the segment");
     run_pass(&cluster).await;
-    let node_in_zone_1 = cluster.replica_ids(&[1])[0].clone();
-    let lost_copy_index = holders_of_the_first_segment(&cluster)
-        .await
-        .iter()
-        .position(|holder| *holder == node_in_zone_1)
-        .expect("the first replica set holds one copy per zone");
-    lose_node(&cluster, 1).await;
+    let lost_copy = copy_in_zone_1(&cluster).await;
+    lose_node(&cluster, lost_copy.holder_node).await;
 
     run_pass(&cluster).await;
 
-    let other_node_in_zone_1 = cluster.replica_ids(&[4])[0].clone();
+    let other_replica_of_zone_1 = cluster.replica_ids(&[lost_copy.other_node])[0].clone();
     assert_eq!(
-        holders_of_the_first_segment(&cluster).await[lost_copy_index],
-        other_node_in_zone_1
+        holders_of_the_first_segment(&cluster).await[lost_copy.position],
+        other_replica_of_zone_1
     );
 }

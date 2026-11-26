@@ -256,6 +256,13 @@ it has been silent for much longer, so that a restart does not move data.
 never puts two copies of a segment on replicas that share their narrowest
 label, and spreads over the wider ones when there are enough of them.
 
+Which replica is chosen among those that spread a segment equally is not
+part of the protocol. The programs of this repository prefer a replica
+whose disk is emptier by a tenth, and otherwise spread streams and their
+segments by a hash, so that no replica gets them all
+([decision 0019](../decisions/0019-placement-spread.md)). A program that
+chooses differently should not always choose the same replica either.
+
 ## Leader record
 
 ```json

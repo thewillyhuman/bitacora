@@ -13,8 +13,11 @@
 //!
 //! - [`controller_named`], [`run_pass`]: a controller with the default settings, and one pass of it.
 //! - [`controller_with_object_store`]: a controller that tiers and snapshots.
-//! - [`create_stream`], [`stream`], [`client`], [`open_writer`], [`append`]: the stream [`STREAM`] and writers to it.
-//! - [`cluster_with_a_sealed_segment`] and [`Writes`]: one sealed segment, written in a way a test names.
+//! - [`create_stream`], [`create_stream_on_the_first_three_nodes`], [`stream`], [`client`], [`open_writer`],
+//!   [`append`]: the stream [`STREAM`], without a first segment or with one on nodes a test can name, and writers
+//!   to it.
+//! - [`cluster_with_a_sealed_segment`] and [`Writes`]: one sealed segment on the first three nodes, written in a way
+//!   a test names.
 //! - [`cluster_with_segments`]: several sealed segments of one record each, and an open one.
 //! - [`checkpoint_at`]: a materializer with a committed checkpoint.
 //! - [`lose_node`], [`damage_first_segment_on`]: the two ways a test destroys a copy.
@@ -133,6 +136,26 @@ pub(crate) async fn create_stream(cluster: &Cluster) {
         .expect("the stream does not exist yet");
 }
 
+/// Creates [`STREAM`] with its first segment on the first three nodes of `cluster`, in that order, as an
+/// administration client that chose them would have.
+///
+/// Which of several equal replicas placement names depends on the stream and the segment, and is the subject of the
+/// placement and standby tests. A test about what happens to a copy needs to know where the copies are: with this
+/// fixture, the copy at position `N` of the first segment's replica set is on node `N`, and a fourth node holds none.
+pub(crate) async fn create_stream_on_the_first_three_nodes(cluster: &Cluster) {
+    let first_replica_set = cluster.replica_ids(&[0, 1, 2]);
+    cluster
+        .metadata()
+        .create_stream(
+            STREAM,
+            ReplicationSettings::DEFAULT,
+            RetentionPolicy::default(),
+            Some(first_replica_set),
+        )
+        .await
+        .expect("the stream does not exist yet");
+}
+
 /// Reads the record of [`STREAM`].
 pub(crate) async fn stream(cluster: &Cluster) -> StreamRecord {
     cluster
@@ -191,12 +214,11 @@ pub(crate) enum Writes {
 /// Starts a cluster of `node_count` nodes whose stream has exactly one segment, sealed, written as `what_is_written`
 /// says.
 ///
-/// The segment's copies are unverified: no pass has run since the seal. `node_count` must be at least three, the
-/// stream's replication.
+/// The segment is on the first three nodes, the copy at position `N` of its replica set on node `N`. Its copies are
+/// unverified: no pass has run since the seal. `node_count` must be at least three, the stream's replication.
 pub(crate) async fn cluster_with_a_sealed_segment(node_count: usize, what_is_written: Writes) -> Cluster {
     let cluster = Cluster::start(node_count).await;
-    create_stream(&cluster).await;
-    run_pass(&cluster).await;
+    create_stream_on_the_first_three_nodes(&cluster).await;
     let writer = open_writer(&cluster).await;
     let third_node = &cluster.nodes()[2];
     match what_is_written {

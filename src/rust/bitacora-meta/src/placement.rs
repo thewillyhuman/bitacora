@@ -12,6 +12,8 @@
 //!
 //! - [`choose_replica_set`]: the replicas for a new segment.
 //! - [`choose_additional_replica`]: one more replica for a segment that keeps some of its copies.
+//! - [`placement_key_of_segment`] and [`placement_key_of_new_stream`]: the number that says what is being placed,
+//!   which decides between replicas that are equally good.
 //! - [`spread_of`]: how widely a replica set is spread, to tell whether a set chosen earlier is still as good as one
 //!   chosen now.
 //! - [`PlacementPolicy`]: which replicas may receive new segments at all.
@@ -20,10 +22,30 @@
 //! # How it works
 //!
 //! A replica is eligible if it renewed its registration recently, is not being drained, has room, and is not excluded
-//! by the caller. Copies are then placed one at a time. Each time, the eligible replica that shares the fewest failure
-//! domains with the copies already placed wins, comparing the widest domain first: a replica in an unused zone beats
-//! one in an unused rack of a used zone. Among equally spread replicas the one with the most free space wins, then the
-//! lowest identifier, so that the same registry always gives the same answer.
+//! by the caller. Copies are then placed one at a time. Each time the best eligible replica wins, by these criteria in
+//! this order:
+//!
+//! 1. **Spread.** The replica that shares the fewest failure domains with the copies already placed, comparing the
+//!    widest domain first: a replica in an unused zone beats one in an unused rack of a used zone.
+//! 2. **Room, coarsely.** The replica whose disk is emptier by tenths: one that is 5% full beats one that is 15%
+//!    full, and two that are 11% and 19% full are equals.
+//! 3. **The placement key.** Among equals, the replica with the highest score for the key of what is being placed.
+//!    The score is a hash of the key and the replica's identifier, so each key ranks the equals in an order of its
+//!    own: rendezvous hashing.
+//! 4. **The identifier**, lowest first, which only decides if two scores are the same number.
+//!
+//! Room is compared coarsely on purpose. Free space differs a little between any two replicas and changes slowly, so
+//! a rule that prefers the emptier replica down to the byte gives every placement to the same one for as long as it
+//! leads. On a real cluster of five replicas, 128 streams created together all got the same three replicas while the
+//! two others stayed idle (decision record 0019). Tenths still fill the emptier disk first when the difference is
+//! worth acting on, and leave the rest to the key, which spreads streams, and the successive segments of one stream,
+//! over the replicas that are as good as each other.
+//!
+//! The score is fixed by this file and not by the standard library's hasher, whose results may change from one Rust
+//! version to the next: FNV-1a over the eight bytes of the key, least significant first, followed by the bytes of the
+//! identifier, and then the final mixing step of the Murmur 3 hash. FNV-1a alone will not do: it changes its high bits
+//! little for a change in the last byte, and ranked five identifiers that differ in their last character so that one
+//! of them won half of all keys.
 //!
 //! A replica's failure domains are its labels from widest to narrowest, for example zone, rack, host. The whole list
 //! names its narrowest domain. Spreading over the wider levels is best effort; not sharing the narrowest is a rule: a
@@ -32,9 +54,11 @@
 //!
 //! # Invariants
 //!
-//! - Pure: no I/O, no clock (the caller passes the time), no randomness.
+//! - Pure: no I/O, no clock (the caller passes the time), no randomness, no state. The key is an argument.
 //! - Two copies of one segment never share their narrowest failure domain.
-//! - The same registry, time, policy and exclusions always give the same replicas, in the same order.
+//! - The same registry, time, policy, exclusions and key always give the same replicas, in the same order, whatever
+//!   the order of the registry and whichever program asks. Tests hold the keys and the score to fixed values.
+//! - The key never costs spread or a tenth of room: it only orders replicas that the first two criteria rank equal.
 //!
 //! # See also
 //!
@@ -45,7 +69,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use bitacora_types::{ReplicaId, Timestamp};
+use bitacora_types::{ReplicaId, SegmentId, StreamId, Timestamp};
 use thiserror::Error;
 
 use crate::records::ReplicaRecord;
@@ -57,6 +81,15 @@ const DEFAULT_LIVENESS_WINDOW: Duration = Duration::from_secs(15);
 /// How full a replica's disk may be, by default, before it receives no new segments, in percent. The same threshold at
 /// which a replica itself starts refusing new segments (design, section 7).
 const DEFAULT_REFUSE_AT_USED_PERCENT: u8 = 85;
+
+/// How much of a disk counts as one step when two replicas' room is compared, in percent: a tenth.
+const ROOM_STEP_PERCENT: u8 = 10;
+
+/// The starting value of the 64-bit FNV-1a hash.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The number the 64-bit FNV-1a hash multiplies by after each byte.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Which replicas may receive new segments.
 ///
@@ -105,7 +138,17 @@ impl Default for PlacementPolicy {
 /// let empty_registry = [];
 /// let now = Timestamp::from_unix_millis(100_000);
 ///
-/// let chosen = choose_replica_set(&empty_registry, 3, now, PlacementPolicy::default(), &BTreeSet::new());
+/// let nothing_excluded = BTreeSet::new();
+/// let placement_key = 7;
+///
+/// let chosen = choose_replica_set(
+///     &empty_registry,
+///     3,
+///     now,
+///     PlacementPolicy::default(),
+///     &nothing_excluded,
+///     placement_key,
+/// );
 ///
 /// assert_eq!(
 ///     chosen,
@@ -140,7 +183,8 @@ pub enum PlacementError {
 ///
 /// Copies are spread as widely as the registry allows: across zones first, then racks, then hosts, following each
 /// replica's `failure_domains` from widest to narrowest. Two copies never share the narrowest domain. Among equally
-/// spread candidates the one with the most free space wins, then the lowest identifier, so the result is deterministic.
+/// spread candidates the one whose disk is emptier by tenths wins; among those, `placement_key` decides, so that
+/// different segments go to different replicas and the same segment always to the same ones. See the file header.
 ///
 /// # Arguments
 ///
@@ -150,6 +194,8 @@ pub enum PlacementError {
 /// * `policy` - Which replicas may receive new segments.
 /// * `excluded` - Replicas that must not be chosen whatever their state, for example the ones a writer is rolling away
 ///   from.
+/// * `placement_key` - What is being placed: [`placement_key_of_segment`] for a segment of a stream that exists,
+///   [`placement_key_of_new_stream`] for the first segment of one that does not yet.
 ///
 /// # Returns
 ///
@@ -167,8 +213,10 @@ pub enum PlacementError {
 /// ```
 /// use std::collections::BTreeSet;
 ///
-/// use bitacora_meta::{PlacementPolicy, RECORD_SCHEMA_VERSION, ReplicaRecord, choose_replica_set};
-/// use bitacora_types::{ReplicaId, Timestamp};
+/// use bitacora_meta::{
+///     PlacementPolicy, RECORD_SCHEMA_VERSION, ReplicaRecord, choose_replica_set, placement_key_of_segment,
+/// };
+/// use bitacora_types::{ReplicaId, SegmentId, StreamId, Timestamp};
 ///
 /// let now = Timestamp::from_unix_millis(100_000);
 /// let replica_on = |name: &str, zone: &str| ReplicaRecord {
@@ -187,10 +235,16 @@ pub enum PlacementError {
 ///     replica_on("b1", "zone-b"),
 /// ];
 ///
-/// let chosen = choose_replica_set(&registry, 2, now, PlacementPolicy::default(), &BTreeSet::new())?;
+/// let nothing_excluded = BTreeSet::new();
+/// let placement_key = placement_key_of_segment(StreamId::new(7), SegmentId::FIRST);
 ///
-/// let chosen_names: Vec<String> = chosen.iter().map(ToString::to_string).collect();
-/// assert_eq!(chosen_names, ["a1", "b1"]);
+/// let chosen = choose_replica_set(&registry, 2, now, PlacementPolicy::default(), &nothing_excluded, placement_key)?;
+///
+/// // One copy in each zone: the only replica of zone b holds one, and a replica of zone a the other. Which replica
+/// // of zone a depends on the key.
+/// let only_replica_of_zone_b = ReplicaId::new("b1").expect("a valid identifier");
+/// assert_eq!(chosen.len(), 2);
+/// assert!(chosen.contains(&only_replica_of_zone_b));
 /// # Ok::<(), bitacora_meta::PlacementError>(())
 /// ```
 pub fn choose_replica_set(
@@ -199,8 +253,15 @@ pub fn choose_replica_set(
     now: Timestamp,
     policy: PlacementPolicy,
     excluded: &BTreeSet<ReplicaId>,
+    placement_key: u64,
 ) -> Result<Vec<ReplicaId>, PlacementError> {
-    place(replicas, &[], replica_count, now, policy, excluded)
+    let request = PlacementRequest {
+        now,
+        policy,
+        excluded,
+        placement_key,
+    };
+    place(replicas, &[], replica_count, &request)
 }
 
 /// Chooses one more replica for a segment that keeps its copies on `kept_replicas`, as when repair replaces a lost
@@ -208,7 +269,8 @@ pub fn choose_replica_set(
 ///
 /// The new replica is the one that spreads the segment widest together with the copies it keeps, and never shares their
 /// narrowest failure domain. A kept replica that is no longer in the registry cannot be taken into account and is
-/// ignored.
+/// ignored. Among replicas that would spread the segment equally, room by tenths and then `placement_key` decide, as
+/// for a new segment, so that the copies of a lost replica are not all rebuilt on one neighbour.
 ///
 /// # Arguments
 ///
@@ -216,6 +278,7 @@ pub fn choose_replica_set(
 /// * `kept_replicas` - The replicas that keep their copy of the segment. None of them is chosen.
 /// * `now` - The current time, to judge which replicas are alive.
 /// * `policy` - Which replicas may receive new segments.
+/// * `placement_key` - The key of the segment that gets the copy: [`placement_key_of_segment`].
 ///
 /// # Returns
 ///
@@ -233,8 +296,10 @@ pub fn choose_replica_set(
 /// # Examples
 ///
 /// ```
-/// use bitacora_meta::{PlacementPolicy, RECORD_SCHEMA_VERSION, ReplicaRecord, choose_additional_replica};
-/// use bitacora_types::{ReplicaId, Timestamp};
+/// use bitacora_meta::{
+///     PlacementPolicy, RECORD_SCHEMA_VERSION, ReplicaRecord, choose_additional_replica, placement_key_of_segment,
+/// };
+/// use bitacora_types::{ReplicaId, SegmentId, StreamId, Timestamp};
 ///
 /// let now = Timestamp::from_unix_millis(100_000);
 /// let replica_named = |name: &str| ReplicaRecord {
@@ -253,7 +318,10 @@ pub fn choose_replica_set(
 ///     ReplicaId::new("r2").expect("a valid identifier"),
 /// ];
 ///
-/// let replacement = choose_additional_replica(&registry, &kept_replicas, now, PlacementPolicy::default())?;
+/// let placement_key = placement_key_of_segment(StreamId::new(7), SegmentId::FIRST);
+///
+/// let replacement =
+///     choose_additional_replica(&registry, &kept_replicas, now, PlacementPolicy::default(), placement_key)?;
 ///
 /// assert_eq!(replacement.to_string(), "r3");
 /// # Ok::<(), bitacora_meta::PlacementError>(())
@@ -263,6 +331,7 @@ pub fn choose_additional_replica(
     kept_replicas: &[ReplicaId],
     now: Timestamp,
     policy: PlacementPolicy,
+    placement_key: u64,
 ) -> Result<ReplicaId, PlacementError> {
     let excluded: BTreeSet<ReplicaId> = kept_replicas.iter().cloned().collect();
     let mut already_placed = Vec::new();
@@ -271,8 +340,87 @@ pub fn choose_additional_replica(
             already_placed.push(replica);
         }
     }
-    let mut chosen = place(replicas, &already_placed, 1, now, policy, &excluded)?;
+    let request = PlacementRequest {
+        now,
+        policy,
+        excluded: &excluded,
+        placement_key,
+    };
+    let mut chosen = place(replicas, &already_placed, 1, &request)?;
     Ok(chosen.pop().expect("placing one replica yields one replica"))
+}
+
+/// The placement key of one segment of a stream that exists.
+///
+/// Every segment of every stream has a key of its own, so the successive segments of one stream are spread over the
+/// replicas that are equally good, as are the segments of different streams.
+///
+/// # Arguments
+///
+/// * `stream_id` - The stream the segment belongs to.
+/// * `segment_id` - The segment: the one being placed, or the one that gets a new copy.
+///
+/// # Returns
+///
+/// The 64-bit FNV-1a hash of sixteen bytes: the stream's identifier and then the segment's, each as eight bytes,
+/// least significant first. The value is fixed: it must not change with the program or the Rust version, because two
+/// programs that place the same segment must agree.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_meta::placement_key_of_segment;
+/// use bitacora_types::{SegmentId, StreamId};
+///
+/// let stream_id = StreamId::new(7);
+///
+/// let first_key = placement_key_of_segment(stream_id, SegmentId::new(1));
+/// let second_key = placement_key_of_segment(stream_id, SegmentId::new(2));
+///
+/// assert_ne!(first_key, second_key);
+/// ```
+#[must_use]
+pub fn placement_key_of_segment(stream_id: StreamId, segment_id: SegmentId) -> u64 {
+    let hashed_stream_id = fnv1a_hash(FNV_OFFSET_BASIS, &stream_id.get().to_le_bytes());
+    fnv1a_hash(hashed_stream_id, &segment_id.get().to_le_bytes())
+}
+
+/// The placement key of the first segment of a stream that is about to be created.
+///
+/// A stream gets its identifier when its record is written, which is after its first segment was placed. Until then
+/// its name is what tells it from other streams.
+///
+/// # Arguments
+///
+/// * `name` - The name the stream will have.
+///
+/// # Returns
+///
+/// The 64-bit FNV-1a hash of the name's UTF-8 bytes. The value is fixed, like [`placement_key_of_segment`].
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_meta::placement_key_of_new_stream;
+///
+/// assert_ne!(placement_key_of_new_stream("orders"), placement_key_of_new_stream("payments"));
+/// ```
+#[must_use]
+pub fn placement_key_of_new_stream(name: &str) -> u64 {
+    fnv1a_hash(FNV_OFFSET_BASIS, name.as_bytes())
+}
+
+/// What one placement is given besides the registry: when it happens, which replicas may be chosen, and what is being
+/// placed.
+struct PlacementRequest<'request> {
+    /// The current time, to judge which replicas are alive.
+    now: Timestamp,
+    /// Which replicas may receive new segments.
+    policy: PlacementPolicy,
+    /// Replicas that must not be chosen whatever their state.
+    excluded: &'request BTreeSet<ReplicaId>,
+    /// What is being placed, which orders replicas that are equally spread and equally full.
+    placement_key: u64,
 }
 
 /// Places `replica_count` copies next to the ones `already_placed`.
@@ -288,11 +436,9 @@ fn place(
     replicas: &[ReplicaRecord],
     already_placed: &[&ReplicaRecord],
     replica_count: usize,
-    now: Timestamp,
-    policy: PlacementPolicy,
-    excluded: &BTreeSet<ReplicaId>,
+    request: &PlacementRequest<'_>,
 ) -> Result<Vec<ReplicaId>, PlacementError> {
-    let mut candidates = eligible_replicas(replicas, now, policy, excluded);
+    let mut candidates = eligible_replicas(replicas, request.now, request.policy, request.excluded);
     if candidates.len() < replica_count {
         return Err(PlacementError::NotEnoughReplicas {
             needed: replica_count,
@@ -302,7 +448,7 @@ fn place(
 
     let mut placed: Vec<&ReplicaRecord> = already_placed.to_vec();
     for _copy in 0..replica_count {
-        let best_position = position_of_the_best_candidate(&candidates, &placed);
+        let best_position = position_of_the_best_candidate(&candidates, &placed, request.placement_key);
         placed.push(candidates.swap_remove(best_position));
     }
     require_separate_narrowest_domains(&placed)?;
@@ -339,12 +485,16 @@ fn eligible_replicas<'registry>(
 ///
 /// Panics if there is no candidate. The caller checked that there are at least as many candidates as copies left to
 /// place.
-fn position_of_the_best_candidate(candidates: &[&ReplicaRecord], placed: &[&ReplicaRecord]) -> usize {
+fn position_of_the_best_candidate(
+    candidates: &[&ReplicaRecord],
+    placed: &[&ReplicaRecord],
+    placement_key: u64,
+) -> usize {
     let mut best_position = None;
     for (position, candidate) in candidates.iter().enumerate() {
         let is_better = match best_position {
             None => true,
-            Some(best) => compare_candidates(candidate, candidates[best], placed) == Ordering::Less,
+            Some(best) => compare_candidates(candidate, candidates[best], placed, placement_key) == Ordering::Less,
         };
         if is_better {
             best_position = Some(position);
@@ -355,18 +505,77 @@ fn position_of_the_best_candidate(candidates: &[&ReplicaRecord], placed: &[&Repl
 
 /// Orders two candidates for the next copy: `Less` means `left` is the better choice.
 ///
-/// The one that shares fewer failure domains with the placed copies wins, widest domain first; then the one with more
-/// free space; then the lower identifier.
-fn compare_candidates(left: &ReplicaRecord, right: &ReplicaRecord, placed: &[&ReplicaRecord]) -> Ordering {
+/// The one that shares fewer failure domains with the placed copies wins, widest domain first; then the one whose disk
+/// is emptier by tenths; then the one with the higher score for `placement_key`; then the lower identifier.
+fn compare_candidates(
+    left: &ReplicaRecord,
+    right: &ReplicaRecord,
+    placed: &[&ReplicaRecord],
+    placement_key: u64,
+) -> Ordering {
     let by_spread = shared_domains(left, placed).cmp(&shared_domains(right, placed));
     if by_spread != Ordering::Equal {
         return by_spread;
     }
-    let by_room = right.free_bytes.cmp(&left.free_bytes);
+    let by_room = used_tenths(left).cmp(&used_tenths(right));
     if by_room != Ordering::Equal {
         return by_room;
     }
+    let left_score = rendezvous_score(placement_key, &left.replica_id);
+    let right_score = rendezvous_score(placement_key, &right.replica_id);
+    let by_score = right_score.cmp(&left_score);
+    if by_score != Ordering::Equal {
+        return by_score;
+    }
     left.replica_id.cmp(&right.replica_id)
+}
+
+/// How full a replica's disk is, in tenths, rounded down: 0 for a disk that is less than 10% full.
+///
+/// Two replicas with the same number are equally roomy as far as placement is concerned.
+fn used_tenths(replica: &ReplicaRecord) -> u8 {
+    replica.used_percent() / ROOM_STEP_PERCENT
+}
+
+/// The score of a replica for one placement key. Among equally good replicas the highest score wins.
+///
+/// The hash is FNV-1a over the eight bytes of the key, least significant first, and then the UTF-8 bytes of the
+/// replica's identifier, put through the final mixing step of the Murmur 3 hash so that every bit of the input changes
+/// every bit of the score. See the file header for why both steps are needed and why the result is fixed.
+fn rendezvous_score(placement_key: u64, replica_id: &ReplicaId) -> u64 {
+    let hashed_key = fnv1a_hash(FNV_OFFSET_BASIS, &placement_key.to_le_bytes());
+    let hashed_key_and_replica = fnv1a_hash(hashed_key, replica_id.as_str().as_bytes());
+    mix_all_bits(hashed_key_and_replica)
+}
+
+/// Continues a 64-bit FNV-1a hash over `bytes`: for each byte, exclusive-or it into the hash, then multiply by the
+/// FNV prime. Start from [`FNV_OFFSET_BASIS`].
+fn fnv1a_hash(hash_so_far: u64, bytes: &[u8]) -> u64 {
+    let mut hash = hash_so_far;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// The final mixing step of the Murmur 3 hash for 64 bits: two rounds of folding the high half into the low half and
+/// multiplying, and a last fold. A change in any bit of `hash` changes about half the bits of the result.
+const fn mix_all_bits(hash: u64) -> u64 {
+    /// The first multiplier of the step.
+    const FIRST_MULTIPLIER: u64 = 0xff51_afd7_ed55_8ccd;
+    /// The second multiplier of the step.
+    const SECOND_MULTIPLIER: u64 = 0xc4ce_b9fe_1a85_ec53;
+    /// How far the high bits are shifted down to be folded into the low ones.
+    const FOLD_SHIFT: u32 = 33;
+
+    let mut mixed = hash;
+    mixed ^= mixed >> FOLD_SHIFT;
+    mixed = mixed.wrapping_mul(FIRST_MULTIPLIER);
+    mixed ^= mixed >> FOLD_SHIFT;
+    mixed = mixed.wrapping_mul(SECOND_MULTIPLIER);
+    mixed ^= mixed >> FOLD_SHIFT;
+    mixed
 }
 
 /// Counts, for each level from widest to narrowest, how many already chosen replicas share `candidate`'s failure domain

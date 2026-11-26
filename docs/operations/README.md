@@ -169,8 +169,10 @@ identity it proposes.
 
 ### Add capacity
 
-Start more replicas, each with its own `replica_id` and true failure domains. New segments go to the
-replicas with the most free space first, so new replicas fill before old ones grow. Sealed segments are
+Start more replicas, each with its own `replica_id` and true failure domains. New segments go first to
+the replicas whose disk is emptier by a tenth or more, so new replicas fill before old ones grow. Among
+replicas that are about as full, streams and their successive segments are spread evenly: every replica
+of a zone gets its share, and none is left idle because another is a little emptier. Sealed segments are
 not moved: there is no rebalancing. Old replicas empty as their segments are tiered to the object store
 and truncated.
 

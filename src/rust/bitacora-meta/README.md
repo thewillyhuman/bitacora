@@ -13,7 +13,8 @@ The metadata store: the one place where bitacora uses consensus.
   (`Revision`, `Condition`, `Mutation`, `TransactionOutcome`).
 - `MemoryKeyValueStore`: the backend for tests and the simulator.
 - Placement: `choose_replica_set` and `choose_additional_replica`, pure functions of the replica
-  registry.
+  registry and of a placement key (`placement_key_of_segment`, `placement_key_of_new_stream`), which
+  spreads segments over replicas that are equally good.
 - `MetadataSnapshot`: the whole store as one object, and how snapshot objects are named.
 
 It does not own a backend for a real cluster (that is `bitacora-meta-etcd`), and it does not decide when

@@ -24,7 +24,8 @@
 //!    reachable good copy.
 //! 2. For each bad copy a **target** is chosen. If the replica that holds the bad copy still answers and is not
 //!    draining, it rebuilds the copy where it is. Otherwise placement picks a new replica that keeps the segment
-//!    spread across failure domains together with the copies that stay.
+//!    spread across failure domains together with the copies that stay. Where several would, the segment's
+//!    placement key decides, so the copies of a lost replica are rebuilt on several replicas and not on one.
 //! 3. The target is asked to repair. It pulls what it lacks from the source, verifying every batch, and answers once
 //!    its copy is complete, flushed and sealed. That can take long, so it has its own time limit.
 //! 4. On success the copy is recorded as good on the target, if the copy in the record is still the bad one the pass
@@ -49,6 +50,7 @@
 
 use bitacora_meta::{
     CopyRecord, CopyState, MetaError, ReplicaRecord, SegmentRecord, StreamRecord, choose_additional_replica,
+    placement_key_of_segment,
 };
 use bitacora_types::replica_api::RepairRequest;
 use bitacora_types::{ReplicaId, SequenceNumber};
@@ -140,7 +142,7 @@ impl Controller {
         report: &mut PassReport,
     ) -> Result<(), MetaError> {
         let segment = bad_copy.segment;
-        let Some(target) = self.repair_target(segment, bad_copy.replica_index, survey) else {
+        let Some(target) = self.repair_target(bad_copy, survey) else {
             return Ok(());
         };
         let request = RepairRequest {
@@ -160,33 +162,35 @@ impl Controller {
         Ok(())
     }
 
-    /// Picks the replica that rebuilds the bad copy at `replica_index`.
+    /// Picks the replica that rebuilds a bad copy.
     ///
     /// # Arguments
     ///
-    /// * `segment` - The segment with the bad copy.
-    /// * `replica_index` - The bad copy's position in the segment's replica set.
+    /// * `bad_copy` - The copy to rebuild, with its segment and its stream.
     /// * `survey` - Which replicas answered and what is registered.
     ///
     /// # Returns
     ///
     /// The replica that holds the bad copy, if it answered the survey and is not draining: it rebuilds in place.
-    /// Otherwise a new replica that keeps the segment spread across failure domains. `None` if placement finds no
-    /// such replica, which is logged.
-    fn repair_target(&self, segment: &SegmentRecord, replica_index: usize, survey: &Survey) -> Option<ReplicaRecord> {
-        let bad_copy = &segment.copies[replica_index];
-        if let Some(holder) = survey.registration(&bad_copy.replica_id)
+    /// Otherwise a new replica that keeps the segment spread across failure domains; among replicas that do so
+    /// equally, the key of the segment decides, so that the copies a lost replica held are rebuilt on several
+    /// replicas and not all on one. `None` if placement finds no such replica, which is logged.
+    fn repair_target(&self, bad_copy: &BadCopy<'_>, survey: &Survey) -> Option<ReplicaRecord> {
+        let segment = bad_copy.segment;
+        let copy_record = &segment.copies[bad_copy.replica_index];
+        if let Some(holder) = survey.registration(&copy_record.replica_id)
             && survey.has_answered(&holder.replica_id)
             && !holder.is_draining
         {
             return Some(holder.clone());
         }
-        let kept_replicas = replicas_of_the_other_copies(segment, replica_index);
+        let kept_replicas = replicas_of_the_other_copies(segment, bad_copy.replica_index);
         let placed = choose_additional_replica(
             &survey.registered_replicas,
             &kept_replicas,
             survey.now,
             self.settings.placement,
+            placement_key_of_segment(bad_copy.stream.stream_id, segment.segment_id),
         );
         match placed {
             Ok(replica_id) => survey.registration(&replica_id).cloned(),

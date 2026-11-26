@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: meta
+note: "Placement spreads streams and their segments over replicas that are equally good. It used to prefer the replica with the most free bytes, however small the difference, so on a real cluster every new stream got the same three of five replicas and the others stayed idle. Free space now counts by tenths of the disk, and a fixed hash of the stream and the segment decides among replicas that are about as full."
+issues: [3]

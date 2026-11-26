@@ -27,6 +27,10 @@
 //! that is spread as widely stays, whichever replicas placement would name: only a wider spread is a reason to
 //! change it.
 //!
+//! Placement is asked with the key of the stream's next segment, the one the standby is for. Replicas that are
+//! equally spread and equally full are ordered by that key, so the standbys of different streams, and the successive
+//! standbys of one stream, go to different replicas of a zone and no replica gets them all.
+//!
 //! In both cases the step writes the fresh set on the condition that the standby in the record is still the one the
 //! step looked at. If a writer consumed the standby in between, or another controller placed one, the write changes
 //! nothing, and the next pass looks again.
@@ -39,7 +43,8 @@
 //! - A standby is only ever replaced as a whole, and only if it is still the one that was judged.
 //! - Placement is a pure function of the registry as surveyed; this step adds no randomness of its own.
 //! - A standby is never replaced by a set of the same spread, so two passes over the same registry agree and the
-//!   standby does not move back and forth.
+//!   standby does not move back and forth. That holds also when placement would now name other replicas, because
+//!   the key, the room or the registry changed: other replicas of the same spread are no reason.
 //! - Placement is asked once per stream and pass. That is a few comparisons per registered replica; its cost on a
 //!   cluster with many thousands of streams was not measured.
 //!
@@ -51,7 +56,9 @@
 
 use std::collections::BTreeSet;
 
-use bitacora_meta::{MetaError, PlacementPolicy, ReplicaRecord, StreamRecord, choose_replica_set, spread_of};
+use bitacora_meta::{
+    MetaError, PlacementPolicy, ReplicaRecord, StreamRecord, choose_replica_set, placement_key_of_segment, spread_of,
+};
 use bitacora_types::{ReplicaId, Timestamp};
 
 use super::{Controller, PassReport, Survey};
@@ -104,7 +111,8 @@ impl Controller {
         Ok(())
     }
 
-    /// Asks placement for a replica set for the next segment of `stream`, from the surveyed registry.
+    /// Asks placement for a replica set for the next segment of `stream`, from the surveyed registry, with the key of
+    /// that segment.
     ///
     /// # Arguments
     ///
@@ -129,6 +137,7 @@ impl Controller {
             survey.now,
             self.settings.placement,
             &no_replica_excluded,
+            placement_key_of_segment(stream.stream_id, stream.next_segment_id),
         );
         match placed {
             Ok(chosen) => Some(chosen),

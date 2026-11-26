@@ -38,7 +38,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use bitacora_meta::{CheckpointRecord, MetaError, PlacementPolicy, RetentionPolicy, StreamRecord, choose_replica_set};
+use bitacora_meta::{
+    CheckpointRecord, MetaError, PlacementPolicy, RetentionPolicy, StreamRecord, choose_replica_set,
+    placement_key_of_new_stream,
+};
 use bitacora_types::{ReplicaId, ReplicationSettings, SequenceNumber};
 
 use crate::context::ClientContext;
@@ -174,6 +177,9 @@ impl StreamAdmin {
     }
 
     /// Chooses the replicas of a new stream's first segment, or `None`, with a warning, if too few are registered.
+    ///
+    /// The stream has no identifier before its record is written, so its name is the placement key: streams that
+    /// are created together are spread over the replicas that are equally good.
     async fn place_first_segment(
         &self,
         name: &str,
@@ -186,6 +192,7 @@ impl StreamAdmin {
             self.context.clock.now(),
             PlacementPolicy::default(),
             &BTreeSet::new(),
+            placement_key_of_new_stream(name),
         );
         match placed {
             Ok(first_replica_set) => Ok(Some(first_replica_set)),
