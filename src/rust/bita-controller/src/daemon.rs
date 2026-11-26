@@ -18,8 +18,9 @@
 //!
 //! # How it works
 //!
-//! [`run`] starts the observability endpoint, wraps the metadata store and the object store in the
-//! decorators that record metrics, builds the controller on them, and hands it to [`run_rounds`].
+//! [`run`] starts the observability endpoint (`start_endpoint`), wraps the metadata store and the object
+//! store in the decorators that record metrics and builds the controller on them (`build_controller`),
+//! and hands it to [`run_rounds`]. When the rounds end it reports not ready and stops the endpoint.
 //!
 //! [`run_rounds`] repeats: run one round, record what it did, rest for the pass interval. The shutdown
 //! signal is noticed while resting and while a round runs. A round that is running when the signal
@@ -51,7 +52,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
-use bitacora_controller::{Controller, Round};
+use bitacora_controller::{Controller, ControllerSettings, Round};
 use bitacora_meta::{KeyValueStore, MetaError, MetadataStore};
 use bitacora_process::{
     InstrumentedArtifactStore, InstrumentedKeyValueStore, MetricsRegistry, Readiness, ShutdownSignal,
@@ -62,6 +63,7 @@ use bitacora_types::{Clock, SystemClock};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 
 use crate::config::ControllerDaemonSettings;
@@ -180,30 +182,10 @@ pub(crate) async fn run(
 ) {
     let metrics_registry = Arc::new(MetricsRegistry::new());
     let readiness = Readiness::new();
-    let (stop_endpoint, endpoint_stop_asked) = oneshot::channel::<()>();
-    let mut endpoint = tokio::spawn(serve_observability(
-        observability_listener,
-        Arc::clone(&metrics_registry),
-        readiness.clone(),
-        async move {
-            // Completes when the sender is used or dropped; both mean "stop".
-            let _sent_or_dropped = endpoint_stop_asked.await;
-        },
-    ));
-
-    let metadata = MetadataStore::new(Arc::new(InstrumentedKeyValueStore::new(
-        environment.key_value_store,
-        &metrics_registry,
-    )));
+    let endpoint = start_endpoint(observability_listener, &metrics_registry, &readiness);
     let identity = settings.controller.identity.clone();
     let pass_interval = settings.controller.pass_interval;
-    let mut controller = Controller::new(metadata, environment.connector, environment.clock, settings.controller);
-    if let Some(object_store) = environment.object_store {
-        controller = controller.with_artifact_store(Arc::new(InstrumentedArtifactStore::new(
-            object_store,
-            &metrics_registry,
-        )));
-    }
+    let controller = build_controller(settings.controller, environment, &metrics_registry);
     let metrics = ControllerMetrics::register(&metrics_registry);
     tracing::info!(%identity, "controller is running");
 
@@ -211,9 +193,60 @@ pub(crate) async fn run(
     tracing::info!(?signal, %identity, "controller is shutting down");
 
     readiness.set_ready(false);
-    drop(stop_endpoint);
-    if timeout(SHUTDOWN_GRACE, &mut endpoint).await.is_err() {
-        endpoint.abort();
+    endpoint.stop_within_the_grace_period().await;
+}
+
+/// The observability endpoint as a task, and the way to ask it to stop.
+struct Endpoint {
+    /// Dropping it asks the endpoint to stop.
+    stop: oneshot::Sender<()>,
+    /// The task that serves `/metrics`, `/healthz` and `/readyz`.
+    task: JoinHandle<std::io::Result<()>>,
+}
+
+impl Endpoint {
+    /// Asks the endpoint to stop and waits for it, but no longer than [`SHUTDOWN_GRACE`]: after that it
+    /// is cut off, together with the requests it was still answering.
+    async fn stop_within_the_grace_period(self) {
+        let Self { stop, mut task } = self;
+        drop(stop);
+        if timeout(SHUTDOWN_GRACE, &mut task).await.is_err() {
+            task.abort();
+        }
+    }
+}
+
+/// Starts the observability endpoint on `listener`, so that `/healthz` answers from the start.
+fn start_endpoint(listener: TcpListener, metrics_registry: &Arc<MetricsRegistry>, readiness: &Readiness) -> Endpoint {
+    let (stop, stop_asked) = oneshot::channel::<()>();
+    let task = tokio::spawn(serve_observability(
+        listener,
+        Arc::clone(metrics_registry),
+        readiness.clone(),
+        async move {
+            // Completes when the sender is used or dropped; both mean "stop".
+            let _sent_or_dropped = stop_asked.await;
+        },
+    ));
+    Endpoint { stop, task }
+}
+
+/// Builds the controller on the metadata store and the object store of `environment`, each wrapped in
+/// the decorator that records its requests in `metrics_registry`.
+fn build_controller(
+    controller_settings: ControllerSettings,
+    environment: Environment,
+    metrics_registry: &MetricsRegistry,
+) -> Controller {
+    let key_value_store = InstrumentedKeyValueStore::new(environment.key_value_store, metrics_registry);
+    let metadata = MetadataStore::new(Arc::new(key_value_store));
+    let controller = Controller::new(metadata, environment.connector, environment.clock, controller_settings);
+    match environment.object_store {
+        Some(object_store) => {
+            let object_store = InstrumentedArtifactStore::new(object_store, metrics_registry);
+            controller.with_artifact_store(Arc::new(object_store))
+        }
+        None => controller,
     }
 }
 

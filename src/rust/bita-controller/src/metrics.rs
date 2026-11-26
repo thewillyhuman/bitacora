@@ -12,6 +12,8 @@
 //!
 //! - [`ControllerMetrics`]: the metrics, registered in the process's registry.
 //! - [`ControllerMetrics::record_round`]: records the outcome of one round.
+//! - `PassCounters`: the part of the metrics that counts what passes did, one counter per number of the
+//!   pass report.
 //!
 //! # How it works
 //!
@@ -40,6 +42,8 @@
 //!
 //! - Every metric here is listed in `docs/operations/metrics.md`; a test fails otherwise.
 //! - Recording never fails and never blocks.
+//! - The two `register` functions are tables: one metric per entry, its name and its help text. They are
+//!   as long as the number of metrics, and nothing else happens in them.
 //!
 //! # See also
 //!
@@ -65,6 +69,13 @@ pub(crate) struct ControllerMetrics {
     pass_duration: DurationHistogram,
     /// Sealed segments with fewer good copies than their stream asks for, as of the last pass.
     segments_missing_copies: Gauge,
+    /// What the passes of this instance did, counted since the process started.
+    pass_counters: PassCounters,
+}
+
+/// What passes did, one counter per number of the pass report. Clones share the same counters.
+#[derive(Clone, Debug)]
+struct PassCounters {
     /// Standby segments placed.
     standbys_placed: Counter,
     /// Copies of sealed segments confirmed complete.
@@ -113,6 +124,42 @@ impl ControllerMetrics {
                 "controller_segments_missing_copies",
                 "Sealed segments with fewer good copies than their stream asks for, as of the last pass",
             ),
+            pass_counters: PassCounters::register(registry),
+        }
+    }
+
+    /// Records the outcome of one round of the controller's loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `outcome` - What `Controller::run_round` returned.
+    /// * `took` - How long the round took.
+    pub(crate) fn record_round(&self, outcome: &Result<Round, MetaError>, took: Duration) {
+        self.rounds.add(1);
+        match outcome {
+            Ok(Round::Led(report)) => {
+                self.leading.set_flag(true);
+                self.pass_duration.observe(took);
+                self.segments_missing_copies
+                    .set_unsigned(report.segments_missing_copies as u64);
+                self.pass_counters.add(report);
+            }
+            Ok(Round::StoodBy) => {
+                self.leading.set_flag(false);
+                self.segments_missing_copies.set(0);
+            }
+            Err(_meta_error) => {
+                self.round_failures.add(1);
+                self.leading.set_flag(false);
+            }
+        }
+    }
+}
+
+impl PassCounters {
+    /// Registers the counters of the pass report in `registry`, after the metrics of the rounds.
+    fn register(registry: &MetricsRegistry) -> Self {
+        Self {
             standbys_placed: registry.counter("controller_standbys_placed", "Standby segments placed"),
             copies_confirmed: registry.counter(
                 "controller_copies_confirmed",
@@ -153,35 +200,8 @@ impl ControllerMetrics {
         }
     }
 
-    /// Records the outcome of one round of the controller's loop.
-    ///
-    /// # Arguments
-    ///
-    /// * `outcome` - What `Controller::run_round` returned.
-    /// * `took` - How long the round took.
-    pub(crate) fn record_round(&self, outcome: &Result<Round, MetaError>, took: Duration) {
-        self.rounds.add(1);
-        match outcome {
-            Ok(Round::Led(report)) => {
-                self.leading.set_flag(true);
-                self.pass_duration.observe(took);
-                self.record_pass(report);
-            }
-            Ok(Round::StoodBy) => {
-                self.leading.set_flag(false);
-                self.segments_missing_copies.set(0);
-            }
-            Err(_meta_error) => {
-                self.round_failures.add(1);
-                self.leading.set_flag(false);
-            }
-        }
-    }
-
-    /// Adds what one pass did to the counters and stores what it found in the gauge.
-    fn record_pass(&self, report: &PassReport) {
-        self.segments_missing_copies
-            .set_unsigned(report.segments_missing_copies as u64);
+    /// Adds what one pass did to the counters.
+    fn add(&self, report: &PassReport) {
         self.standbys_placed.add(report.standbys_placed as u64);
         self.copies_confirmed.add(report.copies_confirmed as u64);
         self.copies_marked_bad.add(report.copies_marked_bad as u64);

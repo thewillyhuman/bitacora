@@ -200,54 +200,14 @@ impl ControllerConfigFile {
     /// * `placement.refuse_at_used_percent` that is not between 1 and 100;
     /// * `replica_lost_after_seconds` that is not longer than the liveness window.
     pub(crate) fn validate(self) -> Result<ControllerDaemonSettings, InvalidConfig> {
-        if self.identity.is_empty() || self.identity.chars().any(char::is_whitespace) {
-            return Err(InvalidConfig::because(
-                "identity",
-                format!(
-                    "{:?} is not a name; use one word per instance, for example `controller-a`",
-                    self.identity
-                ),
-            ));
-        }
-        let Ok(metrics_listen_address) = self.metrics_listen_address.parse::<SocketAddr>() else {
-            return Err(InvalidConfig::because(
-                "metrics_listen_address",
-                format!(
-                    "{:?} is not `ip:port`, for example `0.0.0.0:9101`",
-                    self.metrics_listen_address
-                ),
-            ));
-        };
-        if self.pass_interval_milliseconds == 0 {
-            return Err(InvalidConfig::because(
-                "pass_interval_milliseconds",
-                "it is 0; a controller that never rests would flood the metadata store",
-            ));
-        }
-        let pass_interval = Duration::from_millis(self.pass_interval_milliseconds);
+        check_identity(&self.identity)?;
+        let metrics_listen_address = parse_metrics_listen_address(&self.metrics_listen_address)?;
+        let pass_interval = parse_pass_interval(self.pass_interval_milliseconds)?;
         let leadership_duration = Duration::from_secs(self.leadership_duration_seconds);
-        if leadership_duration < pass_interval * FEWEST_PASS_INTERVALS_PER_LEADERSHIP {
-            return Err(InvalidConfig::because(
-                "leadership_duration_seconds",
-                format!(
-                    "{leadership_duration:?} is shorter than {FEWEST_PASS_INTERVALS_PER_LEADERSHIP} \
-                     pass intervals of {pass_interval:?}; a leader that is resting between two \
-                     passes would lose the leadership"
-                ),
-            ));
-        }
+        check_leadership_outlasts_a_rest(leadership_duration, pass_interval)?;
         let placement = self.placement.validate()?;
         let replica_lost_after = Duration::from_secs(self.replica_lost_after_seconds);
-        if replica_lost_after <= placement.liveness_window {
-            return Err(InvalidConfig::because(
-                "replica_lost_after_seconds",
-                format!(
-                    "{replica_lost_after:?} is not longer than the liveness window of {:?}; a \
-                     replica that restarts would have its copies re-created elsewhere",
-                    placement.liveness_window
-                ),
-            ));
-        }
+        check_replicas_are_given_up_late(replica_lost_after, placement.liveness_window)?;
         Ok(ControllerDaemonSettings {
             metrics_listen_address,
             cluster: self.cluster,
@@ -264,6 +224,76 @@ impl ControllerConfigFile {
             },
         })
     }
+}
+
+/// Checks that the instance's identity is one word, which is what the leader record and the logs show.
+fn check_identity(identity: &str) -> Result<(), InvalidConfig> {
+    if identity.is_empty() || identity.chars().any(char::is_whitespace) {
+        return Err(InvalidConfig::because(
+            "identity",
+            format!("{identity:?} is not a name; use one word per instance, for example `controller-a`"),
+        ));
+    }
+    Ok(())
+}
+
+/// Parses the address to serve the observability endpoint on, which must be an IP address and a port.
+fn parse_metrics_listen_address(address: &str) -> Result<SocketAddr, InvalidConfig> {
+    match address.parse::<SocketAddr>() {
+        Ok(socket_address) => Ok(socket_address),
+        Err(_not_an_address) => Err(InvalidConfig::because(
+            "metrics_listen_address",
+            format!("{address:?} is not `ip:port`, for example `0.0.0.0:9101`"),
+        )),
+    }
+}
+
+/// Converts the rest between two passes, which must not be zero.
+fn parse_pass_interval(pass_interval_milliseconds: u64) -> Result<Duration, InvalidConfig> {
+    if pass_interval_milliseconds == 0 {
+        return Err(InvalidConfig::because(
+            "pass_interval_milliseconds",
+            "it is 0; a controller that never rests would flood the metadata store",
+        ));
+    }
+    Ok(Duration::from_millis(pass_interval_milliseconds))
+}
+
+/// Checks that the leadership lasts at least [`FEWEST_PASS_INTERVALS_PER_LEADERSHIP`] pass intervals, so
+/// that a leader keeps it while it rests between two passes.
+fn check_leadership_outlasts_a_rest(
+    leadership_duration: Duration,
+    pass_interval: Duration,
+) -> Result<(), InvalidConfig> {
+    if leadership_duration < pass_interval * FEWEST_PASS_INTERVALS_PER_LEADERSHIP {
+        return Err(InvalidConfig::because(
+            "leadership_duration_seconds",
+            format!(
+                "{leadership_duration:?} is shorter than {FEWEST_PASS_INTERVALS_PER_LEADERSHIP} \
+                 pass intervals of {pass_interval:?}; a leader that is resting between two \
+                 passes would lose the leadership"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that a replica is given up for lost only after it has counted as dead for a while: a replica
+/// that merely restarts must not have its copies re-created elsewhere.
+fn check_replicas_are_given_up_late(
+    replica_lost_after: Duration,
+    liveness_window: Duration,
+) -> Result<(), InvalidConfig> {
+    if replica_lost_after <= liveness_window {
+        return Err(InvalidConfig::because(
+            "replica_lost_after_seconds",
+            format!(
+                "{replica_lost_after:?} is not longer than the liveness window of {liveness_window:?}; a \
+                 replica that restarts would have its copies re-created elsewhere"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 impl PlacementConfig {
