@@ -73,8 +73,8 @@ func Start(t testing.TB, options Options) *Cluster {
 	readinessURLs := make([]string, 0, replicaCount)
 	for number := range replicaCount {
 		name := fmt.Sprintf("replica-%d", number)
-		serviceAddress := freeAddress(t)
-		observabilityAddress := freeAddress(t)
+		serviceAddress := FreeAddress(t)
+		observabilityAddress := FreeAddress(t)
 		configPath := filepath.Join(directory, name+".toml")
 		// What an operator would write, with a registration every second
 		// and small segment files.
@@ -89,7 +89,7 @@ func Start(t testing.TB, options Options) *Cluster {
 		readinessURLs = append(readinessURLs, "http://"+observabilityAddress+"/readyz")
 	}
 
-	controllerObservabilityAddress := freeAddress(t)
+	controllerObservabilityAddress := FreeAddress(t)
 	tiering := ""
 	if options.IsTieringAtOnce {
 		tiering = "tiering_delay_seconds = 0\nhot_read_window_seconds = 0\n"

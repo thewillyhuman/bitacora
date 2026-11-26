@@ -3,7 +3,6 @@ package metadata
 import (
 	"context"
 	"errors"
-	"net"
 	"slices"
 	"sync"
 	"testing"
@@ -171,13 +170,8 @@ func TestOnlyOneOfTwoWritersClaimsAnEpochOnEtcd(t *testing.T) {
 }
 
 func TestAnEtcdThatCannotBeReachedIsUnavailable(t *testing.T) {
-	// A port nobody listens on: take one and give it back.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	endpoint := "http://" + listener.Addr().String()
-	_ = listener.Close()
+	// An address nobody listens on, and that no other test is given.
+	endpoint := "http://" + testcluster.FreeAddress(t)
 	client, err := clientv3.New(clientv3.Config{Endpoints: []string{endpoint}})
 	if err != nil {
 		t.Fatalf("clientv3.New: %v", err)

@@ -17,6 +17,11 @@ export BITA_DEV_STATE="${state}"
 # ports from its base, so the bases are forty apart: two copies of this test
 # that start at the same moment have neighbouring process numbers, and
 # their ranges must not overlap.
+#
+# The bases lie between 20000 and 28999. The other tests that start
+# programs stay out of that range: the Rust tests take their ports from
+# 29000 to 30849 (src/rust/bitacora-testports) and the Go tests from 30850
+# to 32699 (src/go/internal/testcluster/ports.go).
 export BITA_DEV_BASE_PORT="$((20000 + ($$ % 225) * 40))"
 
 current_step="nothing yet"

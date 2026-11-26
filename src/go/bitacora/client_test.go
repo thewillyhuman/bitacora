@@ -3,7 +3,6 @@ package bitacora
 import (
 	"context"
 	"errors"
-	"net"
 	"os"
 	"testing"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/thewillyhuman/bitacora/src/go/internal/frame"
 	"github.com/thewillyhuman/bitacora/src/go/internal/metadata"
 	"github.com/thewillyhuman/bitacora/src/go/internal/replica"
+	"github.com/thewillyhuman/bitacora/src/go/internal/testcluster"
 )
 
 func TestConnectNeedsAnEtcdEndpoint(t *testing.T) {
@@ -23,13 +23,8 @@ func TestConnectNeedsAnEtcdEndpoint(t *testing.T) {
 // connectToNothing returns a client for an etcd endpoint nobody listens on.
 func connectToNothing(t *testing.T) *Client {
 	t.Helper()
-	// A port nobody listens on: take one and give it back.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	endpoint := "http://" + listener.Addr().String()
-	_ = listener.Close()
+	// An address nobody listens on, and that no other test is given.
+	endpoint := "http://" + testcluster.FreeAddress(t)
 
 	client, err := Connect(Config{EtcdEndpoints: []string{endpoint}, RequestTimeout: 200 * time.Millisecond})
 	if err != nil {

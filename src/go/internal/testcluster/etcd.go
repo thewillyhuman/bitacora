@@ -9,8 +9,8 @@ func StartEtcd(t testing.TB) string {
 	t.Helper()
 	program := binary(t, EtcdBinaryVariable)
 	directory := t.TempDir()
-	clientURL := "http://" + freeAddress(t)
-	peerURL := "http://" + freeAddress(t)
+	clientURL := "http://" + FreeAddress(t)
+	peerURL := "http://" + FreeAddress(t)
 	process := start(t, directory, "etcd", program,
 		"--name", "test",
 		"--data-dir", directory+"/data",

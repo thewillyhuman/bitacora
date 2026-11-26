@@ -47,6 +47,7 @@ go_test(
         "//src/go/internal/frame",
         "//src/go/internal/metadata",
         "//src/go/internal/replica",
+        "//src/go/internal/testcluster",
         "//src/go/internal/wire",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",

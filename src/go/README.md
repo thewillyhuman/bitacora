@@ -24,7 +24,7 @@ One Go module, `github.com/thewillyhuman/bitacora/src/go`.
 | `internal/tiered/` | The footer and block index of a segment in the object store |
 | `internal/metadata/` | The records in etcd, their keys, and the conditional writes that change them |
 | `internal/replica/` | The replica service from the caller's side: typed requests and refusals |
-| `internal/testcluster/` | Starts etcd and the Rust daemons for tests |
+| `internal/testcluster/` | Starts etcd and the Rust daemons for tests, and hands out the ports they listen on |
 
 Dependencies point downwards only: `metadata` and `frame` know nothing of
 gRPC, `replica` knows nothing of etcd, and only `bitacora` knows both.
@@ -33,6 +33,13 @@ The tests of `bitacora` run against a metadata store in memory and fake
 replicas on loopback ports (`fakereplica_test.go`), which follow the
 replica's rules and fail when a test tells them to. `interop` runs the same
 client against the real thing.
+
+A program that a test starts must be told its port. Those ports come from
+`internal/testcluster/ports.go`, which claims blocks of the range 30850 to
+32699 for the test process, so that tests running in parallel are never
+given the same port. The Rust tests do the same in a range of their own
+(29000 to 30849, `src/rust/bitacora-testports`), and so does
+`development/cluster_test.sh` (20000 to 28999).
 
 ## Building and testing
 

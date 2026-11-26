@@ -1,8 +1,8 @@
 // Package testcluster starts the real programs that tests of the Go client
 // talk to: etcd, the replica daemon, the controller daemon and the bita
-// command-line tools. Everything listens on loopback ports and keeps its
-// files in the test's temporary directory, and is stopped when the test
-// ends.
+// command-line tools. Everything listens on loopback ports that no other
+// test is given (see ports.go), keeps its files in the test's temporary
+// directory, and is stopped when the test ends.
 //
 // The programs are found through environment variables that the Bazel test
 // targets set. Under plain `go test` they are not set and the test is
@@ -12,7 +12,6 @@ package testcluster
 import (
 	"bytes"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -142,20 +141,6 @@ func (process *Process) logTail() []byte {
 		content = content[len(content)-tailBytes:]
 	}
 	return bytes.TrimSpace(content)
-}
-
-// freeAddress returns a loopback "host:port" that nothing listens on now.
-// Another process could take the port before the caller does; tests accept
-// that small chance, as there is no way to hand a listening port to a
-// program that opens its own.
-func freeAddress(t testing.TB) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("cannot find a free port: %v", err)
-	}
-	defer listener.Close()
-	return listener.Addr().String()
 }
 
 // waitUntilHealthy waits until an HTTP GET of url answers 200, which is how

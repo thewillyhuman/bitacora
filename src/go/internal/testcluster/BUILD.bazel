@@ -1,13 +1,28 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
-# Starts the real programs that tests of the Go client talk to. The test
-# targets that use it name the programs in their `data` and `env`.
+# Starts the real programs that tests of the Go client talk to, and hands
+# out the loopback ports they listen on. The test targets that use it name
+# the programs in their `data` and `env`.
 go_library(
     name = "testcluster",
     testonly = True,
-    srcs = glob(["*.go"]),
+    srcs = [
+        "cluster.go",
+        "etcd.go",
+        "ports.go",
+        "process.go",
+    ],
     importpath = "github.com/thewillyhuman/bitacora/src/go/internal/testcluster",
     visibility = ["//src/go:__subpackages__"],
+)
+
+# How ports are claimed. It starts no program, only listens on loopback
+# ports for a moment.
+go_test(
+    name = "testcluster_test",
+    size = "small",
+    srcs = ["ports_test.go"],
+    embed = [":testcluster"],
 )
 
 filegroup(

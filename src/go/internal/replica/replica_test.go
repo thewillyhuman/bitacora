@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/thewillyhuman/bitacora/src/go/internal/frame"
+	"github.com/thewillyhuman/bitacora/src/go/internal/testcluster"
 	"github.com/thewillyhuman/bitacora/src/go/internal/wire"
 )
 
@@ -277,13 +278,8 @@ func TestAResponseWithoutAnOutcomeIsNoAnswer(t *testing.T) {
 }
 
 func TestAReplicaThatCannotBeReachedIsUnavailable(t *testing.T) {
-	// A port nobody listens on: take one and give it back.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
+	// An address nobody listens on, and that no other test is given.
+	address := testcluster.FreeAddress(t)
 
 	connector := NewConnector()
 	t.Cleanup(func() { _ = connector.Close() })

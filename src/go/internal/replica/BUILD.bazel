@@ -24,6 +24,7 @@ go_test(
     embed = [":replica"],
     deps = [
         "//src/go/internal/frame",
+        "//src/go/internal/testcluster",
         "//src/go/internal/wire",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//metadata",
