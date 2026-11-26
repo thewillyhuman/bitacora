@@ -145,7 +145,7 @@ write quorum.
   longer than the daemons' shutdown; the protections are on. Where `systemd-analyze` is installed (on
   Linux), `systemd-analyze verify` also reads every unit and anything it says fails the test; the
   last line of the test log says whether it ran.
-- `//src/systemd:units_checker_test` hands the same checker a unit with seven known mistakes and
+- `//src/systemd:units_rejection_test` hands the same checker a unit with seven known mistakes and
   requires it to fail and to name each one, so that the checker cannot rot into one that passes
   everything.
 - `//src/systemd:shellcheck_test` lints the scripts.

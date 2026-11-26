@@ -11,8 +11,8 @@
 # Usage: units_test.sh <package.tar.gz> [<replacement unit>]
 #
 # A replacement unit takes the place of the packaged unit of the same name
-# before anything is checked. The test of this test uses it to hand in a
-# unit with known mistakes.
+# before anything is checked. //src/systemd:units_rejection_test uses it to
+# hand in a unit with known mistakes.
 set -euo pipefail
 
 package="${1:?usage: units_test.sh <package.tar.gz> [<replacement unit>]}"

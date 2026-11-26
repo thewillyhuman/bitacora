@@ -5,7 +5,10 @@ aliases here pick the one for the platform at hand, and fail with a clear
 message on any other.
 """
 
-exports_files(["shellcheck_test.sh"])
+exports_files([
+    "rejection_test.sh",
+    "shellcheck_test.sh",
+])
 
 config_setting(
     name = "macos_arm64",

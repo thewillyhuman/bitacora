@@ -15,3 +15,7 @@ line here. To move to a new release, change the URLs and checksums of all three 
 `defs.bzl` has the test rules built on these programs:
 
 - `shellcheck_test(name, srcs)` lints shell scripts. Every package that has scripts declares one.
+- `rejection_test(name, checker, args, data, findings)` tests a checker script: it runs the checker on
+  an input that was broken on purpose and requires it to fail and to name every mistake. Every checker
+  of deployment files has one, because a checker that accepts everything looks exactly like one that
+  works.

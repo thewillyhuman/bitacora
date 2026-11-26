@@ -1,7 +1,7 @@
 """systemd units for the daemons, and the archive that installs them on a machine."""
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//hack/tools:defs.bzl", "shellcheck_test")
+load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
 
 # What the archive installs: mode, file, and where it goes under /.
 #
@@ -60,19 +60,25 @@ genrule(
 )
 
 # The checker must fail on the broken unit and name every mistake in it.
-sh_test(
-    name = "units_checker_test",
-    size = "small",
-    srcs = ["units_checker_test.sh"],
+rejection_test(
+    name = "units_rejection_test",
     args = [
-        "$(rootpath units_test.sh)",
         "$(rootpath :package)",
         "$(rootpath :broken_replica_unit)",
     ],
+    checker = "units_test.sh",
     data = [
-        "units_test.sh",
         ":broken_replica_unit",
         ":package",
+    ],
+    findings = [
+        "unknown directive NoNewPrivilges",
+        "NoNewPrivileges is not switched on",
+        "has no option --verbose",
+        "the daemon runs as root",
+        "exit code 2, a wrong configuration, would be restarted for ever",
+        "TimeoutStopSec is not longer than",
+        "outside /var/lib/elsewhere",
     ],
 )
 
@@ -80,7 +86,6 @@ shellcheck_test(
     name = "shellcheck_test",
     srcs = [
         "package.sh",
-        "units_checker_test.sh",
         "units_test.sh",
     ],
 )

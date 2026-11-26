@@ -13,6 +13,14 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "rejection_test_test",
+    size = "small",
+    srcs = ["tests/rejection_test_test.sh"],
+    args = ["$(rootpath //hack/tools:rejection_test.sh)"],
+    data = ["//hack/tools:rejection_test.sh"],
+)
+
 shellcheck_test(
     name = "shellcheck_test",
     srcs = [
@@ -21,6 +29,8 @@ shellcheck_test(
         "commit.sh",
         "create_release.sh",
         "tests/create_release_test.sh",
+        "tests/rejection_test_test.sh",
+        "//hack/tools:rejection_test.sh",
         "//hack/tools:shellcheck_test.sh",
     ],
 )
