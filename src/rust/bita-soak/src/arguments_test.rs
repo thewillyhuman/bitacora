@@ -43,17 +43,9 @@ fn no_nemesis() -> NemesisSettings {
     }
 }
 
-/// How the tests have cuts checked: the values do not matter here, only that they are passed through.
-const CUT_CHECK: CutCheckSettings = CutCheckSettings {
-    quiet_period: Duration::from_secs(15),
-    time_limit: Duration::from_secs(45),
-};
-
 /// The nemesis that `options` ask for.
 fn nemesis_of(options: &[&str]) -> NemesisSettings {
-    parse(options)
-        .expect("a valid command line")
-        .nemesis_settings(CUT_CHECK)
+    parse(options).expect("a valid command line").nemesis_settings()
 }
 
 /// The labels `pairs`, as a selector holds them.
@@ -269,9 +261,38 @@ fn kind_of_cut_that_was_not_in_effect_is_given_up_unless_asked_otherwise() {
     assert!(nemesis_of(&["--retry-cuts-not-in-effect"]).retries_cuts_not_in_effect);
 }
 
+/// The chart's replicas register every five seconds: three missed renewals are fifteen seconds, nine are
+/// forty-five.
 #[test]
-fn way_cuts_are_checked_is_the_one_handed_in() {
-    assert_eq!(nemesis_of(&[]).cut_check, CUT_CHECK);
+fn cut_counts_after_three_missed_renewals_and_is_given_nine_by_default() {
+    let nemesis = nemesis_of(&[]);
+
+    assert_eq!(
+        nemesis.cut_check,
+        CutCheckSettings {
+            quiet_period: Duration::from_secs(15),
+            time_limit: Duration::from_secs(45),
+        }
+    );
+}
+
+/// With replicas that register every twenty seconds, fifteen seconds of silence would prove nothing.
+#[test]
+fn check_of_a_cut_follows_the_registration_interval_of_the_replicas() {
+    let nemesis = nemesis_of(&["--registration-interval-seconds", "20"]);
+
+    assert_eq!(
+        nemesis.cut_check,
+        CutCheckSettings {
+            quiet_period: Duration::from_mins(1),
+            time_limit: Duration::from_mins(3),
+        }
+    );
+}
+
+#[test]
+fn registration_interval_of_no_time_is_refused() {
+    assert!(parse(&["--registration-interval-seconds", "0"]).is_err());
 }
 
 #[test]

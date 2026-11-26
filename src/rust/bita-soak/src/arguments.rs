@@ -46,6 +46,14 @@ use crate::round::RoundSettings;
 use crate::soak::SoakSettings;
 use crate::workload::WorkloadSettings;
 
+/// How many renewals of its registration a replica must miss in a row for a network cut to count. One could be
+/// late; three in a row are a replica that cannot reach etcd.
+const MISSED_RENEWALS_OF_A_CUT: u32 = 3;
+
+/// How many registration intervals a network cut is given to silence the replicas behind it. A network plugin
+/// needs a moment to apply a policy; one that has not after this long is not going to.
+const RENEWALS_A_CUT_IS_GIVEN: u32 = 9;
+
 /// Everything written after `bita-soak` on a command line.
 #[derive(Clone, Debug, PartialEq, Eq, Parser)]
 #[command(
@@ -136,6 +144,12 @@ pub(crate) struct Arguments {
     #[arg(long, default_value_t = 30)]
     pub(crate) cut_seconds: u64,
 
+    /// How often a replica renews its registration in etcd, in seconds, at least one: the chart's
+    /// `replica.registrationIntervalSeconds`. A network cut counts once the replicas behind it have missed three
+    /// renewals in a row, and is given nine intervals to get there.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) registration_interval_seconds: u64,
+
     /// Keep trying a kind of network cut that was seen not to be in effect. Without this, such a kind is given up
     /// for the rest of the run. Either way a cut counts only if it was seen to be in effect.
     #[arg(long)]
@@ -211,24 +225,26 @@ impl Arguments {
 
     /// Works out what the nemesis of every round does.
     ///
-    /// # Arguments
-    ///
-    /// * `cut_check` - How a network cut is checked before it counts.
-    ///
     /// # Returns
     ///
-    /// The settings. With `--no-faults` they name no kind of fault.
-    pub(crate) fn nemesis_settings(&self, cut_check: CutCheckSettings) -> NemesisSettings {
+    /// The settings. With `--no-faults` they name no kind of fault. A network cut is checked against the
+    /// registration interval of the replicas: [`MISSED_RENEWALS_OF_A_CUT`] intervals of silence make a cut, within
+    /// [`RENEWALS_A_CUT_IS_GIVEN`] intervals.
+    pub(crate) fn nemesis_settings(&self) -> NemesisSettings {
         let kinds = if self.no_faults {
             Vec::new()
         } else {
             self.faults.clone()
         };
+        let registration_interval = Duration::from_secs(self.registration_interval_seconds);
         NemesisSettings {
             kinds,
             fault_interval: Duration::from_secs(self.fault_interval_seconds),
             cut_duration: Duration::from_secs(self.cut_seconds),
-            cut_check,
+            cut_check: CutCheckSettings {
+                quiet_period: registration_interval * MISSED_RENEWALS_OF_A_CUT,
+                time_limit: registration_interval * RENEWALS_A_CUT_IS_GIVEN,
+            },
             retries_cuts_not_in_effect: self.retry_cuts_not_in_effect,
         }
     }

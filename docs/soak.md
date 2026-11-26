@@ -53,6 +53,7 @@ done: the checker accepts such a record in the stream and accepts its absence.
 | `--no-faults` | off | Inject no faults: rounds are plain workloads, judged. The tool then needs no access to the Kubernetes API. |
 | `--fault-interval-seconds <SECONDS>` | `60` | How long the nemesis waits between two faults. |
 | `--cut-seconds <SECONDS>` | `30` | How long a network cut stays in place once it was seen to be in effect. |
+| `--registration-interval-seconds <SECONDS>` | `5` | How often a replica renews its registration in etcd: the chart's `replica.registrationIntervalSeconds`. The check of a network cut is timed by it. |
 | `--retry-cuts-not-in-effect` | off | Keep trying a kind of network cut that was seen not to be in effect, instead of giving the kind up for the rest of the run. |
 | `--namespace <NAMESPACE>` | the tool's own | The namespace the cluster's pods run in. |
 | `--replica-selector <LABELS>` | `app.kubernetes.io/name=bitacora,app.kubernetes.io/component=replica` | The labels every replica pod carries, as `name=value` pairs separated by commas. |
@@ -64,7 +65,8 @@ done: the checker accepts such a record in the stream and accepts its absence.
 | `--seed <NUMBER>` | start time in milliseconds | The seed of every random choice of the run. It is printed to standard error when the run starts. |
 | `--drill-lost-record` | off | A drill: the first round claims a commit that never happened. See below. |
 
-`--seconds`, `--round-seconds`, `--streams`, `--rate` and `--fault-interval-seconds` must be at least 1.
+`--seconds`, `--round-seconds`, `--streams`, `--rate`, `--fault-interval-seconds` and
+`--registration-interval-seconds` must be at least 1.
 The tool reads nothing but its command line: no environment variable, no configuration file. The one
 exception is what every pod is given to reach the Kubernetes API, which the tool uses unless it runs with
 `--no-faults`.
@@ -116,11 +118,11 @@ So the tool checks every cut before it counts. A replica that is cut off cannot 
 registration there stops being renewed. After creating the policies the tool reads the registry once a
 second:
 
-- If no replica behind the cut has renewed its registration for 15 seconds (three registration intervals
-  of the chart's default), the cut is in effect. Only now is it counted, recorded in the histories, and
+- If no replica behind the cut has renewed its registration for three registration intervals (15 seconds
+  with the chart's default), the cut is in effect. Only now is it counted, recorded in the histories, and
   left in place for `--cut-seconds`.
-- If 45 seconds pass and a replica behind the cut is still renewing, the cut is not in effect. The tool
-  deletes the policies, records nothing, counts nothing, and says so on standard error:
+- If nine intervals pass (45 seconds) and a replica behind the cut is still renewing, the cut is not in
+  effect. The tool deletes the policies, records nothing, counts nothing, and says so on standard error:
   `bita-soak: network cuts are not enforced on this cluster: ...`. The kind is given up for the rest of
   the run, and every line the tool prints from then on lists it under `faults_disabled` with the reason.
   With `--retry-cuts-not-in-effect` the kind is tried again at a later interval instead; a cut still
@@ -128,10 +130,15 @@ second:
 - If the registry cannot be read, or the tool is told to stop, the tool has no evidence either way: the
   cut is removed and not counted, and the kind is tried again.
 
-On such a cluster the kills are the faults that run. A `faults_disabled` that is not empty means: this run
-says nothing about the kinds it lists.
+On a cluster that does not enforce policies the kills are the faults that run. A `faults_disabled` that is
+not empty means: this run says nothing about the kinds it lists.
 
-Keep `--cut-seconds` plus the 45 seconds of the check well below the controller's
+The check is only as good as the interval it is timed by. If the chart's
+`replica.registrationIntervalSeconds` was raised, pass the same number as
+`--registration-interval-seconds`: with replicas that register every minute, fifteen seconds of silence
+would prove nothing.
+
+Keep `--cut-seconds` plus the nine intervals of the check well below the controller's
 `replicaLostAfterSeconds` (300 by default). A replica that is cut off for longer is given up, and its
 copies are rebuilt elsewhere.
 

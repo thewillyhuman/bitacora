@@ -68,7 +68,6 @@ use tokio::time::Instant;
 
 use crate::arguments::Arguments;
 use crate::cluster::SoakedCluster;
-use crate::cut_check::CutCheckSettings;
 use crate::faults::{FaultInjector, NoFaults};
 use crate::kubernetes_api::ApiClient;
 use crate::kubernetes_faults::{KubernetesFaults, SERVICE_ACCOUNT_DIRECTORY, ServiceAccount};
@@ -108,13 +107,6 @@ const EXIT_VIOLATED: u8 = 3;
 const EXIT_NOT_RECOVERED: u8 = 4;
 /// The exit code of a run that was told to stop.
 const EXIT_INTERRUPTED: u8 = 5;
-/// How a network cut is checked before it counts. The chart's replicas renew their registration every five
-/// seconds, so fifteen seconds without a renewal are three missed in a row; a cut that has not silenced its
-/// replicas after forty-five is not going to.
-const CUT_CHECK: CutCheckSettings = CutCheckSettings {
-    quiet_period: Duration::from_secs(15),
-    time_limit: Duration::from_secs(45),
-};
 /// The environment variable in which every pod finds the host of the API server.
 const API_SERVER_HOST_VARIABLE: &str = "KUBERNETES_SERVICE_HOST";
 /// The environment variable in which every pod finds the port of the API server.
@@ -167,7 +159,7 @@ fn print_usage_error(usage_error: &clap::Error) -> ExitCode {
 async fn run(arguments: &Arguments) -> Result<RunVerdict, String> {
     let faults = fault_injector(arguments)?;
     let cluster = connect(arguments, faults).await?;
-    let nemesis = arguments.nemesis_settings(CUT_CHECK);
+    let nemesis = arguments.nemesis_settings();
     let settings = arguments.soak_settings(SystemClock.now().unix_millis(), nemesis);
     let metrics = SoakMetrics::new();
     let mut stop = listen_for_shutdown()?;
