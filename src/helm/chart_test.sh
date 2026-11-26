@@ -18,6 +18,7 @@
 #   REPLICA_CONFIG          the example configuration of bita-replica
 #   CONTROLLER_CONFIG       the example configuration of bita-controller
 #   TRYOUT_VALUES           development/kubernetes/values.yaml
+#   TRYOUT_S3_VALUES        development/kubernetes/values-s3.yaml
 #   BITA_REPLICA_BINARY     the two daemons, as Bazel builds them
 #   BITA_CONTROLLER_BINARY
 #
@@ -27,7 +28,7 @@
 set -euo pipefail
 
 : "${HELM:?}" "${CHART:?}" "${MODULE:?}" "${DOCKERFILE:?}" "${REPLICA_CONFIG:?}" "${CONTROLLER_CONFIG:?}"
-: "${TRYOUT_VALUES:?}" "${BITA_REPLICA_BINARY:?}" "${BITA_CONTROLLER_BINARY:?}"
+: "${TRYOUT_VALUES:?}" "${TRYOUT_S3_VALUES:?}" "${BITA_REPLICA_BINARY:?}" "${BITA_CONTROLLER_BINARY:?}"
 
 chart="$(dirname "${CHART}")"
 scratch="${TEST_TMPDIR:?the test needs a temporary directory}"
@@ -409,6 +410,17 @@ case_tryout() {
     expect_absent replica-configmap.yaml "object_store"
 }
 
+# The same with the values that add the object store of development/kubernetes: the daemons are pointed at
+# it, read its access key from the Secret, and tier within minutes.
+case_tryout_with_object_store() {
+    render tryout-s3 --values "${TRYOUT_VALUES}" --values "${TRYOUT_S3_VALUES}" --set image.tag=0.1.0-rc.1 || return 0
+    check_always
+    expect replica-configmap.yaml 'kind = "s3"' 'bucket = "bitacora-segments"' 'endpoint = "http://s3:7070"' \
+        "allow_http = true"
+    expect replica-statefulset.yaml "name: bitacora-s3" "key: AWS_ACCESS_KEY_ID" "key: AWS_SECRET_ACCESS_KEY"
+    expect controller-configmap.yaml "tiering_delay_seconds = 60" "hot_read_window_seconds = 120"
+}
+
 # Checks values.yaml against the templates, both ways: every value is
 # explained and used, and every value a template uses exists. A template that
 # misspells a value renders an empty string without any complaint from helm.
@@ -456,6 +468,7 @@ case_larger_cluster
 case_service_monitor
 case_single_zone
 case_tryout
+case_tryout_with_object_store
 case_refused_values
 
 if ((failures > 0)); then

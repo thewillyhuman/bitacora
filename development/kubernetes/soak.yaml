@@ -41,6 +41,19 @@ metadata:
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: bita-soak}
 subjects: [{kind: ServiceAccount, name: bita-soak, namespace: bitacora}]
 ---
+# The name under which the Prometheus of prometheus.yaml finds the metrics
+# of the run.
+apiVersion: v1
+kind: Service
+metadata:
+  name: bita-soak
+  labels: {app.kubernetes.io/name: bita-soak}
+spec:
+  clusterIP: None
+  selector: {app.kubernetes.io/name: bita-soak}
+  ports:
+    - {name: metrics, port: 9102}
+---
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -1,0 +1,22 @@
+# Values of the bitacora chart that add the object store of s3.yaml in this
+# directory to values.yaml, so that sealed segments are tiered:
+#
+#   helm upgrade bitacora src/helm/bitacora --kube-context <context> \
+#       --namespace bitacora --values development/kubernetes/values.yaml \
+#       --values development/kubernetes/values-s3.yaml --set image.tag=<version>
+
+objectStore:
+  kind: s3
+  s3:
+    bucket: bitacora-segments
+    endpoint: http://s3:7070
+    # The test server speaks plain HTTP inside the cluster.
+    allowHttp: true
+    credentials:
+      existingSecret: bitacora-s3
+
+controller:
+  # A test wants to see a segment tiered and its local copies released within
+  # minutes, not after the fifteen minutes and the day of the defaults.
+  tieringDelaySeconds: 60
+  hotReadWindowSeconds: 120

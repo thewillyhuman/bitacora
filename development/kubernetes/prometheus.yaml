@@ -1,0 +1,121 @@
+# A Prometheus of its own for a bitacora cluster that is being tried out: it
+# scrapes the replicas, the controllers and the etcd of this directory, and
+# evaluates the alert rules of src/prometheus. It keeps to its namespace and
+# sends nothing anywhere: a test must not feed a monitoring service that
+# other people rely on, which a ServiceMonitor picked up by a shared
+# Prometheus would do.
+#
+#   kubectl --context <context> --namespace bitacora create configmap bitacora-alerts \
+#       --from-file=src/prometheus/bitacora-alerts.yaml
+#   kubectl --context <context> --namespace bitacora apply --filename prometheus.yaml
+#
+# Reach it with `kubectl port-forward service/prometheus 9090`. The targets
+# are found by name, through the headless Services of the chart, so they
+# assume the release is called `bitacora`; change the names below otherwise.
+# A cluster that pulls images through a mirror needs the image changed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  labels: {app.kubernetes.io/name: prometheus}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    rule_files:
+      - /etc/prometheus/rules/*.yaml
+    scrape_configs:
+      # One job for the cluster, as the alert rules expect: alerts about the
+      # cluster as a whole are grouped by `job`.
+      - job_name: bitacora
+        dns_sd_configs:
+          - names: [bitacora-replica]
+            type: A
+            port: 9100
+          - names: [bitacora-controller]
+            type: A
+            port: 9101
+      - job_name: etcd
+        dns_sd_configs:
+          - names: [etcd-headless]
+            type: A
+            port: 2379
+      # The soak tool, when it runs (soak.yaml).
+      - job_name: bita-soak
+        dns_sd_configs:
+          - names: [bita-soak]
+            type: A
+            port: 9102
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels: {app.kubernetes.io/name: prometheus}
+spec:
+  selector: {app.kubernetes.io/name: prometheus}
+  ports:
+    - {name: http, port: 9090}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  labels: {app.kubernetes.io/name: prometheus}
+spec:
+  serviceName: prometheus
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: prometheus}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Retain
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: prometheus}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: prometheus
+          image: quay.io/prometheus/prometheus:v3.5.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # Two weeks, or less if the volume fills first.
+            - --storage.tsdb.retention.time=15d
+            - --storage.tsdb.retention.size=8GB
+          ports:
+            - {name: http, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml}
+            - {name: rules, mountPath: /etc/prometheus/rules}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus-config}
+        - name: rules
+          configMap: {name: bitacora-alerts}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 10Gi}

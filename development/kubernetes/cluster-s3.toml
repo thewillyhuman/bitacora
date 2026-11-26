@@ -1,0 +1,17 @@
+# The cluster configuration for a tool that must reach the object store of
+# s3.yaml in this directory, next to the etcd of etcd.yaml. Give it to
+# run.sh as BITA_CLUSTER_CONFIG, together with BITA_CREDENTIALS_SECRET for
+# the access key, which is never written in a file like this one.
+etcd_endpoints = [
+    "http://etcd-0.etcd-headless:2379",
+    "http://etcd-1.etcd-headless:2379",
+    "http://etcd-2.etcd-headless:2379",
+]
+
+[object_store]
+kind = "s3"
+bucket = "bitacora-segments"
+region = "us-east-1"
+endpoint = "http://s3:7070"
+# The test server speaks plain HTTP inside the cluster.
+allow_http = true

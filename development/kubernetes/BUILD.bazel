@@ -6,7 +6,10 @@ load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
 # Rendered by the test of the chart, so that the values stay ones the chart
 # and the daemons accept.
 exports_files(
-    ["values.yaml"],
+    [
+        "values.yaml",
+        "values-s3.yaml",
+    ],
     visibility = ["//src/helm:__pkg__"],
 )
 

@@ -10,7 +10,8 @@ run="${1:?usage: run_test.sh <run.sh>}"
 scratch="${TEST_TMPDIR:?the test needs a temporary directory}"
 
 # The stand-in: one line per call, the manifest of an `apply`, the phase of a
-# `get`, a report for `logs`.
+# `get`, a report for `logs`. It takes a `create configmap` and a `delete`
+# without doing anything, which is all the script expects of them.
 calls="${scratch}/calls"
 manifest="${scratch}/manifest"
 phase="${scratch}/phase"
@@ -38,6 +39,7 @@ fresh() {
     : >"${manifest}"
     echo Succeeded >"${phase}"
     unset BITA_KUBE_NAMESPACE BITA_IMAGE_REPOSITORY BITA_ETCD_ENDPOINTS BITA_RUN_TIMEOUT_SECONDS
+    unset BITA_CLUSTER_CONFIG BITA_CREDENTIALS_SECRET
     export BITA_KUBE_CONTEXT=test-context BITA_VERSION=1.2.3
 }
 
@@ -88,6 +90,44 @@ BITA_KUBE_NAMESPACE=storage BITA_IMAGE_REPOSITORY=registry.example.org/team \
 expect_in_manifest "image: registry.example.org/team/bita:1.2.3" \
     '["--etcd-endpoint", "http://etcd.example.org:2379", "stream", "list"]'
 grep -q -- "--context test-context --namespace storage apply" "${calls}" || fail "the namespace was not used"
+
+echo "--- a cluster configuration is handed to the tool as a file"
+fresh
+printf 'etcd_endpoints = ["http://etcd:2379"]\n\n[object_store]\nkind = "s3"\nbucket = "segments"\n' \
+    >"${scratch}/cluster.toml"
+BITA_CLUSTER_CONFIG="${scratch}/cluster.toml" "${run}" bita stream read demo >/dev/null ||
+    fail "a run with a configuration file was reported as failed"
+expect_in_manifest '["--config", "/etc/bitacora/cluster.toml", "stream", "read", "demo"]' \
+    "mountPath: /etc/bitacora" "configMap: {name: bita-"
+if grep -q -- "--etcd-endpoint" "${manifest}"; then
+    fail "the tool is given etcd endpoints next to a configuration file, and they would win over it"
+fi
+grep -q -E " create configmap bita-[0-9-]+ --from-file=cluster.toml=${scratch}/cluster.toml" "${calls}" ||
+    fail "the configuration file was not handed to the cluster: $(cat "${calls}")"
+grep -q -E " delete configmap bita-[0-9-]+ " "${calls}" || fail "the configuration was left in the cluster"
+# The configuration exists before the pod that mounts it.
+[[ "$(grep -n -E " create configmap " "${calls}" | cut -d: -f1)" -lt "$(grep -n " apply " "${calls}" | cut -d: -f1)" ]] ||
+    fail "the pod was made before its configuration"
+
+echo "--- a configuration file that cannot be read stops the script"
+fresh
+exit_code=0
+message="$(BITA_CLUSTER_CONFIG="${scratch}/no-such-file.toml" "${run}" bita stream list 2>&1)" || exit_code=$?
+((exit_code == 2)) || fail "a missing configuration file did not give exit code 2 but ${exit_code}"
+[[ "${message}" == *"no-such-file.toml"* ]] || fail "the missing file is not named: ${message}"
+[[ ! -s "${calls}" ]] || fail "kubectl was called although the configuration file is missing"
+
+echo "--- the keys of a secret become the environment of the tool"
+fresh
+BITA_CREDENTIALS_SECRET=bitacora-s3 "${run}" bench read demo >/dev/null
+expect_in_manifest "envFrom:" "secretRef: {name: bitacora-s3}"
+
+echo "--- without a secret the tool gets no environment from the cluster"
+fresh
+"${run}" bita stream list >/dev/null
+if grep -q "envFrom" "${manifest}"; then
+    fail "a pod without a secret has an envFrom"
+fi
 
 echo "--- a tool that failed is reported, with what it printed"
 fresh

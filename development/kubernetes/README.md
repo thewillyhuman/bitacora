@@ -9,6 +9,10 @@ object store. [docs/operations](../../docs/operations/README.md) is the guide fo
 | `etcd.yaml` | A three-member etcd, one member per zone, each on a 10 GiB volume |
 | `values.yaml` | Values of the chart for that etcd: three replicas with 100 GiB each, no object store |
 | `run.sh` | Runs `bita` or `bita-bench` in a pod next to the cluster and prints its output |
+| `s3.yaml` | An S3 server on one 100 GiB volume, so that segments can be tiered |
+| `values-s3.yaml` | Values of the chart that point it at that server, on top of `values.yaml` |
+| `cluster-s3.toml` | The cluster configuration for a tool that must reach that server |
+| `prometheus.yaml` | A Prometheus of the namespace's own that evaluates the alert rules of `src/prometheus` |
 | `soak.yaml` | A Job that runs `bita-soak` next to the cluster for a night, with the permissions its faults need |
 
 ## The images
@@ -49,7 +53,9 @@ What to change for your cluster:
 
 - **Volumes.** Both files take the default StorageClass. Name another with
   `--set replica.storage.storageClassName=<class>` for the replicas, and with a `storageClassName` under
-  `volumeClaimTemplates` in `etcd.yaml` for etcd. The whole setup takes six volumes and 330 GiB.
+  `volumeClaimTemplates` in `etcd.yaml` for etcd, and likewise in `s3.yaml` and `prometheus.yaml`. The
+  cluster and its etcd take six volumes and 330 GiB; the S3 server and the Prometheus add one each, 100
+  and 10 GiB.
 - **Replicas.** `--set replica.replicas=<n>` runs more than three. Each needs a node of its own, and the
   chart spreads them evenly over the zones.
 - **Images through a mirror.** Change `image` in `etcd.yaml` and `--set image.repository=<mirror path>`.
@@ -75,6 +81,57 @@ for. Read it without exposing anything, through the API server:
 kubectl --context "$BITA_KUBE_CONTEXT" get --raw \
     /api/v1/namespaces/bitacora/pods/bitacora-replica-0:9100/proxy/metrics | grep disk_flush_duration
 ```
+
+## Tiering
+
+Without an object store every segment stays on the replicas. `s3.yaml` runs one for a test, and
+`values-s3.yaml` points the chart at it and shortens the waits, so that a sealed segment is uploaded after
+a minute and its copies on the replicas are released two minutes later:
+
+```sh
+kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora create secret generic bitacora-s3 \
+    --from-literal=AWS_ACCESS_KEY_ID="$(openssl rand -hex 12)" \
+    --from-literal=AWS_SECRET_ACCESS_KEY="$(openssl rand -hex 24)"
+kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora apply --filename development/kubernetes/s3.yaml
+
+helm upgrade bitacora src/helm/bitacora --kube-context "$BITA_KUBE_CONTEXT" --namespace bitacora \
+    --values development/kubernetes/values.yaml --values development/kubernetes/values-s3.yaml \
+    --set image.tag="$BITA_VERSION"
+
+development/kubernetes/run.sh bita segment list demo-bench
+```
+
+The listing names the object of each segment once it is uploaded, and its state turns from `tiered` to
+`released` when the replicas let go of their copies. From then on a tool needs the object store to read
+the segment, and so its configuration and its credentials, which the etcd endpoints alone do not give:
+
+```sh
+export BITA_CLUSTER_CONFIG=development/kubernetes/cluster-s3.toml
+export BITA_CREDENTIALS_SECRET=bitacora-s3
+
+development/kubernetes/run.sh bench read demo-bench --seconds 60
+development/kubernetes/run.sh bita metadata snapshot list
+```
+
+Without them a read of a released segment stops with "the segment is in the object store, and this client
+was given none".
+
+## Watching it
+
+`prometheus.yaml` runs a Prometheus that scrapes the replicas, the controllers and etcd, and evaluates the
+default alert rules. It is the namespace's own on purpose. The chart can create a `ServiceMonitor`, but
+where a shared Prometheus selects every `ServiceMonitor` of the cluster, that sends a test's metrics to a
+monitoring service other people rely on.
+
+```sh
+kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora create configmap bitacora-alerts \
+    --from-file=src/prometheus/bitacora-alerts.yaml
+kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora apply --filename development/kubernetes/prometheus.yaml
+kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora port-forward service/prometheus 9090
+```
+
+The alert that says a flush takes more than 10 ms quotes the disks of the design. On network block
+storage it fires under load, and it is right to.
 
 ## Soaking
 
@@ -139,8 +196,13 @@ volumes behind them go too is up to the reclaim policy of their StorageClass.
 - `//development/kubernetes:run_test` runs `run.sh` with a stand-in for `kubectl`: every call names the
   context and the namespace, the pod is the right image with the right arguments and placement, it is
   removed afterwards, and the exit code says how the tool ended.
-- `//src/helm:chart_test` renders the chart with `values.yaml` and hands the rendered configuration to
-  the daemons, like it does for the chart's own examples.
+- `//development/kubernetes:run_test` also covers a tool that is given a cluster configuration and a
+  Secret: the file reaches the pod as a ConfigMap of the pod's name, the tool is started with it, and
+  the ConfigMap goes with the pod.
+- `//src/helm:chart_test` renders the chart with `values.yaml`, and with `values-s3.yaml` on top, and
+  hands the rendered configuration to the daemons, like it does for the chart's own examples.
+- `s3.yaml`, `prometheus.yaml` and `cluster-s3.toml` have no test: they were used on a real cluster,
+  where segments were tiered, released and read back, and the alert rules were evaluated.
 - `//development/kubernetes:soak_test` checks `soak.yaml` against the tool: the Role grants exactly the
   four permissions the tool uses, the Job starts the tool with arguments it accepts and as the service
   account the Role is bound to, the histories go to a mounted volume, and a failed run is not started

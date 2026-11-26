@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "development/kubernetes can now exercise tiering and be watched: an S3 server for tests, chart values that point at it, a Prometheus of the namespace's own with the default alert rules, and run.sh hands a tool a cluster configuration file and a Secret, which reading a released segment needs."
+issues: [5]

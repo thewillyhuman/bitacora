@@ -1,0 +1,91 @@
+# An S3 server for a bitacora cluster that is being tried out, so that
+# sealed segments can be tiered: one Versity S3 Gateway, the server the tests
+# of this repository use, keeping its objects as files on one 100 GiB
+# volume. One copy, no TLS: for a test only.
+#
+# It takes its access key from a Secret called `bitacora-s3`, with the two
+# keys the chart reads. Make one with values of your own first:
+#
+#   kubectl --context <context> --namespace bitacora create secret generic bitacora-s3 \
+#       --from-literal=AWS_ACCESS_KEY_ID="$(openssl rand -hex 12)" \
+#       --from-literal=AWS_SECRET_ACCESS_KEY="$(openssl rand -hex 24)"
+#   kubectl --context <context> --namespace bitacora apply --filename s3.yaml
+#
+# The bucket is `bitacora-segments`. README.md in this directory has the
+# values that point the chart at it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3
+  labels: {app.kubernetes.io/name: s3}
+spec:
+  selector: {app.kubernetes.io/name: s3}
+  ports:
+    - {name: s3, port: 7070}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: s3
+  labels: {app.kubernetes.io/name: s3}
+spec:
+  serviceName: s3
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: s3}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Retain
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: s3}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: s3
+          image: ghcr.io/versity/versitygw:v1.11.0
+          args:
+            - --port=:7070
+            - --region=us-east-1
+            - --quiet
+            - posix
+            # Object metadata in files next to the objects, not in extended
+            # attributes, which not every volume has.
+            - --sidecar=/data/metadata
+            - /data/buckets
+          env:
+            - name: ROOT_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: bitacora-s3, key: AWS_ACCESS_KEY_ID}}
+            - name: ROOT_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: bitacora-s3, key: AWS_SECRET_ACCESS_KEY}}
+          ports:
+            - {name: s3, containerPort: 7070}
+          readinessProbe:
+            tcpSocket: {port: s3}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            # A bucket is a directory of the server. Mounting these two paths
+            # of the volume makes the kubelet create them, so that the
+            # bucket exists without a tool that could make it.
+            - {name: data, mountPath: /bucket, subPath: buckets/bitacora-segments}
+            - {name: data, mountPath: /metadata, subPath: metadata}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 100Gi}
