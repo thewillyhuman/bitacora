@@ -151,9 +151,12 @@ be truncated: the artifacts are then the only copy of those records.
 
 Why size tiers. A checkpoint must persist everything applied, so it seals
 whatever the builder holds, however little. Frequent checkpoints therefore
-make small artifacts. Merging neighbours of similar size keeps the number of
-artifacts logarithmic in the data and rewrites each record a bounded number
-of times. Only neighbours are merged, so the catalog stays in log order.
+make small artifacts. (Since decision 0015 a builder can save what it holds
+at a checkpoint without sealing it, and then cuts its artifacts where it
+chooses. This paragraph describes a builder that does not.) Merging
+neighbours of similar size keeps the number of artifacts logarithmic in the
+data and rewrites each record a bounded number of times. Only neighbours
+are merged, so the catalog stays in log order.
 
 Why one merge per checkpoint. It bounds what a checkpoint does. A backlog of
 merges is worked off over the following checkpoints, also those that have

@@ -105,13 +105,13 @@ confirmed.
 | 1 | Queries must read the samples that are not in a block yet. | `ArtifactCatalog` owns the builder and shows only the catalog (`view()`). The unsealed samples are inside the builder, out of reach. | `MetricsMaterializer` wraps the catalog and keeps a second head for queries: every record is decoded twice and every unsealed sample is held twice. | Fixed by `materializer: show the builder of a catalog`. The builder owns the head and gives the store a handle on it; the wrapper is gone. |
 | 2 | A block is cut when it is full, by the samples' own count and time span, so that the same records give the same blocks (I6). | A checkpoint always seals everything the builder holds. `should_seal` can ask for a checkpoint earlier; it cannot keep the runner's timer from cutting a block. Block boundaries therefore follow the wall clock of the instance that happened to run. | Accepted in the first version: answers are the same whenever checkpoints happen, block contents are not. A store that checkpoints every minute cuts a block every minute. | Fixed by `materializer: let a builder choose its cuts`. A builder names the record its next artifact ends at and saves what it holds beyond it at a checkpoint; the next instance restores it. Blocks now end with the record that fills them, and a test compares the blocks of two stores that checkpoint at different times byte for byte. |
 | 3 | A query skips the blocks that hold no sample in its time range without fetching anything. | A catalog entry holds a range of sequence numbers, a key and a size. Nothing of the builder's. | The time range of a block is read from its footer: two range reads per block the first time a store or reader sees it, also for blocks the query does not need. The index is then cached (`query.rs`). | Fixed by `materializer: let a builder describe artifacts`. A catalog entry carries a summary written by the builder; a block's summary holds its first and last timestamp, and a block outside the query's range is not fetched at all. |
-| 4 | The limits of a block come from configuration. | The framework creates the builder with `Default` and restores a materializer with a function that takes no settings. | The limits are constants of a type parameter, `BlockPolicy`, which runs through `BlockBuilder<P>`, `MetricsMaterializer<P>` and `MetricsStore<P>`. They cannot be chosen at run time. | Open |
+| 4 | The limits of a block come from configuration. | The framework creates the builder with `Default` and restores a materializer with a function that takes no settings. | The limits are constants of a type parameter, `BlockPolicy`, which runs through `BlockBuilder<P>`, `MetricsMaterializer<P>` and `MetricsStore<P>`. They cannot be chosen at run time. | Open: a change of the `Materializer` contract. See below. |
 | 5 | A process that is not the store reads the committed catalog. | Possible: `MetadataStore::get_stream`, `MetadataStore::get_checkpoint`, `ArtifactNamespace::read_only`, `decode_manifest`, `decode_catalog`. | `BlockReader::refresh` makes the five calls and handles the manifest being replaced between two of them. Every query node would repeat those thirty lines. | Fixed by `materializer: read what was committed`: `read_committed_checkpoint` returns the checkpoint and its manifest and reads again when the runner replaces the manifest in between. `BlockReader::refresh` is one call and `decode_catalog`. |
 | 6 | A reader in another language is written from `docs/protocol`. | The layouts of the checkpoint manifest and of the catalog are only in the headers of `manifest.rs` and `artifact_catalog.rs`. | `docs/protocol/metrics.md` pointed at those files. | Fixed by `docs: specify the manifest and the catalog`: `docs/protocol/checkpoint-manifest.md`. |
-| 7 | A query node learns that the catalog changed. | Nothing. The checkpoint record can only be read. | `BlockReader` refreshes when asked and when it finds a block gone. | Open |
-| 8 | Several stores serve queries with a head: one writes, the others follow. | `MaterializerRunner::start` always takes the fencing token, which stops the instance that had it. `ArtifactNamespace::read_only` exists "for a follower", but nothing runs one. | Not built. `BlockReader` serves blocks without a head. | Open |
-| 9 | Old blocks are deleted after a retention time; blocks are re-cut by time. | `merge_artifacts` turns several neighbours into exactly one artifact. Nothing can drop an artifact or return several. | Not built. | Open |
-| 10 | A block stays readable for queries that started before it was merged away. | The runner deletes what a manifest no longer names right after it commits that manifest. | A query that finds a block gone reads the catalog again (`query.rs`, `reader.rs`). | Open |
+| 7 | A query node learns that the catalog changed. | Nothing. The checkpoint record can only be read. | `BlockReader` refreshes when asked and when it finds a block gone. | Open: the metadata store has no watch. See below. |
+| 8 | Several stores serve queries with a head: one writes, the others follow. | `MaterializerRunner::start` always takes the fencing token, which stops the instance that had it. `ArtifactNamespace::read_only` exists "for a follower", but nothing runs one. | Not built. `BlockReader` serves blocks without a head. | Open: a second way to run a materializer. See below. |
+| 9 | Old blocks are deleted after a retention time; blocks are re-cut by time. | `merge_artifacts` turns several neighbours into exactly one artifact. Nothing can drop an artifact or return several. | Not built. | Open: a change of what a catalog is. See below. |
+| 10 | A block stays readable for queries that started before it was merged away. | The runner deletes what a manifest no longer names right after it commits that manifest. | A query that finds a block gone reads the catalog again (`query.rs`, `reader.rs`). | Open: the workaround is enough for now. See below. |
 | 11 | The store reports why its materializer stopped. | `RunnerProgress` only says that the runner stopped; the reason is what `run` returns. | The store's task hands the reason to queries through a channel (`store.rs`), as bitacora-kv does. | Fixed by `materializer: say why a runner stopped`: `RunnerProgress::stop_reason`, and `RunnerStopped` carries the reason to a waiter. Both stores dropped their channel. |
 | 12 | Read-your-writes. | `RunnerProgress::wait_until_applied`. | Used as is. | Nothing missing |
 | 13 | Fetch a part of a block. | `ArtifactNamespace::get_artifact_range`, and the size of every artifact in its catalog entry. | Used as is. | Nothing missing |
@@ -128,7 +128,61 @@ sealing"), and the adapter took that choice away at every checkpoint.
 
 Rows 6 and 7 are also asked for by the design: the catalog, "its format
 and its change notifications are [...] part of the public interface from
-M4" (section 19, "Common thread").
+M4" (section 19, "Common thread"). The format is now specified; the
+notifications are not there.
+
+Six rows were fixed, each by one change of the framework followed by the
+change of the consumer that uses it: 1, 2, 3, 5, 6 and 11. Two of the fixes
+change what is stored or what a consumer compiles against:
+
+- The stored catalog is at format version 3. An entry carries a summary
+  written by the builder, and the catalog can be followed by the records
+  the builder held at the checkpoint. Catalogs of version 1 and 2 are
+  refused. No workload used this adapter before the metrics store, so no
+  store holds one.
+- `decode_catalog` returns a `StoredCatalog`, `ArtifactDescriptor` has a
+  `summary`, and `RunnerStopped` is a struct with the reason.
+
+### What stays open, and why
+
+None of these keeps the metrics store, as it was built, from working. Each
+is a decision about the framework that should be taken for both consumers
+at once, before the interface is frozen.
+
+- **Row 4, settings for a materializer.** `restore_from_checkpoint` takes
+  no settings, and both adapters create their workload with `Default`. The
+  fix is a settings value that `MaterializerRunner::start` is given and
+  hands to `restore_from_checkpoint`, and that each adapter hands to its
+  builder. It changes the `Materializer` trait, `ArtifactBuilder`,
+  `PageMaterializer` and every implementation of them, bitacora-kv
+  included. Until then a workload's limits are constants of a type, which
+  is correct and inflexible. One caution for whoever does it: the limits of
+  a block decide where blocks are cut, so two instances with different
+  settings cut differently. The settings that decide artifact boundaries
+  belong in the checkpoint, not in a flag of the process.
+- **Row 7, change notifications.** `MetadataStore` has no watch for any
+  record. A query node polls `read_committed_checkpoint`, which reads the
+  checkpoint record and the manifest every time, also when nothing changed.
+  A watch is a new operation of the metadata store and of both its
+  backends, not of this framework.
+- **Row 8, followers with a head.** A follower follows the log, restores
+  from committed checkpoints and never takes the fencing token. That is a
+  second way to run a materializer, next to `MaterializerRunner`, with its
+  own rules for a checkpoint that moves under it. `BlockReader` covers the
+  case that needs no head.
+- **Row 9, dropping and re-cutting artifacts.** The catalog is a list of
+  artifacts that cover the log from its start without gaps, and a merge
+  gives one artifact. Retention drops the oldest artifacts, and blocks
+  aligned to time (the Prometheus TSDB layout) need a merge that returns
+  several. Both change what a catalog is and what its stored form says, so
+  they need a design of their own.
+- **Row 10, artifacts that outlive their manifest for a while.** The runner
+  deletes what the committed manifest no longer names as soon as it has
+  committed. A reader that held the old catalog finds a block gone, reads
+  the catalog again and starts over; that is tested, and it is bounded. A
+  grace period would need the runner to remember what earlier manifests
+  named, across restarts. Worth doing only if queries over large blocks are
+  seen to start over often.
 
 ## Not done
 
@@ -151,5 +205,12 @@ M4" (section 19, "Common thread").
   process that is not the materializer.
 - The parts of the framework that bitacora-kv exercised hold for a second
   workload unchanged: the runner, fencing, the sweeper, truncation.
-- The adapter itself needs changes before the freeze. The rows marked open
-  say which.
+- The adapter needed changes, and got them: a builder is reachable, it
+  describes its artifacts, and it decides where they are cut. A second
+  consumer written today would not need the three workarounds the first
+  version of this one had.
+- Five rows are open. Rows 4 and 9 change stored formats or the central
+  trait and are the ones to decide before the interface is frozen; rows 7,
+  8 and 10 add to the interface and can come after.
+- The metrics store is not under the simulator's fault matrix. Its claims
+  rest on the tests of its crate, which run on the in-process cluster.
