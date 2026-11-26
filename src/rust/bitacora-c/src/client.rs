@@ -14,6 +14,8 @@
 //! - [`bitacora_client_connect_file`], [`bitacora_client_connect_text`], [`bitacora_client_free`].
 //! - `ClientCore`: the Rust client with the threads that run it, shared by every handle opened from one
 //!   client.
+//! - The steps of connecting: `parse_cluster_config`, `worker_thread_count`, `client_settings` and
+//!   `start_runtime`.
 //!
 //! # How it works
 //!
@@ -255,14 +257,40 @@ fn connect(
     options: ClientOptions,
     writer_identity: Option<&str>,
 ) -> Result<ClientHandle, Failure> {
-    let cluster_config: ClusterConfig = match toml::from_str(configuration_text) {
-        Ok(cluster_config) => cluster_config,
-        Err(parse_error) => {
-            return Err(Failure::invalid_argument(format!(
-                "the cluster configuration is not valid: {parse_error}"
-            )));
-        }
-    };
+    let cluster_config = parse_cluster_config(configuration_text)?;
+    let worker_threads = worker_thread_count(options)?;
+    let settings = client_settings(writer_identity);
+    let runtime = start_runtime(worker_threads)?;
+    let client = run_on(
+        &runtime,
+        async move { bitacora::connect(&cluster_config, settings).await },
+    )?;
+    Ok(ClientHandle {
+        core: Arc::new(ClientCore { client, runtime }),
+    })
+}
+
+/// Reads the cluster configuration from its TOML text.
+///
+/// # Errors
+///
+/// Returns an invalid-argument [`Failure`] that says what is wrong with the text.
+fn parse_cluster_config(configuration_text: &str) -> Result<ClusterConfig, Failure> {
+    match toml::from_str(configuration_text) {
+        Ok(cluster_config) => Ok(cluster_config),
+        Err(parse_error) => Err(Failure::invalid_argument(format!(
+            "the cluster configuration is not valid: {parse_error}"
+        ))),
+    }
+}
+
+/// How many worker threads the client gets: what the options ask for, or the default if they ask for
+/// zero.
+///
+/// # Errors
+///
+/// Returns an invalid-argument [`Failure`] if the options ask for more than [`MAX_WORKER_THREADS`].
+fn worker_thread_count(options: ClientOptions) -> Result<usize, Failure> {
     if options.worker_threads > MAX_WORKER_THREADS {
         return Err(Failure::invalid_argument(format!(
             "options.worker_threads is {}; at most {MAX_WORKER_THREADS} are allowed",
@@ -274,32 +302,38 @@ fn connect(
     } else {
         options.worker_threads
     };
+    Ok(usize::try_from(worker_threads).expect("at most 256 threads"))
+}
+
+/// The client's settings: an application's defaults, with the writer identity the caller chose if it
+/// chose one.
+fn client_settings(writer_identity: Option<&str>) -> ClientSettings {
     let mut settings = ClientSettings::default();
     if let Some(writer_identity) = writer_identity {
         writer_identity.clone_into(&mut settings.writer.writer_identity);
     }
+    settings
+}
 
+/// Starts the runtime whose threads run the client. The threads are started here, by the connecting
+/// thread, and none is started later: see the file header.
+///
+/// # Errors
+///
+/// Returns an unavailable [`Failure`] if the operating system refuses to start the threads.
+fn start_runtime(worker_threads: usize) -> Result<Runtime, Failure> {
     let built_runtime = Builder::new_multi_thread()
-        .worker_threads(usize::try_from(worker_threads).expect("at most 256 threads"))
+        .worker_threads(worker_threads)
         .thread_name(WORKER_THREAD_NAME)
         .enable_all()
         .build();
-    let runtime = match built_runtime {
-        Ok(runtime) => runtime,
-        Err(io_error) => {
-            return Err(Failure::new(
-                BitacoraStatus::Unavailable,
-                format!("cannot start the client's threads: {io_error}"),
-            ));
-        }
-    };
-    let client = run_on(
-        &runtime,
-        async move { bitacora::connect(&cluster_config, settings).await },
-    )?;
-    Ok(ClientHandle {
-        core: Arc::new(ClientCore { client, runtime }),
-    })
+    match built_runtime {
+        Ok(runtime) => Ok(runtime),
+        Err(io_error) => Err(Failure::new(
+            BitacoraStatus::Unavailable,
+            format!("cannot start the client's threads: {io_error}"),
+        )),
+    }
 }
 
 /// Reads the options and their text, starts the client and hands it to the caller.
