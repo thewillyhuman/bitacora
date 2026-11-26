@@ -824,21 +824,27 @@ fn is_leftover_copy(stream: &StreamRecord, replica_id: &ReplicaId, held: &Segmen
         .segments
         .iter()
         .find(|segment| segment.segment_id == held.address.segment_id);
-    match (listed, stream.segments.first()) {
+    if let Some(segment) = listed {
         // A sealed segment's copy on a replica outside its replica set was
         // replaced by repair. An open segment is never touched.
-        (Some(segment), _) => {
-            segment.sealed.is_some() && segment.copies.iter().all(|copy| &copy.replica_id != replica_id)
-        }
-        // Older than everything listed: retention deleted it. Anything
-        // newer than what is listed is left alone; a metadata store restored
-        // from an older snapshot must not cost the records written since.
-        (None, Some(oldest_listed)) => held.address.segment_id < oldest_listed.segment_id,
-        (None, None) => held
-            .sealed_end
-            .or(held.local_end)
-            .is_some_and(|end| end < stream.low_water_mark),
+        return segment.sealed.is_some() && segment.copies.iter().all(|copy| &copy.replica_id != replica_id);
     }
+    // Older than everything listed: retention deleted it. Anything newer
+    // than what is listed is left alone; a metadata store restored from an
+    // older snapshot must not cost the records written since.
+    let is_older_than_every_listed_segment = stream
+        .segments
+        .first()
+        .is_some_and(|oldest_listed| held.address.segment_id < oldest_listed.segment_id);
+    // Nothing the copy holds can be read any more, wherever its segment
+    // stood in the list. This is what finds the copies of a deleted segment
+    // while an older, tiered segment is still listed because its object
+    // could not be deleted yet.
+    let holds_only_truncated_records = held
+        .sealed_end
+        .or(held.local_end)
+        .is_some_and(|end| end < stream.low_water_mark);
+    is_older_than_every_listed_segment || holds_only_truncated_records
 }
 
 #[cfg(test)]
@@ -1061,6 +1067,34 @@ mod tests {
     #[test]
     fn copy_newer_than_every_listed_segment_is_kept() {
         assert!(!is_leftover_copy(&stream(), &replica("replica-a"), &held(4, Some(30))));
+    }
+
+    /// Segment 1 is tiered and still listed, because its object could not
+    /// be deleted yet; segment 2 was deleted after it.
+    fn stream_with_a_deleted_segment_after_a_listed_one() -> StreamRecord {
+        let mut stream = stream();
+        stream.segments.remove(1);
+        stream.low_water_mark = SequenceNumber::new(20);
+        stream
+    }
+
+    #[test]
+    fn copy_of_a_segment_deleted_after_one_that_is_still_listed_is_leftover() {
+        let stream = stream_with_a_deleted_segment_after_a_listed_one();
+        assert!(is_leftover_copy(&stream, &replica("replica-a"), &held(2, Some(19))));
+    }
+
+    #[test]
+    fn unlisted_copy_that_reaches_the_mark_is_kept_between_listed_segments() {
+        let mut stream = stream_with_a_deleted_segment_after_a_listed_one();
+        stream.low_water_mark = SequenceNumber::new(19);
+        assert!(!is_leftover_copy(&stream, &replica("replica-a"), &held(2, Some(19))));
+    }
+
+    #[test]
+    fn unlisted_copy_without_records_is_kept_between_listed_segments() {
+        let stream = stream_with_a_deleted_segment_after_a_listed_one();
+        assert!(!is_leftover_copy(&stream, &replica("replica-a"), &held(2, None)));
     }
 
     #[test]

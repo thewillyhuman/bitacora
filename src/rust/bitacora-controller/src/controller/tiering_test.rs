@@ -543,6 +543,29 @@ async fn tiered_segment_stays_listed_while_its_object_cannot_be_deleted() {
     assert_eq!(stored_object_keys(&cluster).await, Vec::<String>::new());
 }
 
+/// Segment 1 is tiered and cannot be deleted while the object store is down, so it stays listed. Segment
+/// 2 was never tiered and is deleted outright. Its copies must not wait for segment 1 to go.
+#[tokio::test(start_paused = true)]
+async fn copies_of_a_deleted_segment_are_removed_while_an_older_tiered_one_awaits_deletion() {
+    let cluster = cluster_ready_to_tier(3).await;
+    let one_upload_per_pass = ControllerSettings {
+        max_uploads_per_pass: 1,
+        ..ControllerSettings::default()
+    };
+    let controller = controller_with(&cluster, one_upload_per_pass, cluster.artifact_store());
+    controller.run_pass().await.expect("the pass runs");
+    checkpoint_at(&cluster, "pages", 2).await;
+    cluster.artifact_store().set_unavailable(true);
+
+    controller.run_pass().await.expect("the pass runs");
+
+    let listed = listed_segments(&cluster).await;
+    let held_by_the_first_node = held_segments(&cluster, 0).await;
+    assert!(listed.contains(&1), "{listed:?}");
+    assert!(!listed.contains(&2), "{listed:?}");
+    assert!(!held_by_the_first_node.contains(&2), "{held_by_the_first_node:?}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn truncated_segment_that_awaits_deletion_is_no_longer_readable() {
     let cluster = cluster_with_tiered_segments().await;

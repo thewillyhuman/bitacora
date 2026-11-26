@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: controller
+note: "Remove the copies of a deleted segment from the replicas even while an older tiered segment is still listed because its object could not be deleted yet."
+issues: [3]
