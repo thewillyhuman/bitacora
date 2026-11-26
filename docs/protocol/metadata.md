@@ -64,6 +64,19 @@ Every program of a cluster meets the requirements above in the same way:
 A request that fails or times out may or may not have been applied. The
 caller reads the record again and decides from what it finds.
 
+### Writing and reading a record
+
+- An optional field without a value is written as `null`. A reader treats
+  one that is missing the same way.
+- A list is written as a JSON array, `[]` when it is empty, never `null`.
+  The one list that can be `null` is `standby_replicas`, where `null` means
+  that no replica set is placed.
+- A program ignores a field it does not know, and refuses a record whose
+  `schema_version` is higher than the highest it knows.
+- A program that changes a record writes back the fields it knows. A field
+  it does not know is lost on the way, which is why a field that must not
+  be lost is introduced together with a higher `schema_version`.
+
 ## Stream record
 
 ```json
