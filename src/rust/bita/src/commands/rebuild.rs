@@ -14,6 +14,8 @@
 //! - [`plan_rebuild`]: the plan itself, as a pure function of what was found.
 //! - [`RebuildInputs`], [`ReplicaInventory`], [`TieredObject`]: what was found.
 //! - [`PlannedStream`]: the record planned for one stream, with every assumption and problem.
+//! - [`records_without_data`] and [`RecordWithoutData`]: the streams the metadata store records and
+//!   nothing was found of.
 //! - [`RebuildReport`] and its parts: what the operator is shown.
 //! - Private steps, in the order the file reads: `collect_evidence`, `plan_stream` and `plan_record` with one
 //!   function per rule below, the report's rendering, then the gathering (`replicas_to_ask`,
@@ -48,6 +50,14 @@
 //! the replication (assumed three replicas, write quorum two), the retention policy (none), the
 //! registered materializers (none: nothing is truncated until they are registered again), the low-water
 //! mark (the first sequence number still found), and when each segment was sealed (now).
+//!
+//! **Records without data.** The plan is about the streams that were found. The metadata store can also hold
+//! records of streams that were not: after a restore, every stream that was deleted since the snapshot
+//! was taken is back as a record, while its segments are gone from the replicas and from the object
+//! store. Such a record cannot be told from a stream whose every copy was lost, so the rebuild neither
+//! deletes nor repairs it. It lists them, because a record that is left in silence is a stream that
+//! exists, cannot be read, and has the controller report missing copies for ever. A record without
+//! segments is not listed: a stream that was never written has nothing to find.
 //!
 //! **Applying.** Without `--apply` the plan is only shown. With it, every planned record is written with
 //! `MetadataStore::adopt_stream`. A plan with problems is not applied unless forced.
@@ -208,6 +218,49 @@ struct SegmentScan {
     highest_segment_id: SegmentId,
 }
 
+/// A stream that the metadata store has a record of while nothing was found of its segments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct RecordWithoutData {
+    /// The stream's identifier.
+    pub(crate) stream_id: u64,
+    /// The stream's name.
+    pub(crate) name: String,
+    /// How many segments the record lists.
+    pub(crate) segments: usize,
+}
+
+/// Finds the streams that the metadata store has a record of while no replica that answered and no
+/// object holds anything of them.
+///
+/// After a restore these are the streams that were deleted since the snapshot was taken, and the
+/// streams of which every copy was lost; nothing here can tell the two apart. This function asks nothing
+/// and writes nothing.
+///
+/// # Arguments
+///
+/// * `inputs` - What the replicas and the object store hold, and what the metadata store still knows.
+///
+/// # Returns
+///
+/// One entry per existing record that lists at least one segment and whose stream no copy and no object
+/// mentions, in the order of the records. A record without segments is left out: there is nothing to
+/// find of a stream that was never written.
+pub(crate) fn records_without_data(inputs: &RebuildInputs) -> Vec<RecordWithoutData> {
+    let evidence_by_stream = collect_evidence(inputs);
+    let mut without_data = Vec::new();
+    for existing in &inputs.existing_streams {
+        if existing.segments.is_empty() || evidence_by_stream.contains_key(&existing.stream_id) {
+            continue;
+        }
+        without_data.push(RecordWithoutData {
+            stream_id: existing.stream_id.get(),
+            name: existing.name.clone(),
+            segments: existing.segments.len(),
+        });
+    }
+    without_data
+}
+
 /// Plans the stream records to write, one per stream identifier found.
 ///
 /// See the file header for the rules. This function asks nothing and writes nothing.
@@ -220,7 +273,8 @@ struct SegmentScan {
 /// # Returns
 ///
 /// One plan per stream identifier that a replica or an object mentions, sorted by identifier. Streams the
-/// metadata store knows but nothing was found of are not planned and stay as they are.
+/// metadata store knows but nothing was found of are not planned and stay as they are;
+/// [`records_without_data`] lists them.
 pub(crate) fn plan_rebuild(inputs: &RebuildInputs) -> Vec<PlannedStream> {
     let evidence_by_stream = collect_evidence(inputs);
     let mut planned_streams = Vec::with_capacity(evidence_by_stream.len());
@@ -804,6 +858,9 @@ pub(crate) struct RebuildReport {
     pub(crate) tiered_objects: usize,
     /// The plan, one entry per stream identifier found.
     pub(crate) streams: Vec<RebuiltStream>,
+    /// The streams the metadata store records and nothing was found of. They are not part of the plan and
+    /// stay as they are.
+    pub(crate) records_without_data: Vec<RecordWithoutData>,
     /// What is wrong beyond a single stream: replicas that did not answer, objects that cannot be read.
     pub(crate) problems: Vec<String>,
 }
@@ -844,6 +901,7 @@ impl RebuildReport {
             replicas: Vec::new(),
             tiered_objects: 0,
             streams: Vec::new(),
+            records_without_data: Vec::new(),
             problems: Vec::new(),
         }
     }
@@ -858,15 +916,43 @@ impl RebuildReport {
     }
 
     /// Renders the report: what was asked, then every stream with its segments, assumptions and
-    /// problems, then what to do next.
+    /// problems, then the records of which no data was found, then what to do next.
     pub(crate) fn render_text(&self) -> String {
         let mut rendered = self.render_what_was_asked();
         for stream in &self.streams {
             stream.render_into(&mut rendered);
         }
+        self.render_records_without_data_into(&mut rendered);
         rendered.push('\n');
         rendered.push_str(self.next_step());
         rendered
+    }
+
+    /// Appends the records of which no data was found to `rendered`, as a table with what they are and
+    /// what to do about them, or nothing if there are none.
+    fn render_records_without_data_into(&self, rendered: &mut String) {
+        if self.records_without_data.is_empty() {
+            return;
+        }
+        let _ = writeln!(
+            rendered,
+            "\nrecords in the metadata store of which no data was found: {}",
+            self.records_without_data.len()
+        );
+        let mut table = Table::new(&["STREAM", "NAME", "SEGMENTS"]);
+        for record in &self.records_without_data {
+            table.push_row(vec![
+                record.stream_id.to_string(),
+                record.name.clone(),
+                record.segments.to_string(),
+            ]);
+        }
+        rendered.push_str(&table.render());
+        rendered.push_str(
+            "They are left as they are. Nothing of their segments is on a replica that answered or in the \
+             object store: either the stream was deleted after the snapshot was taken, or every copy of it is \
+             lost. Delete a stream that was deleted again with `bita stream delete <name> --yes`.\n",
+        );
     }
 
     /// Renders the replicas that were asked as a table, the number of objects found, and the problems
@@ -966,6 +1052,7 @@ pub(crate) async fn rebuild(
     report.tiered_objects = tiered_objects.len();
 
     let inputs = gather_what_is_known(cluster, names, inventories, tiered_objects).await?;
+    report.records_without_data = records_without_data(&inputs);
     let planned_streams = plan_rebuild(&inputs);
     for planned in &planned_streams {
         report.streams.push(rebuilt_stream(planned));

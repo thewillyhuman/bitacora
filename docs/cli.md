@@ -428,6 +428,23 @@ What cannot be recovered, because replicas do not store it:
 If the metadata store still has a record of the stream, for example after a restore, all of these are
 taken from it instead, and its low-water mark and next segment identifier are never moved back.
 
+A restore can also bring back records that nothing stands behind. A snapshot is minutes older than the
+cluster, and a stream that was deleted in those minutes is in it, while its segments are gone from the
+replicas and from the object store. The plan is about the streams that were found, so it ends with a list
+of the records that were not:
+
+```console
+records in the metadata store of which no data was found: 2
+STREAM  NAME      SEGMENTS
+9       audit     2
+11      payments  1
+They are left as they are. Nothing of their segments is on a replica that answered or in the object store: either the stream was deleted after the snapshot was taken, or every copy of it is lost. Delete a stream that was deleted again with `bita stream delete <name> --yes`.
+```
+
+The rebuild cannot tell a deleted stream from one whose every copy was lost, so it changes neither. Left
+alone, such a stream is listed, cannot be read, and has the controller report copies as missing. If a
+replica did not answer, look at that first: the data may be on it.
+
 The plan lists problems apart from assumptions: a replica that did not answer, segments that do not
 connect, a sealed segment without a complete copy, an open segment found on too few replicas for a
 writer to recover it, a stream without a name. A plan with problems is not applied unless `--force` is

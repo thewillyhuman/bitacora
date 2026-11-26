@@ -9,6 +9,9 @@
 //! - The command, end to end: a cluster loses its metadata store, is rebuilt from its replicas and its
 //!   object store, and afterwards a writer takes over and every committed record is read back.
 //! - What stops a rebuild: no replicas, problems without force, and that a dry run writes nothing.
+//! - Records without data: a stream the metadata store records while nothing was found of its segments is
+//!   reported, a stream that was found or was never written is not, and a stream that was deleted after
+//!   the snapshot that was restored is reported end to end.
 //!
 //! # How the fixtures work
 //!
@@ -26,8 +29,8 @@ use bitacora_types::replica_api::SegmentDescriptor;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::*;
-use crate::commands::stream;
 use crate::commands::testing::{STREAM, TestCluster};
+use crate::commands::{metadata, stream};
 
 /// The stream the pure tests plan.
 const STREAM_ID: StreamId = StreamId::new(7);
@@ -516,6 +519,61 @@ fn every_stream_found_gets_a_plan_sorted_by_identifier() {
     assert_eq!(planned_streams[0].stream_id, StreamId::new(3));
 }
 
+/// A record of the stream as the metadata store holds it after a restore: with the one segment that the
+/// replicas reported when it was made.
+fn record_with_a_segment() -> StreamRecord {
+    let inputs = inputs_with(&['a', 'b', 'c'], &[file_copy(1, 4, 1, 9, Some(9))]);
+    record_of_the_stream(&inputs)
+}
+
+/// What a snapshot that is older than a deletion brings back, and what the loss of every copy looks like:
+/// the two cannot be told apart, so the operator is told.
+#[test]
+fn stream_the_store_records_and_nothing_was_found_of_is_a_record_without_data() {
+    let mut inputs = inputs_with(&['a', 'b', 'c'], &[]);
+    inputs.existing_streams = vec![record_with_a_segment()];
+
+    let without_data = records_without_data(&inputs);
+
+    assert_eq!(
+        without_data,
+        [RecordWithoutData {
+            stream_id: STREAM_ID.get(),
+            name: "orders".to_owned(),
+            segments: 1,
+        }]
+    );
+}
+
+#[test]
+fn stream_of_which_a_copy_was_found_is_no_record_without_data() {
+    let mut inputs = inputs_with(&['a'], &[file_copy(1, 4, 1, 9, Some(9))]);
+    inputs.existing_streams = vec![record_with_a_segment()];
+
+    assert_eq!(records_without_data(&inputs), Vec::new());
+}
+
+#[test]
+fn stream_of_which_an_object_was_found_is_no_record_without_data() {
+    let mut inputs = inputs_with(&['a', 'b', 'c'], &[]);
+    inputs.existing_streams = vec![record_with_a_segment()];
+    inputs.tiered_objects = vec![tiered_object(1, 4, 1, 9)];
+
+    assert_eq!(records_without_data(&inputs), Vec::new());
+}
+
+/// A stream that was created and never written has no segment, so there is nothing to find and nothing to
+/// report.
+#[test]
+fn stream_that_was_never_written_is_no_record_without_data() {
+    let mut inputs = inputs_with(&['a', 'b', 'c'], &[]);
+    let mut never_written = record_with_a_segment();
+    never_written.segments.clear();
+    inputs.existing_streams = vec![never_written];
+
+    assert_eq!(records_without_data(&inputs), Vec::new());
+}
+
 #[test]
 fn nothing_found_plans_nothing() {
     let inputs = inputs_with(&['a', 'b', 'c'], &[]);
@@ -925,4 +983,40 @@ async fn saying_there_is_no_object_store_while_one_is_configured_is_refused() {
     let refused = rebuild(&started.cluster, &names(), &[], no_object_store).await;
 
     assert!(matches!(refused, Err(CommandError::Refused { .. })), "{refused:?}");
+}
+
+/// Found on a real cluster. A snapshot is minutes older than the cluster, so a stream that was deleted in
+/// those minutes comes back with it: a record whose segments are on no replica any more. The rebuild plans
+/// the streams it finds and used to say nothing about such a record, which then stayed in the store as a
+/// stream that cannot be read.
+#[tokio::test(start_paused = true)]
+async fn stream_deleted_after_the_restored_snapshot_is_reported_as_a_record_without_data() {
+    let started = TestCluster::with_stream(3).await;
+    started.append_numbered(1, 3).await;
+    // The pass that let the writer in has just written a snapshot. The next one is due minutes later, and
+    // it is the one that knows the stream with its segment.
+    started.let_pass(std::time::Duration::from_mins(10)).await;
+    let snapshot_before_the_deletion = bitacora_meta::snapshot_object_key(started.cluster.clock.now());
+    started.run_controller_pass().await;
+    stream::delete(&started.cluster, STREAM, true)
+        .await
+        .expect("the stream is deleted");
+    for _pass in 0..3 {
+        started.run_controller_pass().await;
+    }
+    started.lose_the_metadata_store_under_running_replicas().await;
+    metadata::restore(&started.cluster, &snapshot_before_the_deletion, false, false)
+        .await
+        .expect("the snapshot is restored");
+
+    let report = rebuild(&started.cluster, &[], &[], RebuildMode::default())
+        .await
+        .expect("the plan is made");
+
+    let mut names_without_data = Vec::new();
+    for record in &report.records_without_data {
+        names_without_data.push(record.name.clone());
+    }
+    assert_eq!(names_without_data, [STREAM], "{report:?}");
+    assert_eq!(report.streams, Vec::new());
 }

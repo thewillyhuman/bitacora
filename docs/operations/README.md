@@ -253,7 +253,9 @@ The records are still on the replicas and in the object store. [../cli.md](../cl
 metadata store", has the procedure: stop writers and controllers, start an empty etcd,
 `bita metadata restore latest`, then `bita metadata rebuild` to pick up what happened after the
 snapshot, look at the plan, and `--apply` it. Read the plan: it lists what it assumed and what it could
-not find. A replica that did not answer is the thing to fix first.
+not find. A replica that did not answer is the thing to fix first. The plan ends with the records that
+came back with the snapshot and that no data was found of: streams that were deleted in the minutes
+before the loss are among them, and are to be deleted again.
 
 ### Replicas are lost beyond repair
 

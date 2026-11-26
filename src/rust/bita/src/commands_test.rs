@@ -625,8 +625,50 @@ fn rebuild_report(is_applied: bool, problems: Vec<String>) -> rebuild::RebuildRe
             problems,
             is_written: is_applied,
         }],
+        records_without_data: Vec::new(),
         problems: Vec::new(),
     }
+}
+
+#[test]
+fn rebuild_plan_lists_the_records_of_which_no_data_was_found() {
+    let mut report = rebuild_report(false, Vec::new());
+    report.records_without_data = vec![
+        rebuild::RecordWithoutData {
+            stream_id: 9,
+            name: "audit".to_owned(),
+            segments: 2,
+        },
+        rebuild::RecordWithoutData {
+            stream_id: 11,
+            name: "payments".to_owned(),
+            segments: 1,
+        },
+    ];
+
+    let rendered = CommandOutput::RebuildReport(report).render(OutputFormat::Table);
+
+    assert!(
+        rendered.contains(
+            "\nrecords in the metadata store of which no data was found: 2\n\
+             STREAM  NAME      SEGMENTS\n\
+             9       audit     2\n\
+             11      payments  1\n\
+             They are left as they are. Nothing of their segments is on a replica that answered or in the \
+             object store: either the stream was deleted after the snapshot was taken, or every copy of it is \
+             lost. Delete a stream that was deleted again with `bita stream delete <name> --yes`.\n"
+        ),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn rebuild_plan_says_nothing_about_records_without_data_when_there_are_none() {
+    let output = CommandOutput::RebuildReport(rebuild_report(false, Vec::new()));
+
+    let rendered = output.render(OutputFormat::Table);
+
+    assert!(!rendered.contains("no data was found"), "{rendered}");
 }
 
 #[test]

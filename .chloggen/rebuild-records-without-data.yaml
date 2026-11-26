@@ -1,0 +1,4 @@
+change_type: enhancement
+component: cli
+note: "`bita metadata rebuild` lists the streams that the metadata store records and of which no data was found. After a restore these are the streams that were deleted since the snapshot was taken; they used to stay in the store without a word, as streams that cannot be read."
+issues: [5]
