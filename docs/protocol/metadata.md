@@ -47,6 +47,23 @@ are JSON numbers. Timestamps are milliseconds since the Unix epoch, as JSON
 numbers. A replica identifier is a string of 1 to 128 ASCII letters, digits,
 `.`, `_` or `-`. An absent optional field is `null`.
 
+### On etcd
+
+Every program of a cluster meets the requirements above in the same way:
+
+| Requirement | On etcd |
+| --- | --- |
+| A key | The cluster's prefix followed by the key of the table, with nothing in between: `/bitacora/streams/orders`. The prefix ends in `/` |
+| A value | The record's JSON, as UTF-8 bytes. `counters/stream-id` is a JSON number alone, such as `7` |
+| The revision of a key | Its `mod_revision` |
+| "Key K is absent" | `create_revision(K) = 0` |
+| "Key K is at revision R" | `mod_revision(K) = R` |
+| A transaction | One `Txn`. The conditions are its comparisons, the writes and deletes are the operations of its success branch, and its failure branch is empty. An answer with `succeeded = false` means that a condition did not hold and nothing was written |
+| A read of one key or of a prefix | One `Range`, linearizable, which is etcd's default. A prefix read returns the keys in order |
+
+A request that fails or times out may or may not have been applied. The
+caller reads the record again and decides from what it finds.
+
 ## Stream record
 
 ```json
