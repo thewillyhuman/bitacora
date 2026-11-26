@@ -156,6 +156,23 @@ Each of these is one conditional write of the stream record.
 | Remove a tiered segment | Its object was deleted first | The segment removed |
 | Ask for truncation | None | `truncate_before` raised to the position asked for. A position at or below the recorded one changes nothing: it only moves forward |
 
+A write whose answer was lost is made again, so a writer's transitions say
+what happens when they find their own effect already in the record:
+
+| Transition | Found in the record | Then |
+| --- | --- | --- |
+| Seal | The segment is sealed at the same end | Nothing is written; the seal succeeded |
+| Seal | The segment is sealed at another end | Refused. A seal is never changed |
+| Open | The last segment is open under the caller's epoch | Nothing is written; that segment is the answer |
+| Roll | The last segment is the one after the segment to seal, open under the caller's epoch | Nothing is written; the roll happened, and that segment is the answer |
+
+A claim of the epoch is the exception. A candidate that did not learn
+whether its claim was applied cannot tell its own claim from another
+candidate's, so it starts over and claims the next epoch.
+
+A segment can be sealed empty, one below its `first_sequence`, and never
+lower than that.
+
 ### Creating a stream
 
 A stream's name, like a materializer's, is 1 to 255 ASCII letters, digits,
