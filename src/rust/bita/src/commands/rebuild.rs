@@ -15,6 +15,9 @@
 //! - [`RebuildInputs`], [`ReplicaInventory`], [`TieredObject`]: what was found.
 //! - [`PlannedStream`]: the record planned for one stream, with every assumption and problem.
 //! - [`RebuildReport`] and its parts: what the operator is shown.
+//! - Private steps, in the order the file reads: `collect_evidence`, `plan_stream` and `plan_record` with one
+//!   function per rule below, the report's rendering, then the gathering (`replicas_to_ask`,
+//!   `gather_inventories`, `find_tiered_objects`, `gather_what_is_known`) and `apply_plan`.
 //!
 //! # How it works
 //!
@@ -49,12 +52,17 @@
 //! **Applying.** Without `--apply` the plan is only shown. With it, every planned record is written with
 //! `MetadataStore::adopt_stream`. A plan with problems is not applied unless forced.
 //!
+//! Assumptions and problems are sentences for the operator. The planning functions append them to the
+//! two lists of the stream they plan, in the order of the rules above, so the report reads in that order.
+//!
 //! # Invariants
 //!
 //! - Planning is pure: the same inventory gives the same plan, and nothing is asked or written.
 //! - Nothing is written without `--apply`, and nothing with problems without `--force`.
 //! - A stream recorded as deleted is never rebuilt: its records are being removed on purpose.
 //! - No replica is told to change anything. Rebuilding only writes to the metadata store.
+//! - [`rebuild`] asks in a fixed order: the registered replicas, each replica's copies, the object store,
+//!   the deleted streams, the existing streams. Nothing is written before all of it was read.
 //!
 //! # See also
 //!
@@ -65,7 +73,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use bitacora_artifact::ArtifactStore;
+use bitacora_artifact::{ArtifactStore, ObjectInfo};
 use bitacora_meta::{
     CopyRecord, CopyState, RECORD_SCHEMA_VERSION, RetentionPolicy, SealRecord, SegmentRecord, StreamRecord,
     TieredRecord,
@@ -142,13 +150,34 @@ pub(crate) struct PlannedStream {
     pub(crate) problems: Vec<String>,
 }
 
+/// What one replica reported about a segment.
+#[derive(Clone, Debug)]
+struct Holder {
+    /// The replica that reported the copy.
+    replica_id: ReplicaId,
+    /// What it reported: a file with its header, or bare fencing or sealing state.
+    status: SegmentStatus,
+}
+
 /// Everything found about one segment.
 #[derive(Clone, Debug, Default)]
 struct SegmentEvidence {
     /// The replicas that reported the segment, each with what it reported.
-    holders: Vec<(ReplicaId, SegmentStatus)>,
+    holders: Vec<Holder>,
     /// The segment's object in the object store, if there is one.
     tiered: Option<TieredObject>,
+}
+
+/// Everything found about every segment, by stream and then by segment.
+type EvidenceByStream = BTreeMap<StreamId, BTreeMap<SegmentId, SegmentEvidence>>;
+
+/// Where a segment starts, as one file header or one object footer states it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SegmentStart {
+    /// The epoch of the writer that authored the segment.
+    epoch: Epoch,
+    /// The sequence number of the segment's first record.
+    first_sequence: SequenceNumber,
 }
 
 /// A segment whose start is known, from a file header or an object footer.
@@ -166,6 +195,16 @@ struct LocatedSegment {
     evidence: SegmentEvidence,
 }
 
+/// What looking at every segment of one stream found.
+struct SegmentScan {
+    /// The segments whose start is known, oldest first.
+    located_segments: Vec<LocatedSegment>,
+    /// The highest epoch that any copy, any fencing state, any object or the existing record mentions.
+    highest_epoch: Epoch,
+    /// The highest segment identifier seen, located or not.
+    highest_segment_id: SegmentId,
+}
+
 /// Plans the stream records to write, one per stream identifier found.
 ///
 /// See the file header for the rules. This function asks nothing and writes nothing.
@@ -180,27 +219,7 @@ struct LocatedSegment {
 /// One plan per stream identifier that a replica or an object mentions, sorted by identifier. Streams the
 /// metadata store knows but nothing was found of are not planned and stay as they are.
 pub(crate) fn plan_rebuild(inputs: &RebuildInputs) -> Vec<PlannedStream> {
-    let mut evidence_by_stream: BTreeMap<StreamId, BTreeMap<SegmentId, SegmentEvidence>> = BTreeMap::new();
-    for inventory in &inputs.inventories {
-        for copy in &inventory.copies {
-            evidence_by_stream
-                .entry(copy.address.stream_id)
-                .or_default()
-                .entry(copy.address.segment_id)
-                .or_default()
-                .holders
-                .push((inventory.replica_id.clone(), *copy));
-        }
-    }
-    for tiered_object in &inputs.tiered_objects {
-        let address = tiered_object.footer.segment.address;
-        evidence_by_stream
-            .entry(address.stream_id)
-            .or_default()
-            .entry(address.segment_id)
-            .or_default()
-            .tiered = Some(tiered_object.clone());
-    }
+    let evidence_by_stream = collect_evidence(inputs);
     let mut planned_streams = Vec::with_capacity(evidence_by_stream.len());
     for (stream_id, evidence_by_segment) in &evidence_by_stream {
         planned_streams.push(plan_stream(*stream_id, evidence_by_segment, inputs));
@@ -208,18 +227,42 @@ pub(crate) fn plan_rebuild(inputs: &RebuildInputs) -> Vec<PlannedStream> {
     planned_streams
 }
 
+/// Sorts what the replicas reported and what the object store holds by the segment it is about.
+fn collect_evidence(inputs: &RebuildInputs) -> EvidenceByStream {
+    let mut evidence_by_stream = EvidenceByStream::new();
+    for inventory in &inputs.inventories {
+        for copy in &inventory.copies {
+            evidence_about(&mut evidence_by_stream, copy.address)
+                .holders
+                .push(Holder {
+                    replica_id: inventory.replica_id.clone(),
+                    status: *copy,
+                });
+        }
+    }
+    for tiered_object in &inputs.tiered_objects {
+        let address = tiered_object.footer.segment.address;
+        evidence_about(&mut evidence_by_stream, address).tiered = Some(tiered_object.clone());
+    }
+    evidence_by_stream
+}
+
+/// The evidence about the segment at `address`, which is empty the first time the segment is mentioned.
+fn evidence_about(evidence_by_stream: &mut EvidenceByStream, address: SegmentAddress) -> &mut SegmentEvidence {
+    let evidence_by_segment = evidence_by_stream.entry(address.stream_id).or_default();
+    evidence_by_segment.entry(address.segment_id).or_default()
+}
+
 /// Plans the record of one stream from everything found about its segments.
+///
+/// A stream recorded as deleted, and one of which no file and no object was found, gets no record and a
+/// problem that says so.
 fn plan_stream(
     stream_id: StreamId,
     evidence_by_segment: &BTreeMap<SegmentId, SegmentEvidence>,
     inputs: &RebuildInputs,
 ) -> PlannedStream {
-    let mut existing = None;
-    for known_stream in &inputs.existing_streams {
-        if known_stream.stream_id == stream_id {
-            existing = Some(known_stream);
-        }
-    }
+    let existing = existing_record_of(stream_id, &inputs.existing_streams);
     let name = match existing {
         Some(known_stream) => Some(known_stream.name.clone()),
         None => inputs.names_by_stream_id.get(&stream_id.get()).cloned(),
@@ -237,76 +280,122 @@ fn plan_stream(
             .push("the stream is recorded as deleted; its records are being removed and it is not rebuilt".to_owned());
         return planned;
     }
-
-    let mut located_segments = Vec::new();
-    let mut highest_epoch = existing.map_or(Epoch::ZERO, |known_stream| known_stream.epoch);
-    let mut highest_segment_id = SegmentId::new(0);
-    for (segment_id, evidence) in evidence_by_segment {
-        highest_segment_id = highest_segment_id.max(*segment_id);
-        highest_epoch = highest_epoch.max(highest_epoch_in(evidence));
-        if let Some(located) = locate_segment(*segment_id, evidence, &mut planned.problems) {
-            located_segments.push(located);
-        }
-    }
-    if located_segments.is_empty() {
+    let scan = scan_segments(evidence_by_segment, existing, &mut planned.problems);
+    if scan.located_segments.is_empty() {
         planned
             .problems
             .push("no replica that answered holds a file of the stream, and the object store holds none".to_owned());
         return planned;
     }
+    planned.record = plan_record(&scan, existing, inputs.now, &mut planned);
+    planned
+}
 
-    let sealed_ends = sealed_ends_of(&located_segments, &mut planned.assumptions);
-    let first_kept = first_segment_after_the_last_gap(&located_segments, &sealed_ends, &mut planned.problems);
-    let replication = if let Some(known_stream) = existing {
-        known_stream.replication
-    } else {
-        planned
-            .assumptions
-            .push("replication is not stored on replicas: assumed 3 replicas with write quorum 2".to_owned());
-        ReplicationSettings::DEFAULT
+/// The record the metadata store still holds for `stream_id`, if it holds one.
+fn existing_record_of(stream_id: StreamId, existing_streams: &[StreamRecord]) -> Option<&StreamRecord> {
+    let mut existing = None;
+    for known_stream in existing_streams {
+        if known_stream.stream_id == stream_id {
+            existing = Some(known_stream);
+        }
+    }
+    existing
+}
+
+/// Looks at everything found about each segment of a stream: locates the segments that hold records, and
+/// keeps the highest epoch and the highest segment identifier seen anywhere.
+///
+/// The epoch of `existing`, the record the metadata store still has, counts too. Copies that disagree
+/// about a segment are added to `problems`.
+fn scan_segments(
+    evidence_by_segment: &BTreeMap<SegmentId, SegmentEvidence>,
+    existing: Option<&StreamRecord>,
+    problems: &mut Vec<String>,
+) -> SegmentScan {
+    let mut scan = SegmentScan {
+        located_segments: Vec::new(),
+        highest_epoch: existing.map_or(Epoch::ZERO, |known_stream| known_stream.epoch),
+        highest_segment_id: SegmentId::new(0),
     };
+    for (segment_id, evidence) in evidence_by_segment {
+        scan.highest_segment_id = scan.highest_segment_id.max(*segment_id);
+        scan.highest_epoch = scan.highest_epoch.max(highest_epoch_in(evidence));
+        if let Some(located) = locate_segment(*segment_id, evidence, problems) {
+            scan.located_segments.push(located);
+        }
+    }
+    scan
+}
+
+/// Plans the record of a stream that has at least one located segment: rules 2 to 5 of the file header.
+///
+/// Every assumption and problem is added to `planned`, in the order of the rules.
+///
+/// # Returns
+///
+/// The record, or `None` if no name is known for the stream, which is added to the problems.
+fn plan_record(
+    scan: &SegmentScan,
+    existing: Option<&StreamRecord>,
+    now: Timestamp,
+    planned: &mut PlannedStream,
+) -> Option<StreamRecord> {
+    let located_segments = &scan.located_segments;
+    let sealed_ends = sealed_ends_of(located_segments, &mut planned.assumptions);
+    let first_kept = first_segment_after_the_last_gap(located_segments, &sealed_ends, &mut planned.problems);
+    let replication = replication_of(existing, &mut planned.assumptions);
     let mut segments = Vec::new();
     for index in first_kept..located_segments.len() {
-        segments.push(segment_record(
-            &located_segments[index],
-            sealed_ends[index],
-            replication,
-            inputs.now,
-            &mut planned,
-        ));
+        let located = &located_segments[index];
+        segments.push(segment_record(located, sealed_ends[index], replication, now, planned));
     }
-    planned.assumptions.push(
-        "seal times are not stored on replicas: sealed segments count as sealed now, which only \
-         delays their tiering and retention"
-            .to_owned(),
-    );
-    if existing.is_none() {
-        planned.assumptions.push(
-            "retention policy and materializers are not stored on replicas: none is set, and \
-             nothing is truncated until materializers are registered again"
-                .to_owned(),
-        );
-    }
+    note_what_replicas_do_not_store(existing, &mut planned.assumptions);
     let Some(name) = planned.name.clone() else {
         planned.problems.push(format!(
-            "no name is known for the stream: pass --name {stream_id}=<name>"
+            "no name is known for the stream: pass --name {}=<name>",
+            planned.stream_id
         ));
-        return planned;
+        return None;
     };
     let findings = StreamFindings {
-        highest_epoch,
-        highest_segment_id,
+        highest_epoch: scan.highest_epoch,
+        highest_segment_id: scan.highest_segment_id,
         first_found_sequence: located_segments[first_kept].first_sequence,
     };
-    planned.record = Some(stream_record(
-        stream_id,
+    Some(stream_record(
+        planned.stream_id,
         name,
         replication,
         segments,
         &findings,
         existing,
-    ));
-    planned
+    ))
+}
+
+/// The stream's replication: what `existing` records, or the default with an assumption that says so.
+fn replication_of(existing: Option<&StreamRecord>, assumptions: &mut Vec<String>) -> ReplicationSettings {
+    if let Some(known_stream) = existing {
+        return known_stream.replication;
+    }
+    assumptions.push("replication is not stored on replicas: assumed 3 replicas with write quorum 2".to_owned());
+    ReplicationSettings::DEFAULT
+}
+
+/// Adds the assumptions about what no replica stores: when segments were sealed and, unless `existing`
+/// says, the retention policy and the materializers.
+fn note_what_replicas_do_not_store(existing: Option<&StreamRecord>, assumptions: &mut Vec<String>) {
+    assumptions.push(
+        "seal times are not stored on replicas: sealed segments count as sealed now, which only \
+         delays their tiering and retention"
+            .to_owned(),
+    );
+    if existing.is_none() {
+        assumptions.push(
+            "retention policy and materializers are not stored on replicas: none is set, and \
+             nothing is truncated until materializers are registered again"
+                .to_owned(),
+        );
+    }
 }
 
 /// What the scan of a stream's segments found, beyond the segments themselves.
@@ -362,9 +451,9 @@ fn stream_record(
 /// The highest epoch anything found about a segment mentions.
 fn highest_epoch_in(evidence: &SegmentEvidence) -> Epoch {
     let mut highest_epoch = Epoch::ZERO;
-    for (_replica_id, status) in &evidence.holders {
-        highest_epoch = highest_epoch.max(status.fenced_epoch);
-        if let Some(descriptor) = status.descriptor {
+    for holder in &evidence.holders {
+        highest_epoch = highest_epoch.max(holder.status.fenced_epoch);
+        if let Some(descriptor) = holder.status.descriptor {
             highest_epoch = highest_epoch.max(descriptor.epoch);
         }
     }
@@ -379,52 +468,77 @@ fn highest_epoch_in(evidence: &SegmentEvidence) -> Epoch {
 /// # Returns
 ///
 /// `None` if no file and no object says where the segment starts: it holds no records worth listing.
-/// Disagreements between what was found are added to `problems`; the first statement found is used.
+/// Disagreements between what was found are added to `problems`; the first statement found is used, and
+/// the object's footer comes before the replicas' files.
 fn locate_segment(
     segment_id: SegmentId,
     evidence: &SegmentEvidence,
     problems: &mut Vec<String>,
 ) -> Option<LocatedSegment> {
-    let mut starts = Vec::new();
-    let mut recorded_seals = Vec::new();
-    if let Some(tiered_object) = &evidence.tiered {
-        let footer = tiered_object.footer;
-        starts.push((footer.segment.epoch, footer.segment.first_sequence));
-        recorded_seals.push(footer.sealed_end);
+    let stated_starts = stated_starts_of(evidence);
+    let recorded_seals = recorded_seals_of(evidence);
+    let start = *stated_starts.first()?;
+    if !all_agree(&stated_starts) {
+        problems.push(format!(
+            "segment {segment_id}: its copies disagree about its epoch or first sequence number"
+        ));
     }
-    for (_replica_id, status) in &evidence.holders {
-        if let Some(descriptor) = status.descriptor {
-            starts.push((descriptor.epoch, descriptor.first_sequence));
-        }
-        if let Some(sealed_end) = status.sealed_end {
-            recorded_seals.push(sealed_end);
-        }
-    }
-    let (epoch, first_sequence) = *starts.first()?;
-    for other_start in &starts {
-        if *other_start != (epoch, first_sequence) {
-            problems.push(format!(
-                "segment {segment_id}: its copies disagree about its epoch or first sequence number"
-            ));
-            break;
-        }
-    }
-    let recorded_sealed_end = recorded_seals.first().copied();
-    for other_seal in &recorded_seals {
-        if Some(*other_seal) != recorded_sealed_end {
-            problems.push(format!(
-                "segment {segment_id}: its copies disagree about where it was sealed"
-            ));
-            break;
-        }
+    if !all_agree(&recorded_seals) {
+        problems.push(format!(
+            "segment {segment_id}: its copies disagree about where it was sealed"
+        ));
     }
     Some(LocatedSegment {
         segment_id,
-        epoch,
-        first_sequence,
-        recorded_sealed_end,
+        epoch: start.epoch,
+        first_sequence: start.first_sequence,
+        recorded_sealed_end: recorded_seals.first().copied(),
         evidence: evidence.clone(),
     })
+}
+
+/// Every statement of where a segment starts: the object's footer first, then each file's header.
+fn stated_starts_of(evidence: &SegmentEvidence) -> Vec<SegmentStart> {
+    let mut stated_starts = Vec::new();
+    if let Some(tiered_object) = &evidence.tiered {
+        stated_starts.push(SegmentStart {
+            epoch: tiered_object.footer.segment.epoch,
+            first_sequence: tiered_object.footer.segment.first_sequence,
+        });
+    }
+    for holder in &evidence.holders {
+        if let Some(descriptor) = holder.status.descriptor {
+            stated_starts.push(SegmentStart {
+                epoch: descriptor.epoch,
+                first_sequence: descriptor.first_sequence,
+            });
+        }
+    }
+    stated_starts
+}
+
+/// Every sealed end that was recorded for a segment: the object's footer first, then each replica's.
+fn recorded_seals_of(evidence: &SegmentEvidence) -> Vec<SequenceNumber> {
+    let mut recorded_seals = Vec::new();
+    if let Some(tiered_object) = &evidence.tiered {
+        recorded_seals.push(tiered_object.footer.sealed_end);
+    }
+    for holder in &evidence.holders {
+        if let Some(sealed_end) = holder.status.sealed_end {
+            recorded_seals.push(sealed_end);
+        }
+    }
+    recorded_seals
+}
+
+/// Whether every statement says the same as the first one. An empty list agrees.
+fn all_agree<Statement: PartialEq>(statements: &[Statement]) -> bool {
+    for statement in statements {
+        if Some(statement) != statements.first() {
+            return false;
+        }
+    }
+    true
 }
 
 /// The sealed end of every located segment, in the same order; `None` for a segment left open.
@@ -488,7 +602,10 @@ fn first_segment_after_the_last_gap(
     first_kept
 }
 
-/// Builds the record of one located segment.
+/// Builds the record of one located segment: rule 4 of the file header.
+///
+/// Copies that were not found are added to the assumptions of `planned`, and records that may be lost to
+/// its problems.
 fn segment_record(
     located: &LocatedSegment,
     sealed_end: Option<SequenceNumber>,
@@ -497,78 +614,143 @@ fn segment_record(
     planned: &mut PlannedStream,
 ) -> SegmentRecord {
     let segment_id = located.segment_id;
-    let mut holders = located.evidence.holders.clone();
-    // Longest copy first; a replica with bare state last.
-    holders.sort_by(|(left_id, left), (right_id, right)| {
-        right.local_end.cmp(&left.local_end).then_with(|| left_id.cmp(right_id))
-    });
-    let mut file_holder_count = 0;
-    let mut has_complete_copy = located.evidence.tiered.is_some();
-    for (_replica_id, status) in &holders {
-        if status.local_end.is_some() {
-            file_holder_count += 1;
-        }
-        let reaches_the_end = match (status.local_end, sealed_end) {
-            (Some(local_end), Some(sealed_end)) => local_end >= sealed_end,
-            _open_or_without_file => false,
-        };
-        if reaches_the_end && !status.is_damaged {
-            has_complete_copy = true;
-        }
-    }
-
+    let tiered_object = located.evidence.tiered.as_ref();
+    let holders = holders_longest_first(&located.evidence);
+    let survey = survey_copies(&holders, tiered_object.is_some(), sealed_end);
+    let is_released = sealed_end.is_some() && tiered_object.is_some() && survey.file_holder_count == 0;
     let replica_count = replication.replica_count();
-    let is_released = sealed_end.is_some() && located.evidence.tiered.is_some() && file_holder_count == 0;
-    let mut copies = Vec::new();
-    if !is_released {
-        for (replica_id, _status) in holders.iter().take(replica_count) {
-            copies.push(CopyRecord {
-                replica_id: replica_id.clone(),
-                state: CopyState::Unverified,
-            });
-        }
-        let found_count = copies.len();
-        for missing_number in found_count..replica_count {
-            copies.push(CopyRecord {
-                replica_id: ReplicaId::new(format!("{MISSING_COPY_PREFIX}{}", missing_number + 1))
-                    .expect("the prefix and a number make a valid identifier"),
-                state: CopyState::Bad,
-            });
-        }
-        if found_count < replica_count {
-            planned.assumptions.push(format!(
-                "segment {segment_id}: {found_count} of {replica_count} copies were found; the \
-                 others are recorded as missing, and the controller rebuilds them"
-            ));
-        }
+    let copies = if is_released {
+        Vec::new()
+    } else {
+        copy_records(segment_id, &holders, replica_count, &mut planned.assumptions)
+    };
+    if let Some(problem) = lost_records_problem(segment_id, sealed_end, &survey, holders.len(), replication) {
+        planned.problems.push(problem);
     }
-
-    match sealed_end {
-        Some(sealed_end) if !has_complete_copy => planned.problems.push(format!(
-            "segment {segment_id}: no undamaged copy that reaches its sealed end {sealed_end} was \
-             found; records are lost unless a replica that did not answer holds one"
-        )),
-        None if holders.len() < replication.recovery_quorum() => planned.problems.push(format!(
-            "segment {segment_id}: only {} of its replicas answered, and a writer needs {} to \
-             recover the open segment",
-            holders.len(),
-            replication.recovery_quorum()
-        )),
-        _nothing_wrong => {}
-    }
-
     SegmentRecord {
         segment_id,
         epoch: located.epoch,
         first_sequence: located.first_sequence,
         sealed: sealed_end.map(|end| SealRecord { end, at: now }),
         copies,
-        tiered: located.evidence.tiered.as_ref().map(|tiered_object| TieredRecord {
-            object_key: tiered_object.object_key.clone(),
-            size_bytes: tiered_object.size_bytes,
-            uploaded_at: now,
-            are_local_copies_dropped: is_released,
-        }),
+        tiered: tiered_object.map(|tiered_object| tiered_record(tiered_object, now, is_released)),
+    }
+}
+
+/// The record of where a segment lives in the object store.
+///
+/// The time of the upload is not known and is recorded as `now`. `is_released` says that no replica
+/// holds a file of the segment any more, so the object is the only copy.
+fn tiered_record(tiered_object: &TieredObject, now: Timestamp, is_released: bool) -> TieredRecord {
+    TieredRecord {
+        object_key: tiered_object.object_key.clone(),
+        size_bytes: tiered_object.size_bytes,
+        uploaded_at: now,
+        are_local_copies_dropped: is_released,
+    }
+}
+
+/// The replicas that reported a segment, the one with the longest copy first and those with bare fencing
+/// or sealing state last. Replicas with copies of the same length are sorted by identifier, so that the
+/// plan does not depend on the order in which the replicas answered.
+fn holders_longest_first(evidence: &SegmentEvidence) -> Vec<Holder> {
+    let mut holders = evidence.holders.clone();
+    holders.sort_by(|left, right| {
+        let longest_first = right.status.local_end.cmp(&left.status.local_end);
+        longest_first.then_with(|| left.replica_id.cmp(&right.replica_id))
+    });
+    holders
+}
+
+/// What the copies of one segment add up to.
+struct CopySurvey {
+    /// How many replicas hold a file of the segment, and not only fencing or sealing state.
+    file_holder_count: usize,
+    /// Whether the object store, or an undamaged file that reaches the sealed end, holds every record.
+    has_complete_copy: bool,
+}
+
+/// Counts the files among `holders` and looks for a copy that holds every record up to `sealed_end`.
+///
+/// An object in the object store is such a copy: it was verified before it was recorded. A file is one if
+/// it reaches the sealed end and is not damaged. An open segment has no complete copy on a replica.
+fn survey_copies(holders: &[Holder], is_tiered: bool, sealed_end: Option<SequenceNumber>) -> CopySurvey {
+    let mut survey = CopySurvey {
+        file_holder_count: 0,
+        has_complete_copy: is_tiered,
+    };
+    for holder in holders {
+        if holder.status.local_end.is_some() {
+            survey.file_holder_count += 1;
+        }
+        let reaches_the_end = match (holder.status.local_end, sealed_end) {
+            (Some(local_end), Some(sealed_end)) => local_end >= sealed_end,
+            _open_or_without_file => false,
+        };
+        if reaches_the_end && !holder.status.is_damaged {
+            survey.has_complete_copy = true;
+        }
+    }
+    survey
+}
+
+/// The copies to record for a segment that still has, or should have, copies on replicas.
+///
+/// The first `replica_count` holders become copies in state `unverified`. If fewer were found, the rest
+/// are copies in state `bad` on replicas that do not exist, and an assumption says so.
+fn copy_records(
+    segment_id: SegmentId,
+    holders: &[Holder],
+    replica_count: usize,
+    assumptions: &mut Vec<String>,
+) -> Vec<CopyRecord> {
+    let mut copies = Vec::new();
+    for holder in holders.iter().take(replica_count) {
+        copies.push(CopyRecord {
+            replica_id: holder.replica_id.clone(),
+            state: CopyState::Unverified,
+        });
+    }
+    let found_count = copies.len();
+    for missing_number in found_count..replica_count {
+        copies.push(CopyRecord {
+            replica_id: ReplicaId::new(format!("{MISSING_COPY_PREFIX}{}", missing_number + 1))
+                .expect("the prefix and a number make a valid identifier"),
+            state: CopyState::Bad,
+        });
+    }
+    if found_count < replica_count {
+        assumptions.push(format!(
+            "segment {segment_id}: {found_count} of {replica_count} copies were found; the \
+             others are recorded as missing, and the controller rebuilds them"
+        ));
+    }
+    copies
+}
+
+/// The problem to report if records of a segment may be lost, if there is one.
+///
+/// A sealed segment needs a complete copy, which `survey` says whether it has. An open one needs a
+/// recovery quorum of the replicas that hold it to have answered, or the next writer cannot recover it;
+/// `holder_count` is how many answered.
+fn lost_records_problem(
+    segment_id: SegmentId,
+    sealed_end: Option<SequenceNumber>,
+    survey: &CopySurvey,
+    holder_count: usize,
+    replication: ReplicationSettings,
+) -> Option<String> {
+    match sealed_end {
+        Some(sealed_end) if !survey.has_complete_copy => Some(format!(
+            "segment {segment_id}: no undamaged copy that reaches its sealed end {sealed_end} was \
+             found; records are lost unless a replica that did not answer holds one"
+        )),
+        None if holder_count < replication.recovery_quorum() => Some(format!(
+            "segment {segment_id}: only {holder_count} of its replicas answered, and a writer needs {} to \
+             recover the open segment",
+            replication.recovery_quorum()
+        )),
+        _nothing_wrong => None,
     }
 }
 
@@ -623,7 +805,46 @@ pub(crate) struct RebuildReport {
     pub(crate) problems: Vec<String>,
 }
 
+impl RebuiltStream {
+    /// Appends the stream to `rendered`: a title line, the planned record with its segments if there is
+    /// one, then the assumptions and the problems.
+    fn render_into(&self, rendered: &mut String) {
+        let name = match &self.name {
+            Some(name) => format!("{name:?}"),
+            None => "(no name)".to_owned(),
+        };
+        let written = if self.is_written { "written" } else { "not written" };
+        let _ = writeln!(rendered, "\nstream {} {name}: {written}", self.stream_id);
+        if let (Some(epoch), Some(low_water_mark), Some(next_segment_id)) =
+            (self.epoch, self.low_water_mark, self.next_segment_id)
+        {
+            let _ = writeln!(
+                rendered,
+                "epoch {epoch}, low-water mark {low_water_mark}, next segment id {next_segment_id}"
+            );
+            let mut table = segment_table();
+            for segment in &self.segments {
+                table.push_row(segment.table_row());
+            }
+            rendered.push_str(&table.render());
+        }
+        render_list(rendered, "assumptions", &self.assumptions);
+        render_list(rendered, "problems", &self.problems);
+    }
+}
+
 impl RebuildReport {
+    /// A report of a rebuild that has asked nothing yet.
+    fn empty() -> Self {
+        Self {
+            is_applied: false,
+            replicas: Vec::new(),
+            tiered_objects: 0,
+            streams: Vec::new(),
+            problems: Vec::new(),
+        }
+    }
+
     /// How many problems the report holds, in the streams and beyond.
     fn problem_count(&self) -> usize {
         let mut count = self.problems.len();
@@ -636,7 +857,18 @@ impl RebuildReport {
     /// Renders the report: what was asked, then every stream with its segments, assumptions and
     /// problems, then what to do next.
     pub(crate) fn render_text(&self) -> String {
-        let mut rendered = String::new();
+        let mut rendered = self.render_what_was_asked();
+        for stream in &self.streams {
+            stream.render_into(&mut rendered);
+        }
+        rendered.push('\n');
+        rendered.push_str(self.next_step());
+        rendered
+    }
+
+    /// Renders the replicas that were asked as a table, the number of objects found, and the problems
+    /// that are not about one stream.
+    fn render_what_was_asked(&self) -> String {
         let mut replica_table = Table::new(&["REPLICA", "ADDRESS", "ANSWERED", "COPIES"]);
         for replica in &self.replicas {
             replica_table.push_row(vec![
@@ -646,46 +878,22 @@ impl RebuildReport {
                 replica.copies.to_string(),
             ]);
         }
-        rendered.push_str(&replica_table.render());
+        let mut rendered = replica_table.render();
         let _ = writeln!(rendered, "tiered segment objects found: {}", self.tiered_objects);
         render_list(&mut rendered, "problems", &self.problems);
-
-        for stream in &self.streams {
-            let name = match &stream.name {
-                Some(name) => format!("{name:?}"),
-                None => "(no name)".to_owned(),
-            };
-            let written = if stream.is_written { "written" } else { "not written" };
-            let _ = writeln!(rendered, "\nstream {} {name}: {written}", stream.stream_id);
-            if let (Some(epoch), Some(low_water_mark), Some(next_segment_id)) =
-                (stream.epoch, stream.low_water_mark, stream.next_segment_id)
-            {
-                let _ = writeln!(
-                    rendered,
-                    "epoch {epoch}, low-water mark {low_water_mark}, next segment id {next_segment_id}"
-                );
-                let mut table = segment_table();
-                for segment in &stream.segments {
-                    table.push_row(segment.table_row());
-                }
-                rendered.push_str(&table.render());
-            }
-            render_list(&mut rendered, "assumptions", &stream.assumptions);
-            render_list(&mut rendered, "problems", &stream.problems);
-        }
-
-        rendered.push('\n');
-        if self.is_applied {
-            rendered.push_str("applied. Start the controllers: they verify every copy and rebuild missing ones.\n");
-        } else if self.problem_count() == 0 {
-            rendered.push_str("dry run: nothing was written. Pass --apply to write this plan.\n");
-        } else {
-            rendered.push_str(
-                "dry run: nothing was written. The plan has problems; fix them, or pass --apply \
-                 --force to write what could be rebuilt.\n",
-            );
-        }
         rendered
+    }
+
+    /// The last line of the report: what happened and what the operator does next.
+    fn next_step(&self) -> &'static str {
+        if self.is_applied {
+            "applied. Start the controllers: they verify every copy and rebuild missing ones.\n"
+        } else if self.problem_count() == 0 {
+            "dry run: nothing was written. Pass --apply to write this plan.\n"
+        } else {
+            "dry run: nothing was written. The plan has problems; fix them, or pass --apply \
+             --force to write what could be rebuilt.\n"
+        }
     }
 }
 
@@ -730,6 +938,34 @@ pub(crate) async fn rebuild(
     is_applied: bool,
     is_forced: bool,
 ) -> Result<RebuildReport, CommandError> {
+    let addresses_by_replica = replicas_to_ask(cluster, extra_replicas).await?;
+    let mut report = RebuildReport::empty();
+    let inventories = gather_inventories(cluster, &addresses_by_replica, &mut report).await;
+    let tiered_objects = find_tiered_objects(cluster, &mut report.problems).await;
+    report.tiered_objects = tiered_objects.len();
+
+    let inputs = gather_what_is_known(cluster, names, inventories, tiered_objects).await?;
+    let planned_streams = plan_rebuild(&inputs);
+    for planned in &planned_streams {
+        report.streams.push(rebuilt_stream(planned));
+    }
+    if is_applied {
+        apply_plan(cluster, &planned_streams, is_forced, &mut report).await?;
+    }
+    Ok(report)
+}
+
+/// The replicas to ask and the address of each: every registered replica, and every replica the operator
+/// named, whose address replaces a registered one.
+///
+/// # Errors
+///
+/// * [`CommandError::NothingToDo`] if no replica is registered and none was named.
+/// * [`CommandError::Metadata`] if the registry cannot be read.
+async fn replicas_to_ask(
+    cluster: &Cluster,
+    extra_replicas: &[(ReplicaId, String)],
+) -> Result<BTreeMap<ReplicaId, String>, CommandError> {
     let mut addresses_by_replica = BTreeMap::new();
     for registered in cluster.metadata.list_replicas().await? {
         addresses_by_replica.insert(registered.replica_id, registered.address);
@@ -744,28 +980,21 @@ pub(crate) async fn rebuild(
                 .to_owned(),
         });
     }
+    Ok(addresses_by_replica)
+}
 
-    let mut report = RebuildReport {
-        is_applied: false,
-        replicas: Vec::new(),
-        tiered_objects: 0,
-        streams: Vec::new(),
-        problems: Vec::new(),
-    };
-    let inventories = gather_inventories(cluster, &addresses_by_replica, &mut report).await;
-
-    let tiered_objects = if let Some(artifact_store) = &cluster.artifact_store {
-        find_tiered_objects(cluster, artifact_store.as_ref(), &mut report.problems).await
-    } else {
-        report.problems.push(
-            "the configuration names no object store: segments that were left to the object \
-             store cannot be found"
-                .to_owned(),
-        );
-        Vec::new()
-    };
-    report.tiered_objects = tiered_objects.len();
-
+/// Puts together what the plan is made from: what was gathered, and what the metadata store and the
+/// operator still know.
+///
+/// # Errors
+///
+/// Returns [`CommandError::Metadata`] if the deleted streams or the existing streams cannot be read.
+async fn gather_what_is_known(
+    cluster: &Cluster,
+    names: &[(u64, String)],
+    inventories: Vec<ReplicaInventory>,
+    tiered_objects: Vec<TieredObject>,
+) -> Result<RebuildInputs, CommandError> {
     let mut deleted_stream_ids = BTreeSet::new();
     for deleted in cluster.metadata.list_deleted_streams().await? {
         deleted_stream_ids.insert(deleted.stream_id);
@@ -774,21 +1003,29 @@ pub(crate) async fn rebuild(
     for (stream_id, name) in names {
         names_by_stream_id.insert(*stream_id, name.clone());
     }
-    let planned_streams = plan_rebuild(&RebuildInputs {
+    Ok(RebuildInputs {
         existing_streams: cluster.metadata.list_streams().await?,
         deleted_stream_ids,
         names_by_stream_id,
         inventories,
         tiered_objects,
         now: cluster.clock.now(),
-    });
-    for planned in &planned_streams {
-        report.streams.push(rebuilt_stream(planned));
-    }
+    })
+}
 
-    if !is_applied {
-        return Ok(report);
-    }
+/// Writes every planned record to the metadata store and marks it as written in `report`.
+///
+/// # Errors
+///
+/// * [`CommandError::Refused`] if the report holds problems and `is_forced` is not set. Nothing is
+///   written then.
+/// * [`CommandError::Metadata`] if the metadata store refuses a record. Records written before it stay.
+async fn apply_plan(
+    cluster: &Cluster,
+    planned_streams: &[PlannedStream],
+    is_forced: bool,
+    report: &mut RebuildReport,
+) -> Result<(), CommandError> {
     let problem_count = report.problem_count();
     if problem_count > 0 && !is_forced {
         return Err(CommandError::Refused {
@@ -805,7 +1042,7 @@ pub(crate) async fn rebuild(
         }
     }
     report.is_applied = true;
-    Ok(report)
+    Ok(())
 }
 
 /// Asks every replica for its segment copies.
@@ -823,38 +1060,45 @@ async fn gather_inventories(
 ) -> Vec<ReplicaInventory> {
     let mut inventories = Vec::new();
     for (replica_id, address) in addresses_by_replica {
-        let client = cluster.connector.connect(replica_id, address);
-        let answer = timeout(cluster.request_timeout, client.list_segments()).await;
-        let copies = match answer {
-            Ok(Ok(copies)) => Some(copies),
-            Ok(Err(replica_error)) => {
-                report.problems.push(format!(
-                    "replica {replica_id} did not answer ({replica_error}): its copies are not in \
-                     the plan"
-                ));
-                None
-            }
-            Err(_elapsed) => {
-                report.problems.push(format!(
-                    "replica {replica_id} did not answer in time: its copies are not in the plan"
-                ));
-                None
-            }
-        };
+        let answer = ask_for_copies(cluster, replica_id, address).await;
         report.replicas.push(AskedReplica {
             replica_id: replica_id.to_string(),
             address: address.clone(),
-            has_answered: copies.is_some(),
-            copies: copies.as_ref().map_or(0, Vec::len),
+            has_answered: answer.is_ok(),
+            copies: answer.as_ref().map_or(0, Vec::len),
         });
-        if let Some(copies) = copies {
-            inventories.push(ReplicaInventory {
+        match answer {
+            Ok(copies) => inventories.push(ReplicaInventory {
                 replica_id: replica_id.clone(),
                 copies,
-            });
+            }),
+            Err(problem) => report.problems.push(problem),
         }
     }
     inventories
+}
+
+/// Asks one replica for its segment copies, waiting no longer than the request timeout.
+///
+/// # Errors
+///
+/// Returns the sentence for the report's problems if the replica refused or did not answer in time.
+async fn ask_for_copies(
+    cluster: &Cluster,
+    replica_id: &ReplicaId,
+    address: &str,
+) -> Result<Vec<SegmentStatus>, String> {
+    let client = cluster.connector.connect(replica_id, address);
+    match timeout(cluster.request_timeout, client.list_segments()).await {
+        Ok(Ok(copies)) => Ok(copies),
+        Ok(Err(replica_error)) => Err(format!(
+            "replica {replica_id} did not answer ({replica_error}): its copies are not in \
+             the plan"
+        )),
+        Err(_elapsed) => Err(format!(
+            "replica {replica_id} did not answer in time: its copies are not in the plan"
+        )),
+    }
 }
 
 /// Describes one planned stream for the report.
@@ -880,13 +1124,17 @@ fn rebuilt_stream(planned: &PlannedStream) -> RebuiltStream {
 
 /// Lists the tiered segment objects and reads the footer of each.
 ///
-/// An object that cannot be read, or whose footer does not describe the segment its key names, is added
-/// to `problems` and left out.
-async fn find_tiered_objects(
-    cluster: &Cluster,
-    artifact_store: &dyn ArtifactStore,
-    problems: &mut Vec<String>,
-) -> Vec<TieredObject> {
+/// If the configuration names no object store, or the store cannot be listed, that is added to `problems`
+/// and nothing is found: the segments that were left to the object store are then missing from the plan.
+async fn find_tiered_objects(cluster: &Cluster, problems: &mut Vec<String>) -> Vec<TieredObject> {
+    let Some(artifact_store) = &cluster.artifact_store else {
+        problems.push(
+            "the configuration names no object store: segments that were left to the object \
+             store cannot be found"
+                .to_owned(),
+        );
+        return Vec::new();
+    };
     let listing = timeout(
         cluster.request_timeout,
         artifact_store.list_prefix(SEGMENT_OBJECTS_PREFIX),
@@ -897,41 +1145,67 @@ async fn find_tiered_objects(
             .push("the object store could not be listed: segments that were left to it are not in the plan".to_owned());
         return Vec::new();
     };
+    read_tiered_objects(cluster, artifact_store.as_ref(), objects, problems).await
+}
+
+/// Reads the footer of every object in `objects` whose key names a segment.
+///
+/// An object whose key is shaped differently is somebody else's and is skipped without a word. One that
+/// cannot be read as the segment its key names is added to `problems` and left out.
+async fn read_tiered_objects(
+    cluster: &Cluster,
+    artifact_store: &dyn ArtifactStore,
+    objects: Vec<ObjectInfo>,
+    problems: &mut Vec<String>,
+) -> Vec<TieredObject> {
     let mut tiered_objects = Vec::new();
     for object in objects {
         let Some(address) = segment_address_of(&object.object_key) else {
             continue;
         };
-        let footer_bytes = TIERED_FOOTER_BYTES as u64;
-        let footer = if object.size_bytes < footer_bytes {
-            None
-        } else {
-            let footer_range = object.size_bytes - footer_bytes..object.size_bytes;
-            let fetched = timeout(
-                cluster.request_timeout,
-                artifact_store.get_range(&object.object_key, footer_range),
-            )
-            .await;
-            match fetched {
-                Ok(Ok(encoded_footer)) => TieredFooter::decode(&encoded_footer).ok(),
-                _failed_or_timed_out => None,
-            }
-        };
-        let is_the_named_segment = footer
-            .is_some_and(|footer| footer.segment.address == address && footer.object_bytes() == object.size_bytes);
-        match footer {
-            Some(footer) if is_the_named_segment => tiered_objects.push(TieredObject {
+        match read_footer_of(cluster, artifact_store, &object, address).await {
+            Some(footer) => tiered_objects.push(TieredObject {
                 object_key: object.object_key,
                 size_bytes: object.size_bytes,
                 footer,
             }),
-            _unreadable_or_another_segment => problems.push(format!(
+            None => problems.push(format!(
                 "object {:?} cannot be read as the segment its key names: it is not in the plan",
                 object.object_key
             )),
         }
     }
     tiered_objects
+}
+
+/// Reads the footer of `object` and checks that it describes the whole segment at `address`.
+///
+/// # Returns
+///
+/// The footer, or `None` if the object is shorter than a footer, cannot be fetched in time, does not end
+/// in an intact footer, or its footer names another segment or another object size.
+async fn read_footer_of(
+    cluster: &Cluster,
+    artifact_store: &dyn ArtifactStore,
+    object: &ObjectInfo,
+    address: SegmentAddress,
+) -> Option<TieredFooter> {
+    let footer_bytes = TIERED_FOOTER_BYTES as u64;
+    if object.size_bytes < footer_bytes {
+        return None;
+    }
+    let footer_range = object.size_bytes - footer_bytes..object.size_bytes;
+    let fetched = timeout(
+        cluster.request_timeout,
+        artifact_store.get_range(&object.object_key, footer_range),
+    )
+    .await;
+    let Ok(Ok(encoded_footer)) = fetched else {
+        return None;
+    };
+    let footer = TieredFooter::decode(&encoded_footer).ok()?;
+    let is_the_named_segment = footer.segment.address == address && footer.object_bytes() == object.size_bytes;
+    if is_the_named_segment { Some(footer) } else { None }
 }
 
 /// The segment that a tiered object key names, as `streams/<stream id>/segments/<segment id>`.

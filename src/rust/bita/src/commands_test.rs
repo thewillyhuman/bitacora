@@ -3,7 +3,8 @@
 //! # What is covered
 //!
 //! - Dispatch: a parsed command reaches the right function, with its arguments, and `stream append`
-//!   takes its records from standard input and from its arguments.
+//!   takes its records from standard input and from its arguments, and takes the stream at once only if
+//!   it is forced.
 //! - Rendering: every kind of result as text, written out in full so that a change of layout is a
 //!   visible change of this file; and the shape of the JSON.
 //!
@@ -660,4 +661,30 @@ fn applied_rebuild_says_what_happens_next() {
         rendered.ends_with("applied. Start the controllers: they verify every copy and rebuild missing ones.\n"),
         "{rendered}"
     );
+}
+
+#[test]
+fn append_puts_the_lines_of_standard_input_before_the_arguments() {
+    let standard_input_records = vec![Bytes::from_static(b"from standard input")];
+    let argument_records = ["from an argument".to_owned()];
+
+    let payloads = payloads_to_append(standard_input_records, &argument_records);
+
+    assert_eq!(
+        payloads,
+        vec![
+            Bytes::from_static(b"from standard input"),
+            Bytes::from_static(b"from an argument")
+        ]
+    );
+}
+
+#[test]
+fn append_waits_for_a_live_writer_unless_forced() {
+    assert_eq!(takeover_policy(false), TakeoverPolicy::WaitForLeaseExpiry);
+}
+
+#[test]
+fn forced_append_takes_the_stream_at_once() {
+    assert_eq!(takeover_policy(true), TakeoverPolicy::Force);
 }

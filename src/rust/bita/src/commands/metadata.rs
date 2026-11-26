@@ -12,6 +12,8 @@
 //! - [`list_snapshots`]: the snapshots in the object store.
 //! - [`restore`]: writes one snapshot back into the metadata store.
 //! - Their results: [`SnapshotList`], [`SnapshotRow`], [`RestoreReport`].
+//! - The steps of a restore: `resolve_snapshot_key`, `fetch_snapshot`, `count_keys_missing_from` and
+//!   `restore_mode_for`.
 //!
 //! # How it works
 //!
@@ -22,6 +24,9 @@
 //! A restore into a store that already holds keys would mix two states, so it is refused unless forced;
 //! forced, it makes the store exactly what the snapshot was, deleting every other key. `--dry-run` does
 //! everything except the write, and reports what the write would do.
+//!
+//! [`restore`] reads in a fixed order and writes last: the snapshot's key (a listing, for `latest`), the
+//! snapshot object, then the whole metadata store as it is. Only then does it decide whether to write.
 //!
 //! A snapshot is up to one snapshot interval older than the cluster. Streams that rolled or changed
 //! writer since then are behind in the restored store, which is why the procedure is restore first, then
@@ -208,65 +213,104 @@ pub(crate) async fn restore(
     is_dry_run: bool,
 ) -> Result<RestoreReport, CommandError> {
     let artifact_store = object_store_of(cluster)?;
-    let object_key = if snapshot_name == LATEST_SNAPSHOT {
-        let listed = list_snapshots(cluster).await?;
-        match listed.snapshots.last() {
-            Some(newest) => newest.object_key.clone(),
-            None => {
-                return Err(CommandError::NothingToDo {
-                    reason: "the object store holds no metadata snapshot".to_owned(),
-                });
-            }
-        }
-    } else {
-        snapshot_name.to_owned()
-    };
-    let stored_object = fetch_object(cluster, artifact_store.as_ref(), &object_key).await?;
-    let snapshot = match MetadataSnapshot::decode(&stored_object) {
-        Ok(snapshot) => snapshot,
-        Err(reason) => return Err(CommandError::UnreadableSnapshot { object_key, reason }),
-    };
-
+    let object_key = resolve_snapshot_key(cluster, snapshot_name).await?;
+    let snapshot = fetch_snapshot(cluster, artifact_store.as_ref(), &object_key).await?;
     let store_before = cluster.metadata.snapshot(cluster.clock.now()).await?;
-    let mut snapshot_keys = BTreeSet::new();
-    for entry in &snapshot.entries {
-        snapshot_keys.insert(entry.key.as_str());
-    }
-    let mut keys_to_delete = 0;
-    for existing in &store_before.entries {
-        if !snapshot_keys.contains(existing.key.as_str()) {
-            keys_to_delete += 1;
-        }
-    }
     let mut report = RestoreReport {
         snapshot: object_key,
         taken_at: format_timestamp(snapshot.taken_at),
         is_dry_run,
         keys_in_store_before: store_before.entries.len(),
         keys_written: snapshot.entries.len(),
-        keys_deleted: keys_to_delete,
+        keys_deleted: count_keys_missing_from(&snapshot, &store_before),
     };
     if is_dry_run {
         return Ok(report);
     }
-    if !store_before.entries.is_empty() && !is_forced {
-        return Err(CommandError::Refused {
-            reason: format!(
-                "the metadata store holds {} keys; restoring replaces all of them with the snapshot. \
-                 Look at it with --dry-run, then pass --force",
-                store_before.entries.len()
-            ),
-        });
-    }
-    let mode = if is_forced {
-        RestoreMode::ReplaceEverything
-    } else {
-        RestoreMode::IntoEmptyStore
-    };
+    let mode = restore_mode_for(store_before.entries.len(), is_forced)?;
     let outcome = cluster.metadata.restore(&snapshot, mode).await?;
     report.keys_written = outcome.keys_written;
     report.keys_deleted = outcome.keys_deleted;
     Ok(report)
+}
+
+/// The object key of the snapshot the operator named: the name itself, or the key of the newest snapshot
+/// in the object store for `latest`.
+///
+/// # Errors
+///
+/// * [`CommandError::NothingToDo`] if `latest` was asked for and there is no snapshot.
+/// * What [`list_snapshots`] returns if the snapshots cannot be listed.
+async fn resolve_snapshot_key(cluster: &Cluster, snapshot_name: &str) -> Result<String, CommandError> {
+    if snapshot_name != LATEST_SNAPSHOT {
+        return Ok(snapshot_name.to_owned());
+    }
+    let listed = list_snapshots(cluster).await?;
+    match listed.snapshots.last() {
+        Some(newest) => Ok(newest.object_key.clone()),
+        None => Err(CommandError::NothingToDo {
+            reason: "the object store holds no metadata snapshot".to_owned(),
+        }),
+    }
+}
+
+/// Fetches the snapshot stored under `object_key` and verifies it.
+///
+/// # Errors
+///
+/// * [`CommandError::ObjectStore`] or [`CommandError::ObjectStoreTimedOut`] if the object cannot be
+///   fetched.
+/// * [`CommandError::UnreadableSnapshot`] if the object is not an intact snapshot.
+async fn fetch_snapshot(
+    cluster: &Cluster,
+    artifact_store: &dyn ArtifactStore,
+    object_key: &str,
+) -> Result<MetadataSnapshot, CommandError> {
+    let stored_object = fetch_object(cluster, artifact_store, object_key).await?;
+    match MetadataSnapshot::decode(&stored_object) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(reason) => Err(CommandError::UnreadableSnapshot {
+            object_key: object_key.to_owned(),
+            reason,
+        }),
+    }
+}
+
+/// How many keys of `store_before` the snapshot does not hold: the keys a forced restore deletes.
+fn count_keys_missing_from(snapshot: &MetadataSnapshot, store_before: &MetadataSnapshot) -> usize {
+    let mut snapshot_keys = BTreeSet::new();
+    for entry in &snapshot.entries {
+        snapshot_keys.insert(entry.key.as_str());
+    }
+    let mut missing_key_count = 0;
+    for existing in &store_before.entries {
+        if !snapshot_keys.contains(existing.key.as_str()) {
+            missing_key_count += 1;
+        }
+    }
+    missing_key_count
+}
+
+/// How to write a snapshot into a store that holds `keys_in_store` keys.
+///
+/// # Errors
+///
+/// Returns [`CommandError::Refused`] if the store holds keys and the restore is not forced: it would
+/// replace all of them.
+fn restore_mode_for(keys_in_store: usize, is_forced: bool) -> Result<RestoreMode, CommandError> {
+    if keys_in_store > 0 && !is_forced {
+        return Err(CommandError::Refused {
+            reason: format!(
+                "the metadata store holds {keys_in_store} keys; restoring replaces all of them with the snapshot. \
+                 Look at it with --dry-run, then pass --force"
+            ),
+        });
+    }
+    if is_forced {
+        Ok(RestoreMode::ReplaceEverything)
+    } else {
+        Ok(RestoreMode::IntoEmptyStore)
+    }
 }
 
 /// Fetches one whole object, waiting no longer than the request timeout.

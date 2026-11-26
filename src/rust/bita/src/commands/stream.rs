@@ -37,8 +37,8 @@ use std::io::Write;
 use std::time::Duration;
 
 use bitacora::{LogRecord, SequenceNumber, SequenceRange, StreamOptions, TakeoverPolicy};
-use bitacora_meta::{CheckpointRecord, RetentionPolicy, StreamRecord};
-use bitacora_types::ReplicationSettings;
+use bitacora_meta::{CheckpointRecord, RetentionPolicy, StreamRecord, WriterLease};
+use bitacora_types::{ReplicaId, ReplicationSettings, Timestamp};
 use bytes::Bytes;
 use serde::Serialize;
 
@@ -48,6 +48,9 @@ use crate::output::{OutputFormat, Table, format_payload, format_timestamp, hex_o
 
 /// The name the tool's writers record with their lease.
 const WRITER_IDENTITY: &str = "bita";
+
+/// What a text rendering shows where a stream has no value: no writer, no truncation request, no standby.
+const NO_VALUE: &str = "-";
 
 /// One stream, in brief.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -140,6 +143,26 @@ pub(crate) struct WriterDetails {
     pub(crate) is_lease_current: bool,
 }
 
+impl WriterDetails {
+    /// Describes a writer's lease as it stands at `now`.
+    fn of(lease: &WriterLease, now: Timestamp) -> Self {
+        Self {
+            identity: lease.writer_identity.clone(),
+            lease_expires_at: format_timestamp(lease.expires_at),
+            is_lease_current: lease.expires_at > now,
+        }
+    }
+
+    /// The writer in one phrase: who it is and whether its lease still holds.
+    fn render_text(&self) -> String {
+        if self.is_lease_current {
+            format!("{} (lease until {})", self.identity, self.lease_expires_at)
+        } else {
+            format!("{} (lease lapsed at {})", self.identity, self.lease_expires_at)
+        }
+    }
+}
+
 /// One materializer and its checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct MaterializerDetails {
@@ -219,42 +242,43 @@ pub(crate) struct StreamDetails {
 }
 
 impl StreamDetails {
+    /// Describes a stream and its materializers as they stand at `now`.
+    fn of(stream: &StreamRecord, checkpoints: &[CheckpointRecord], now: Timestamp) -> Self {
+        let mut materializers = Vec::with_capacity(checkpoints.len());
+        for checkpoint in checkpoints {
+            materializers.push(MaterializerDetails::of(checkpoint));
+        }
+        Self {
+            name: stream.name.clone(),
+            stream_id: stream.stream_id.get(),
+            epoch: stream.epoch.get(),
+            writer: stream.writer.as_ref().map(|lease| WriterDetails::of(lease, now)),
+            replicas: stream.replication.replica_count(),
+            write_quorum: stream.replication.write_quorum(),
+            keep_sealed_for_seconds: stream.retention.keep_sealed_for().map(|duration| duration.as_secs()),
+            low_water_mark: stream.low_water_mark.get(),
+            truncate_before: stream.truncate_before.map(SequenceNumber::get),
+            segments: stream.segments.len(),
+            next_segment_id: stream.next_segment_id.get(),
+            standby_replicas: stream.standby_replicas.as_deref().map(names_of),
+            materializers,
+        }
+    }
+
     /// Renders the stream as named values, followed by a table of its materializers if it has any.
     pub(crate) fn render_text(&self) -> String {
-        let writer = match &self.writer {
-            Some(writer) if writer.is_lease_current => {
-                format!("{} (lease until {})", writer.identity, writer.lease_expires_at)
-            }
-            Some(writer) => format!("{} (lease lapsed at {})", writer.identity, writer.lease_expires_at),
-            None => "-".to_owned(),
-        };
-        let retention = match self.keep_sealed_for_seconds {
-            Some(seconds) => format!("sealed segments kept at least {seconds}s"),
-            None => "deleted as soon as truncation allows".to_owned(),
-        };
-        let truncate_before = match self.truncate_before {
-            Some(sequence) => sequence.to_string(),
-            None => "-".to_owned(),
-        };
-        let standby = match &self.standby_replicas {
-            Some(replicas) => replicas.join(" "),
-            None => "-".to_owned(),
-        };
         let mut rendered = key_value_lines(&[
             ("name", self.name.clone()),
             ("id", self.stream_id.to_string()),
             ("epoch", self.epoch.to_string()),
-            ("writer", writer),
-            (
-                "replication",
-                format!("{} replicas, write quorum {}", self.replicas, self.write_quorum),
-            ),
-            ("retention", retention),
+            ("writer", self.writer_text()),
+            ("replication", self.replication_text()),
+            ("retention", self.retention_text()),
             ("low-water mark", self.low_water_mark.to_string()),
-            ("truncate before", truncate_before),
+            ("truncate before", self.truncate_before_text()),
             ("segments", self.segments.to_string()),
             ("next segment id", self.next_segment_id.to_string()),
-            ("standby replicas", standby),
+            ("standby replicas", self.standby_text()),
         ]);
         if !self.materializers.is_empty() {
             let mut table = materializer_table();
@@ -266,6 +290,52 @@ impl StreamDetails {
         }
         rendered
     }
+
+    /// The writer and its lease, or a dash if nobody holds the stream.
+    fn writer_text(&self) -> String {
+        match &self.writer {
+            Some(writer) => writer.render_text(),
+            None => NO_VALUE.to_owned(),
+        }
+    }
+
+    /// The replication as a phrase.
+    fn replication_text(&self) -> String {
+        format!("{} replicas, write quorum {}", self.replicas, self.write_quorum)
+    }
+
+    /// How long sealed segments are kept, as a phrase.
+    fn retention_text(&self) -> String {
+        match self.keep_sealed_for_seconds {
+            Some(seconds) => format!("sealed segments kept at least {seconds}s"),
+            None => "deleted as soon as truncation allows".to_owned(),
+        }
+    }
+
+    /// The position the owner asked to truncate before, or a dash if it did not ask.
+    fn truncate_before_text(&self) -> String {
+        match self.truncate_before {
+            Some(sequence) => sequence.to_string(),
+            None => NO_VALUE.to_owned(),
+        }
+    }
+
+    /// The standby replicas separated by spaces, or a dash if none are placed.
+    fn standby_text(&self) -> String {
+        match &self.standby_replicas {
+            Some(replicas) => replicas.join(" "),
+            None => NO_VALUE.to_owned(),
+        }
+    }
+}
+
+/// The identifiers of `replica_ids` as text, in the same order.
+fn names_of(replica_ids: &[ReplicaId]) -> Vec<String> {
+    let mut names = Vec::with_capacity(replica_ids.len());
+    for replica_id in replica_ids {
+        names.push(replica_id.to_string());
+    }
+    names
 }
 
 /// What an append committed.
@@ -390,39 +460,8 @@ pub(crate) async fn list(cluster: &Cluster) -> Result<StreamList, CommandError> 
 pub(crate) async fn describe(cluster: &Cluster, name: &str) -> Result<StreamDetails, CommandError> {
     let admin = cluster.client(WRITER_IDENTITY).admin();
     let description = admin.describe_stream(name).await?;
-    let stream = description.stream;
     let now = cluster.clock.now();
-    let writer = stream.writer.as_ref().map(|lease| WriterDetails {
-        identity: lease.writer_identity.clone(),
-        lease_expires_at: format_timestamp(lease.expires_at),
-        is_lease_current: lease.expires_at > now,
-    });
-    let mut materializers = Vec::with_capacity(description.checkpoints.len());
-    for checkpoint in &description.checkpoints {
-        materializers.push(MaterializerDetails::of(checkpoint));
-    }
-    let standby_replicas = stream.standby_replicas.as_ref().map(|replica_ids| {
-        let mut names = Vec::with_capacity(replica_ids.len());
-        for replica_id in replica_ids {
-            names.push(replica_id.to_string());
-        }
-        names
-    });
-    Ok(StreamDetails {
-        name: stream.name.clone(),
-        stream_id: stream.stream_id.get(),
-        epoch: stream.epoch.get(),
-        writer,
-        replicas: stream.replication.replica_count(),
-        write_quorum: stream.replication.write_quorum(),
-        keep_sealed_for_seconds: stream.retention.keep_sealed_for().map(|duration| duration.as_secs()),
-        low_water_mark: stream.low_water_mark.get(),
-        truncate_before: stream.truncate_before.map(SequenceNumber::get),
-        segments: stream.segments.len(),
-        next_segment_id: stream.next_segment_id.get(),
-        standby_replicas,
-        materializers,
-    })
+    Ok(StreamDetails::of(&description.stream, &description.checkpoints, now))
 }
 
 /// Deletes a stream. Its segments are removed by the controller afterwards.

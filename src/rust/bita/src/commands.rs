@@ -295,6 +295,9 @@ async fn run_metadata_command(command: &MetadataCommand, cluster: &Cluster) -> R
 }
 
 /// Runs one `bita stream` command.
+///
+/// One arm per command, each a call of the function in `commands/stream.rs` that does the work. It is
+/// longer than most functions of this crate because the command has ten forms; nothing else happens here.
 async fn run_stream_command(
     command: &StreamCommand,
     cluster: &Cluster,
@@ -325,15 +328,8 @@ async fn run_stream_command(
             stream::unregister_materializer(cluster, name, materializer).await?,
         )),
         StreamCommand::Append { name, records, force } => {
-            let mut payloads = standard_input_records;
-            for record in records {
-                payloads.push(Bytes::from(record.clone()));
-            }
-            let policy = if *force {
-                TakeoverPolicy::Force
-            } else {
-                TakeoverPolicy::WaitForLeaseExpiry
-            };
+            let payloads = payloads_to_append(standard_input_records, records);
+            let policy = takeover_policy(*force);
             Ok(CommandOutput::AppendedRecords(
                 stream::append(cluster, name, payloads, policy).await?,
             ))
@@ -344,6 +340,26 @@ async fn run_stream_command(
         StreamCommand::Tail { .. } => Err(CommandError::NothingToDo {
             reason: "stream tail prints as it goes and is not run as a command with a result".to_owned(),
         }),
+    }
+}
+
+/// The records `stream append` appends: the lines of standard input, then the arguments, in that order.
+/// The command line gives one or the other, so in practice one of the two is empty.
+fn payloads_to_append(standard_input_records: Vec<Bytes>, argument_records: &[String]) -> Vec<Bytes> {
+    let mut payloads = standard_input_records;
+    for record in argument_records {
+        payloads.push(Bytes::from(record.clone()));
+    }
+    payloads
+}
+
+/// How `stream append` takes the stream: at once if the operator forced it, otherwise only after the
+/// lease of a live writer has expired.
+const fn takeover_policy(is_forced: bool) -> TakeoverPolicy {
+    if is_forced {
+        TakeoverPolicy::Force
+    } else {
+        TakeoverPolicy::WaitForLeaseExpiry
     }
 }
 

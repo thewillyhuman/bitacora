@@ -9,7 +9,8 @@
 //!
 //! # What it contains
 //!
-//! - `main`: parses the command line, finds the cluster, runs the command and prints its result.
+//! - `main`: parses the command line, finds the cluster, runs the command and prints its result, with one
+//!   function per step: `print_usage_error`, `connect_and_run`, `run_and_print`.
 //! - The modules of the tool: `arguments` (the command line), `cluster` (finding and reaching the
 //!   cluster), `commands` (the work), `output` and `duration` (notations).
 //!
@@ -48,6 +49,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
+use bitacora::ClusterConfig;
 use bytes::Bytes;
 use clap::Parser;
 
@@ -69,18 +71,8 @@ const EXIT_USAGE: u8 = 2;
 fn main() -> ExitCode {
     let arguments = match Arguments::try_parse() {
         Ok(arguments) => arguments,
-        Err(usage_error) => {
-            // Help and version requests arrive here too; they go to standard output and succeed.
-            let is_mistake = usage_error.use_stderr();
-            let _ = usage_error.print();
-            return if is_mistake {
-                ExitCode::from(EXIT_USAGE)
-            } else {
-                ExitCode::SUCCESS
-            };
-        }
+        Err(usage_error) => return print_usage_error(&usage_error),
     };
-
     let config = match resolve_cluster_config(&arguments.cluster, &process_environment()) {
         Ok(config) => config,
         Err(config_error) => {
@@ -88,7 +80,6 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(io_error) => {
@@ -96,22 +87,42 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_FAILURE);
         }
     };
-    runtime.block_on(async {
-        let cluster = match Cluster::connect(&config, arguments.request_timeout).await {
-            Ok(cluster) => cluster,
-            Err(connect_error) => {
-                eprintln!("bita: {connect_error}");
-                return ExitCode::from(EXIT_USAGE);
-            }
-        };
-        match run_and_print(&arguments, &cluster).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(reason) => {
-                eprintln!("bita: {reason}");
-                ExitCode::from(EXIT_FAILURE)
-            }
+    runtime.block_on(connect_and_run(&arguments, &config))
+}
+
+/// Prints what the command line parser has to say and returns the exit code that goes with it.
+///
+/// A mistake is printed to standard error and is a usage error. A request for help or for the version
+/// arrives the same way; it is printed to standard output and succeeds.
+fn print_usage_error(usage_error: &clap::Error) -> ExitCode {
+    let is_mistake = usage_error.use_stderr();
+    let _ = usage_error.print();
+    if is_mistake {
+        ExitCode::from(EXIT_USAGE)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Opens the interfaces to the cluster, runs the command and returns the tool's exit code.
+///
+/// A failure is printed to standard error: not reaching the cluster's stores counts as a wrong
+/// configuration, a command that fails as a failure.
+async fn connect_and_run(arguments: &Arguments, config: &ClusterConfig) -> ExitCode {
+    let cluster = match Cluster::connect(config, arguments.request_timeout).await {
+        Ok(cluster) => cluster,
+        Err(connect_error) => {
+            eprintln!("bita: {connect_error}");
+            return ExitCode::from(EXIT_USAGE);
         }
-    })
+    };
+    match run_and_print(arguments, &cluster).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            eprintln!("bita: {reason}");
+            ExitCode::from(EXIT_FAILURE)
+        }
+    }
 }
 
 /// The environment variables of the process whose names and values are text.

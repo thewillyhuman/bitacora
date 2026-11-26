@@ -7,6 +7,7 @@
 //! - Restoring: into a lost store, by key and as `latest`; refused into a store that holds keys unless
 //!   forced; a dry run writes nothing.
 //! - Refusals: no object store, no snapshot, a missing snapshot, a damaged one.
+//! - The rule that decides how a restore writes, as a pure function: `restore_mode_for`.
 //!
 //! # How the fixtures work
 //!
@@ -16,7 +17,7 @@
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactError;
-use bitacora_meta::snapshot_object_key;
+use bitacora_meta::{RestoreMode, snapshot_object_key};
 
 use super::*;
 use crate::commands::stream;
@@ -259,4 +260,33 @@ async fn restoring_needs_an_object_store() {
     let refused = restore(&started.cluster, "latest", false, false).await;
 
     assert_eq!(refused, Err(CommandError::NoObjectStore));
+}
+
+/// Without force the metadata store itself still refuses if a key appeared since the command looked.
+#[test]
+fn restore_into_an_empty_store_requires_it_to_stay_empty() {
+    let mode = restore_mode_for(0, false);
+
+    assert_eq!(mode, Ok(RestoreMode::IntoEmptyStore));
+}
+
+#[test]
+fn forced_restore_replaces_everything_the_store_holds() {
+    let mode = restore_mode_for(12, true);
+
+    assert_eq!(mode, Ok(RestoreMode::ReplaceEverything));
+}
+
+#[test]
+fn restore_into_a_store_with_keys_is_refused_without_force() {
+    let refused = restore_mode_for(12, false);
+
+    assert!(matches!(refused, Err(CommandError::Refused { .. })), "{refused:?}");
+}
+
+#[test]
+fn refusal_of_a_restore_says_how_many_keys_would_be_replaced() {
+    let refused = restore_mode_for(12, false).expect_err("a store with keys is not overwritten unasked");
+
+    assert!(refused.to_string().contains("holds 12 keys"), "{refused}");
 }
