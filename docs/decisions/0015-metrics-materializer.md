@@ -63,6 +63,12 @@ overlap in time. A query reads them in catalog order, which is log order,
 so the rule above holds across blocks without comparing anything but
 positions.
 
+A block ends with the record that fills it, by the number of its samples or
+by the span of their timestamps. Nothing else cuts a block, so the same
+records give the same blocks bit for bit (invariant I6). What a checkpoint
+finds in the head beyond the last full block is saved as one more object in
+the layout of a block, and the next store starts from it.
+
 ### What a query sees
 
 A query sees every sample of every record up to one record and nothing of a
@@ -97,7 +103,7 @@ confirmed.
 | # | What was needed | What the interface offered | What was done | Status |
 | --- | --- | --- | --- | --- |
 | 1 | Queries must read the samples that are not in a block yet. | `ArtifactCatalog` owns the builder and shows only the catalog (`view()`). The unsealed samples are inside the builder, out of reach. | `MetricsMaterializer` wraps the catalog and keeps a second head for queries: every record is decoded twice and every unsealed sample is held twice. | Fixed by `materializer: show the builder of a catalog`. The builder owns the head and gives the store a handle on it; the wrapper is gone. |
-| 2 | A block is cut when it is full, by the samples' own count and time span, so that the same records give the same blocks (I6). | A checkpoint always seals everything the builder holds. `should_seal` can ask for a checkpoint earlier; it cannot keep the runner's timer from cutting a block. Block boundaries therefore follow the wall clock of the instance that happened to run. | Accepted in the first version: answers are the same whenever checkpoints happen, block contents are not. A store that checkpoints every minute cuts a block every minute. | Open |
+| 2 | A block is cut when it is full, by the samples' own count and time span, so that the same records give the same blocks (I6). | A checkpoint always seals everything the builder holds. `should_seal` can ask for a checkpoint earlier; it cannot keep the runner's timer from cutting a block. Block boundaries therefore follow the wall clock of the instance that happened to run. | Accepted in the first version: answers are the same whenever checkpoints happen, block contents are not. A store that checkpoints every minute cuts a block every minute. | Fixed by `materializer: let a builder choose its cuts`. A builder names the record its next artifact ends at and saves what it holds beyond it at a checkpoint; the next instance restores it. Blocks now end with the record that fills them, and a test compares the blocks of two stores that checkpoint at different times byte for byte. |
 | 3 | A query skips the blocks that hold no sample in its time range without fetching anything. | A catalog entry holds a range of sequence numbers, a key and a size. Nothing of the builder's. | The time range of a block is read from its footer: two range reads per block the first time a store or reader sees it, also for blocks the query does not need. The index is then cached (`query.rs`). | Fixed by `materializer: let a builder describe artifacts`. A catalog entry carries a summary written by the builder; a block's summary holds its first and last timestamp, and a block outside the query's range is not fetched at all. |
 | 4 | The limits of a block come from configuration. | The framework creates the builder with `Default` and restores a materializer with a function that takes no settings. | The limits are constants of a type parameter, `BlockPolicy`, which runs through `BlockBuilder<P>`, `MetricsMaterializer<P>` and `MetricsStore<P>`. They cannot be chosen at run time. | Open |
 | 5 | A process that is not the store reads the committed catalog. | Possible: `MetadataStore::get_stream`, `MetadataStore::get_checkpoint`, `ArtifactNamespace::read_only`, `decode_manifest`, `decode_catalog`. | `BlockReader::refresh` makes the five calls and handles the manifest being replaced between two of them. Every query node would repeat those thirty lines. | Open |
@@ -116,9 +122,9 @@ confirmed.
 | 18 | Report a record that cannot be applied, and a damaged block. | `MaterializerError::InvalidRecord` and `DamagedArtifact`. | Used as is. | Nothing missing |
 | 19 | Count the reads a query makes, damage a block, make the store fail. | `MemoryArtifactStore::served_range_reads`, `corrupt_byte`, `set_unavailable`. | Used as is. | Nothing missing |
 
-Row 2 is the one that matters most. The design asks that "`should_seal`
+Row 2 was the one that mattered most. The design asks that "`should_seal`
 must be free to decide on its own criteria" (section 19, "Time-based
-sealing"), and the adapter takes that choice away at every checkpoint.
+sealing"), and the adapter took that choice away at every checkpoint.
 
 Rows 6 and 7 are also asked for by the design: the catalog, "its format
 and its change notifications are [...] part of the public interface from

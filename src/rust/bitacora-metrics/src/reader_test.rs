@@ -23,7 +23,7 @@ use super::*;
 use crate::builder::BlockPolicy;
 use crate::sample::SeriesSamples;
 use crate::store::MetricsStore;
-use crate::test_support::{CHECKPOINT_AFTER, Harness, PATIENCE, STREAM, UnmergedBlocks, batch, samples_at, series};
+use crate::test_support::{BlockPerRecord, CHECKPOINT_AFTER, Harness, PATIENCE, STREAM, batch, samples_at, series};
 
 /// Opens a reader on the stream of `harness`.
 async fn open_reader(harness: &Harness) -> BlockReader {
@@ -86,11 +86,46 @@ async fn reader_answers_from_the_committed_blocks() {
 async fn reader_sees_the_blocks_the_store_sees() {
     let harness = Harness::start().await;
     let store = harness.open().await;
+    append_and_checkpoint(&store, &batch("api", &[1, 2, 3, 4, 5, 6, 7, 8])).await;
+
+    let reader = open_reader(&harness).await;
+
+    assert_eq!(store.blocks().len(), 1);
+    assert_eq!(reader.blocks(), store.blocks());
+}
+
+/// A block is cut when it is full, so what a checkpoint covers beyond the last block is in the head the
+/// store saved. A reader that left it out would lag the store by up to a whole block.
+#[tokio::test(start_paused = true)]
+async fn reader_reads_the_head_the_checkpoint_saved_after_the_blocks() {
+    let harness = Harness::start().await;
+    let store = harness.open().await;
     append_and_checkpoint(&store, &batch("api", &[10, 20])).await;
 
     let reader = open_reader(&harness).await;
 
-    assert_eq!(reader.blocks(), store.blocks());
+    assert_eq!(store.blocks().len(), 0);
+    assert_eq!(reader.blocks().len(), 1);
+    assert_eq!(reader.blocks()[0].covered_range.last(), reader.checkpoint());
+}
+
+#[tokio::test(start_paused = true)]
+async fn reader_answers_from_the_blocks_and_the_saved_head_together() {
+    let harness = Harness::start().await;
+    let store = harness.open().await;
+    store
+        .append(&batch("api", &[1, 2, 3, 4, 5, 6, 7, 8]))
+        .await
+        .expect("the append commits");
+    let saved_at = append_and_checkpoint(&store, &batch("api", &[20])).await;
+
+    let mut reader = open_reader(&harness).await;
+
+    let expected = QueryResult {
+        as_of: saved_at,
+        series: vec![series("api", samples_at(&[1, 2, 3, 4, 5, 6, 7, 8, 20]))],
+    };
+    assert_eq!(everything(&mut reader).await, expected);
 }
 
 #[tokio::test(start_paused = true)]
@@ -113,7 +148,7 @@ async fn reader_does_not_see_what_is_only_in_the_head_of_the_store() {
 async fn reader_answers_as_of_the_checkpoint_it_last_saw_until_it_looks_again() {
     let harness = Harness::start().await;
     let store = harness
-        .open_with::<UnmergedBlocks>(WriterSettings::default(), CHECKPOINT_AFTER)
+        .open_with::<BlockPerRecord>(WriterSettings::default(), CHECKPOINT_AFTER)
         .await;
     let first_checkpoint = append_and_checkpoint(&store, &batch("api", &[10])).await;
     let mut reader = open_reader(&harness).await;
@@ -127,7 +162,7 @@ async fn reader_answers_as_of_the_checkpoint_it_last_saw_until_it_looks_again() 
 async fn refreshed_reader_sees_the_later_checkpoint() {
     let harness = Harness::start().await;
     let store = harness
-        .open_with::<UnmergedBlocks>(WriterSettings::default(), CHECKPOINT_AFTER)
+        .open_with::<BlockPerRecord>(WriterSettings::default(), CHECKPOINT_AFTER)
         .await;
     append_and_checkpoint(&store, &batch("api", &[10])).await;
     let mut reader = open_reader(&harness).await;

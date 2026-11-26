@@ -3,7 +3,8 @@
 //! # Why this file exists
 //!
 //! The metrics store writes no materializer of its own. The framework's `ArtifactCatalog` turns a builder
-//! into one: it keeps the catalog of blocks, has the builder seal at checkpoints and merge small blocks.
+//! into one: it keeps the catalog of blocks, has the builder seal the blocks that are full, save the rest
+//! of its head at checkpoints, and merge small blocks.
 //! This file names that combination, and the name it is registered under on a stream, so that the store,
 //! the reader and the tests all mean the same thing.
 //!

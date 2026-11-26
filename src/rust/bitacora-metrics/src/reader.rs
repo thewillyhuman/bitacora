@@ -21,13 +21,18 @@
 //! identifier from the metadata store; the materializer's checkpoint record, which names a manifest; the
 //! manifest from the object store; and the catalog out of the manifest's details.
 //!
+//! A block is cut when it is full, not when a checkpoint happens, so the catalog usually ends before the
+//! checkpoint. The samples in between were in the store's head at the checkpoint, and the store saved
+//! them next to the catalog as one artifact in the layout of a block. The reader reads that artifact
+//! after the blocks, as one more block. Without it a reader would lag the store by up to a whole block.
+//!
 //! A reader sees what was committed when it last looked. [`BlockReader::refresh`] looks again; nothing
 //! tells a reader that the catalog changed, so a reader that wants to stay current refreshes on a timer.
 //! When a query finds that one of its blocks is gone, which happens after the materializer merged it into
 //! a larger one, the reader refreshes by itself and tries once more.
 //!
 //! An answer is exact up to the committed checkpoint, which is older than what the store itself would
-//! answer: the samples still in the store's head are in no block.
+//! answer: the samples the store applied after its last checkpoint are in its memory alone.
 //!
 //! # Invariants
 //!
@@ -186,7 +191,13 @@ impl BlockReader {
                 Err(read_error) => return Err(BlockReaderError::Block(read_error)),
             };
             let (checkpoint, manifest) = decode_manifest(&stored_manifest)?;
-            let entries = decode_catalog(&manifest.details)?.entries;
+            let stored_catalog = decode_catalog(&manifest.details)?;
+            let mut entries = stored_catalog.entries;
+            // What the store had applied and not cut into a block yet. It is saved in the layout of a
+            // block and covers the records from the last block to the checkpoint.
+            if let Some(saved_head) = stored_catalog.pending {
+                entries.push(saved_head);
+            }
             self.committed = CommittedBlocks { checkpoint, entries };
             return Ok(checkpoint);
         }
@@ -199,7 +210,9 @@ impl BlockReader {
         self.committed.checkpoint
     }
 
-    /// The blocks the reader answers from, in log order.
+    /// What the reader answers from, in log order: the blocks of the catalog and, after them, the part
+    /// of the store's head that the checkpoint saved, if it saved one. That part has the layout of a
+    /// block and is read like one.
     #[must_use]
     pub fn blocks(&self) -> &[CatalogEntry] {
         &self.committed.entries

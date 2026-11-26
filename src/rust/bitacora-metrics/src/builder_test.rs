@@ -20,7 +20,8 @@ use bytes::Bytes;
 
 use super::*;
 use crate::block::BlockSummary;
-use crate::sample::SeriesSamples;
+use crate::sample::{SeriesSamples, TimeRange};
+use crate::selector::Selector;
 use crate::test_support::{SmallBlocks, TestArtifacts, batch, job, record, sample, samples_at};
 
 /// The range of records `first..=last`.
@@ -239,11 +240,233 @@ async fn builder_holds_nothing_after_a_seal() {
     builder
         .add_records(&[record(1, &batch("api", &[1, 2, 3, 4, 5, 6, 7, 8]))])
         .expect("valid record");
+
     seal(&mut builder, &artifacts, 1, 1).await;
 
-    let next_entry = seal(&mut builder, &artifacts, 2, 2).await;
+    let snapshot = builder.head().snapshot(&Selector::all(), TimeRange::ALL);
+    assert_eq!(snapshot.held_records, None);
+    assert_eq!(snapshot.samples_by_series.len(), 0);
+}
 
-    assert_eq!(block_contents(&artifacts, &next_entry).await, BTreeMap::new());
+#[tokio::test]
+async fn builder_names_the_record_that_fills_a_block() {
+    let mut builder = small_builder();
+
+    builder
+        .add_records(&[
+            record(1, &batch("api", &[1, 2, 3, 4])),
+            record(2, &batch("api", &[5, 6, 7, 8])),
+            record(3, &batch("api", &[9])),
+        ])
+        .expect("valid records");
+
+    assert_eq!(builder.seal_boundary(), Some(SequenceNumber::new(2)));
+}
+
+#[tokio::test]
+async fn builder_that_is_not_full_names_no_boundary() {
+    let mut builder = small_builder();
+
+    builder
+        .add_records(&[record(1, &batch("api", &[1, 2, 3, 4]))])
+        .expect("valid record");
+
+    assert_eq!(builder.seal_boundary(), None);
+    assert!(!builder.should_seal());
+}
+
+#[tokio::test]
+async fn block_holds_the_records_up_to_the_boundary_and_no_more() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[
+            record(1, &batch("api", &[1, 2, 3, 4])),
+            record(2, &batch("api", &[5, 6, 7, 8])),
+            record(3, &batch("web", &[9])),
+        ])
+        .expect("valid records");
+
+    let entry = seal(&mut builder, &artifacts, 1, 2).await;
+
+    let mut expected = BTreeMap::new();
+    expected.insert(job("api"), samples_at(&[1, 2, 3, 4, 5, 6, 7, 8]));
+    assert_eq!(block_contents(&artifacts, &entry).await, expected);
+}
+
+#[tokio::test]
+async fn records_after_the_boundary_stay_in_the_builder() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[
+            record(1, &batch("api", &[1, 2, 3, 4, 5, 6, 7, 8])),
+            record(2, &batch("web", &[9])),
+        ])
+        .expect("valid records");
+
+    seal(&mut builder, &artifacts, 1, 1).await;
+
+    let snapshot = builder.head().snapshot(&Selector::all(), TimeRange::ALL);
+    assert_eq!(
+        snapshot.held_records,
+        Some((SequenceNumber::new(2), SequenceNumber::new(2)))
+    );
+}
+
+/// Saves what `builder` holds, as the records `first..=last`, and returns the entry a checkpoint would
+/// name.
+async fn save(
+    builder: &mut BlockBuilder<SmallBlocks>,
+    artifacts: &TestArtifacts,
+    first: u64,
+    last: u64,
+) -> CatalogEntry {
+    let artifact = builder
+        .save_pending_records(&artifacts.namespace)
+        .await
+        .expect("saved")
+        .expect("this builder saves its head");
+    CatalogEntry {
+        covered_range: records(first, last),
+        artifact,
+    }
+}
+
+#[tokio::test]
+async fn saved_head_holds_the_samples_of_the_builder() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[record(1, &batch("api", &[10, 20]))])
+        .expect("valid record");
+
+    let saved = save(&mut builder, &artifacts, 1, 1).await;
+
+    let mut expected = BTreeMap::new();
+    expected.insert(job("api"), samples_at(&[10, 20]));
+    assert_eq!(block_contents(&artifacts, &saved).await, expected);
+}
+
+#[tokio::test]
+async fn saving_leaves_the_builder_as_it_was() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[record(1, &batch("api", &[10, 20]))])
+        .expect("valid record");
+
+    save(&mut builder, &artifacts, 1, 1).await;
+
+    let snapshot = builder.head().snapshot(&Selector::all(), TimeRange::ALL);
+    assert_eq!(
+        snapshot.held_records,
+        Some((SequenceNumber::new(1), SequenceNumber::new(1)))
+    );
+}
+
+#[tokio::test]
+async fn saved_head_carries_its_summary() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[record(1, &batch("api", &[10, 20]))])
+        .expect("valid record");
+
+    let saved = save(&mut builder, &artifacts, 1, 1).await;
+
+    let expected = BlockSummary {
+        series_count: 1,
+        sample_count: 2,
+        min_time_millis: 10,
+        max_time_millis: 20,
+    };
+    assert_eq!(BlockSummary::decode(&saved.artifact.summary), Some(expected));
+}
+
+#[tokio::test]
+async fn builder_restored_from_a_saved_head_cuts_the_block_an_uninterrupted_builder_cuts() {
+    let artifacts = TestArtifacts::new();
+    let first_records = [record(1, &batch("api", &[1, 2, 3])), record(2, &batch("web", &[4, 5]))];
+    let later_records = [record(3, &batch("api", &[6, 7, 8])), record(4, &batch("api", &[9]))];
+    let mut interrupted = small_builder();
+    interrupted.add_records(&first_records).expect("valid records");
+    let saved = save(&mut interrupted, &artifacts, 1, 2).await;
+    let mut restored = small_builder();
+    restored
+        .restore_pending_records(&saved, &artifacts.namespace)
+        .await
+        .expect("restored");
+    restored.add_records(&later_records).expect("valid records");
+    let mut uninterrupted = small_builder();
+    uninterrupted.add_records(&first_records).expect("valid records");
+    uninterrupted.add_records(&later_records).expect("valid records");
+
+    let block_after_a_restart = seal(&mut restored, &artifacts, 1, 3).await;
+
+    let block_without_one = seal(&mut uninterrupted, &artifacts, 1, 3).await;
+    assert_eq!(restored.seal_boundary(), uninterrupted.seal_boundary());
+    assert_eq!(
+        block_contents(&artifacts, &block_after_a_restart).await,
+        block_contents(&artifacts, &block_without_one).await
+    );
+}
+
+#[tokio::test]
+async fn saved_head_without_samples_restores_a_builder_that_holds_its_records() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder.add_records(&[record(1, &[])]).expect("a record without series");
+    let saved = save(&mut builder, &artifacts, 1, 1).await;
+    let mut restored = small_builder();
+
+    restored
+        .restore_pending_records(&saved, &artifacts.namespace)
+        .await
+        .expect("restored");
+
+    let snapshot = restored.head().snapshot(&Selector::all(), TimeRange::ALL);
+    assert_eq!(
+        snapshot.held_records,
+        Some((SequenceNumber::new(1), SequenceNumber::new(1)))
+    );
+}
+
+#[tokio::test]
+async fn damaged_saved_head_is_refused() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[record(1, &batch("api", &[10, 20]))])
+        .expect("valid record");
+    let saved = save(&mut builder, &artifacts, 1, 1).await;
+    artifacts
+        .store
+        .corrupt_byte(&TestArtifacts::object_key(&saved.artifact.artifact_key), 5, 0x20);
+    let mut restored = small_builder();
+
+    let refused = restored.restore_pending_records(&saved, &artifacts.namespace).await;
+
+    assert!(
+        matches!(refused, Err(MaterializerError::DamagedArtifact { .. })),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn saved_head_that_is_gone_is_reported_and_not_taken_for_an_empty_one() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[record(1, &batch("api", &[10, 20]))])
+        .expect("valid record");
+    let mut saved = save(&mut builder, &artifacts, 1, 1).await;
+    saved.artifact.artifact_key = "00000000000000000001/0000000099-head".to_owned();
+    let mut restored = small_builder();
+
+    let refused = restored.restore_pending_records(&saved, &artifacts.namespace).await;
+
+    assert!(refused.is_err(), "{refused:?}");
 }
 
 #[tokio::test]

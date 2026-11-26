@@ -112,13 +112,13 @@ impl BlockPolicy for SmallBlocks {
     };
 }
 
-/// A block policy that never cuts a block by itself and never merges: blocks are cut by checkpoints
-/// alone, and stay as they were cut.
+/// A block policy under which every record that holds a sample fills a block, and blocks are never
+/// merged: a test that wants a block appends one record, and the block stays as it was cut.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct UnmergedBlocks;
+pub(crate) struct BlockPerRecord;
 
-impl BlockPolicy for UnmergedBlocks {
-    const MAX_BLOCK_SAMPLES: u64 = u64::MAX;
+impl BlockPolicy for BlockPerRecord {
+    const MAX_BLOCK_SAMPLES: u64 = 1;
     const MAX_BLOCK_SPAN_MILLIS: u64 = u64::MAX;
     const COMPACTION: CompactionPolicy = CompactionPolicy {
         merge_fan_in: usize::MAX,

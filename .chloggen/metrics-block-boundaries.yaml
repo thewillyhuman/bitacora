@@ -1,0 +1,4 @@
+change_type: enhancement
+component: metrics
+note: "Blocks end with the record that fills them, so the same records give the same blocks whenever checkpoints happen; a checkpoint saves the head that is still filling, and BlockReader reads it after the blocks."
+issues: [6]

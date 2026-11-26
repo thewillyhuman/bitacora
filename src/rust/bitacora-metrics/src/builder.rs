@@ -20,14 +20,21 @@
 //!   (`head.rs`), which the builder owns and the store's queries read through a handle
 //!   ([`BlockBuilder::head`]). A payload that is not a metrics record stops the materializer: the record
 //!   will never change, and skipping it would make the state depend on more than the log.
-//! - **Asking for a seal.** The builder asks once it holds [`BlockPolicy::MAX_BLOCK_SAMPLES`] samples, or
-//!   samples that span [`BlockPolicy::MAX_BLOCK_SPAN_MILLIS`]. Both are counted from the samples
-//!   themselves, never from a clock, so the same records ask at the same point every time.
+//! - **Cutting.** The record that brings the head to [`BlockPolicy::MAX_BLOCK_SAMPLES`] samples, or to
+//!   samples that span [`BlockPolicy::MAX_BLOCK_SPAN_MILLIS`], ends a block: the head closes that part
+//!   and starts the next (`head.rs`). Both limits are counted from the samples themselves, never from a
+//!   clock. The builder tells the framework that a block is due and after which record it ends, and the
+//!   framework seals exactly those records. The same records therefore give the same blocks, whenever
+//!   checkpoints happen and whichever instance runs.
+//! - **Saving at a checkpoint.** A checkpoint must make everything applied durable, and the part of the
+//!   head that is still filling is no block yet. It is written as an artifact in the layout of a block
+//!   and named by the checkpoint next to the catalog. The next instance reads it back into its head and
+//!   goes on where this one was. A process that only reads blocks reads it as one more block.
 //! - **Describing.** Every block is returned to the framework with its summary: how many series and
 //!   samples it holds and which span of time they cover. The framework keeps it in the catalog entry.
-//! - **Sealing.** Everything in the head becomes one block (`block.rs`), stored as one artifact. Only
-//!   once the block is stored does the head drop its samples, and it remembers the last record it gave
-//!   up, so that a query can tell that the catalog it sees does not list the block yet.
+//! - **Sealing.** The oldest full part of the head becomes one block (`block.rs`), stored as one
+//!   artifact. Only once the block is stored does the head drop that part, and it remembers the last
+//!   record it gave up, so that a query can tell that the catalog it sees does not list the block yet.
 //! - **Merging.** The catalog hands over neighbouring blocks, oldest first. Each is read whole and
 //!   verified, their series are merged with the later block winning a shared timestamp, and the result is
 //!   written as one block. A merge reads blocks, never the log: the log below a checkpoint may be gone.
@@ -38,8 +45,10 @@
 //!
 //! # Invariants
 //!
-//! - The head holds exactly the samples of the records added since the last successful seal.
-//! - A failed seal or merge leaves the builder as it was.
+//! - The head holds exactly the samples of the records added and not sealed yet.
+//! - Where a block ends depends on the records alone.
+//! - A failed seal, save or merge leaves the builder as it was.
+//! - A builder restored from its saved head cuts the blocks the builder that saved would have cut.
 //! - Merging blocks gives the block that sealing all their records at once would have given.
 //!
 //! # See also
@@ -57,24 +66,27 @@ use async_trait::async_trait;
 use bitacora_materializer::{
     ArtifactBuilder, ArtifactDescriptor, ArtifactNamespace, CatalogEntry, CompactionPolicy, MaterializerError,
 };
-use bitacora_types::{LogRecord, SequenceRange};
+use bitacora_types::{LogRecord, SequenceNumber, SequenceRange};
 
 use crate::block::{EncodedBlock, damaged_artifact, decode_whole_block, encode_block};
-use crate::head::SharedHead;
+use crate::head::{BlockLimits, HeadSamples, SharedHead};
 use crate::record::decode_record;
 use crate::sample::{Labels, Sample, merge_series_later_wins};
 
 /// The label of the artifacts that are blocks, for people reading a listing of the object store.
 const BLOCK_LABEL: &str = "block";
 
+/// The label of the artifacts that hold the part of the head a checkpoint saved.
+const SAVED_HEAD_LABEL: &str = "head";
+
 /// When a block is cut and when blocks are merged.
 ///
 /// It is a trait with constants, implemented by marker types, because the framework creates the builder
 /// with `Default`: a type is the only thing a caller can choose.
 pub trait BlockPolicy: Send + Sync + 'static {
-    /// A block is cut once the builder holds this many samples.
+    /// A block ends with the record that brings it to this many samples.
     const MAX_BLOCK_SAMPLES: u64;
-    /// A block is cut once the samples the builder holds span this many milliseconds, by their own
+    /// A block ends with the record that makes its samples span this many milliseconds, by their own
     /// timestamps.
     const MAX_BLOCK_SPAN_MILLIS: u64;
     /// When small blocks are merged into larger ones.
@@ -121,6 +133,14 @@ impl<P: BlockPolicy> BlockBuilder<P> {
     pub(crate) fn head(&self) -> Arc<SharedHead> {
         Arc::clone(&self.head)
     }
+
+    /// The limits of one block, from the policy.
+    const fn limits() -> BlockLimits {
+        BlockLimits {
+            max_samples: P::MAX_BLOCK_SAMPLES,
+            max_span_millis: P::MAX_BLOCK_SPAN_MILLIS,
+        }
+    }
 }
 
 #[async_trait]
@@ -140,25 +160,67 @@ impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
                 }
             }
         }
-        self.head.add_records(&decoded_records);
+        self.head.add_records(&decoded_records, Self::limits());
         Ok(())
     }
 
-    /// Asks for a seal once the samples held are as many, or span as much time, as the policy allows.
+    /// Asks for a seal while a part of the head is full.
     fn should_seal(&self) -> bool {
-        let fill = self.head.fill();
-        fill.sample_count >= P::MAX_BLOCK_SAMPLES || fill.time_span_millis >= P::MAX_BLOCK_SPAN_MILLIS
+        self.head.oldest_full_part_end().is_some()
     }
 
-    /// Writes everything in the head as one block and then empties the head.
+    /// The record that filled the oldest full part of the head: the next block ends there.
+    fn seal_boundary(&self) -> Option<SequenceNumber> {
+        self.head.oldest_full_part_end()
+    }
+
+    /// Writes the parts of the head up to the end of `covered_range` as one block, then drops them from
+    /// the head.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no part of the head ends where `covered_range` ends. The framework seals up to the
+    /// boundary this builder named, or everything it holds; anything else is a mistake in the framework.
     async fn seal_artifact(
         &mut self,
         covered_range: SequenceRange,
         artifacts: &ArtifactNamespace,
     ) -> Result<ArtifactDescriptor, MaterializerError> {
-        let descriptor = store_encoded_block(self.head.encode_block(), artifacts).await?;
-        self.head.drop_sealed(covered_range.last());
+        let encoded = self
+            .head
+            .encode_through(covered_range.last())
+            .expect("the framework seals at the end of a part of the head");
+        let descriptor = store_encoded_block(encoded, BLOCK_LABEL, artifacts).await?;
+        self.head.drop_through(covered_range.last());
         Ok(descriptor)
+    }
+
+    /// Writes the part of the head that is still filling as an artifact in the layout of a block. The
+    /// head keeps it.
+    async fn save_pending_records(
+        &mut self,
+        artifacts: &ArtifactNamespace,
+    ) -> Result<Option<ArtifactDescriptor>, MaterializerError> {
+        let saved = store_encoded_block(self.head.encode_filling_part(), SAVED_HEAD_LABEL, artifacts).await?;
+        Ok(Some(saved))
+    }
+
+    /// Reads the saved part back and makes it the filling part of this builder's head.
+    async fn restore_pending_records(
+        &mut self,
+        saved: &CatalogEntry,
+        artifacts: &ArtifactNamespace,
+    ) -> Result<(), MaterializerError> {
+        let artifact_key = &saved.artifact.artifact_key;
+        let saved_block = artifacts.get_artifact(artifact_key).await?;
+        let samples_by_series = match decode_whole_block(&saved_block) {
+            Ok(samples_by_series) => samples_by_series,
+            Err(damaged_block) => return Err(damaged_artifact(artifact_key, damaged_block)),
+        };
+        let held_records = (saved.covered_range.first(), saved.covered_range.last());
+        self.head
+            .restore_filling_part(HeadSamples::from_saved(samples_by_series, held_records));
+        Ok(())
     }
 
     /// Reads the input blocks whole, merges their series with the later block winning, and writes one
@@ -180,7 +242,7 @@ impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
                 merge_series_later_wins(&mut merged, labels, samples);
             }
         }
-        store_encoded_block(encode_block(&merged), artifacts).await
+        store_encoded_block(encode_block(&merged), BLOCK_LABEL, artifacts).await
     }
 
     /// The policy's compaction settings.
@@ -189,13 +251,14 @@ impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
     }
 }
 
-/// Stores an encoded block as a new artifact.
+/// Stores an encoded block as a new artifact with the given label.
 async fn store_encoded_block(
     encoded: EncodedBlock,
+    label: &str,
     artifacts: &ArtifactNamespace,
 ) -> Result<ArtifactDescriptor, MaterializerError> {
     let size_bytes = encoded.bytes.len() as u64;
-    let artifact_key = artifacts.put_artifact(BLOCK_LABEL, encoded.bytes).await?;
+    let artifact_key = artifacts.put_artifact(label, encoded.bytes).await?;
     tracing::info!(
         %artifact_key,
         size_bytes,

@@ -11,9 +11,9 @@
 //! # What it contains
 //!
 //! - `HeadSamples`: the samples of some consecutive records, by series: what one block is made from.
-//! - `SharedHead`: `HeadSamples` behind a lock, written by the builder and read by queries.
+//! - `BlockLimits`: when such a part is full.
+//! - `SharedHead`: the parts of the head behind a lock, written by the builder and read by queries.
 //! - `HeadSnapshot`: what one query took from the head, and which records that covers.
-//! - `HeadFill`: how full the head is.
 //!
 //! # How it works
 //!
@@ -21,6 +21,13 @@
 //! Adding a record's samples keeps that order and lets a later sample replace an earlier one with the
 //! same timestamp (see `sample.rs`). It also remembers the first and the last record it holds and the
 //! span of time its samples cover, which is what decides when a block is cut.
+//!
+//! The head is a row of such parts in log order. Records go into the last one, the part that is
+//! filling. The record that brings it to the limits of a block makes it full: the part is closed and the
+//! next record starts a new one. A full part is exactly one future block, and where it ends was decided
+//! by the records alone. Whenever a checkpoint happens, and whichever instance runs, the same records
+//! therefore give the same blocks. The builder seals full parts, oldest first, and saves the filling
+//! part at a checkpoint (`builder.rs`).
 //!
 //! `SharedHead` makes that readable while it is written: the builder takes the lock once per batch of
 //! records, a query once per query. The builder owns the head and adds to it; the store takes a handle
@@ -40,14 +47,17 @@
 //!
 //! - The samples of every series are strictly increasing in time.
 //! - `sample_count` is the number of samples held, after replacements.
-//! - Records are added in log order, each exactly once, and removed only all together.
+//! - Records are added in log order, each exactly once, and removed only by whole parts.
+//! - A part is closed by the record that fills it and never changes afterwards.
+//! - A part rebuilt from its saved block behaves as the part that was saved: it holds the same samples,
+//!   so it is filled by the same later record.
 //!
 //! # See also
 //!
 //! - `builder.rs`: the builder, which owns the head, adds records to it and seals blocks from it.
 //! - `query.rs`: the reading side.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use bitacora_types::SequenceNumber;
@@ -72,6 +82,48 @@ pub(crate) struct HeadSamples {
 }
 
 impl HeadSamples {
+    /// Rebuilds the part that was saved as a block.
+    ///
+    /// # Arguments
+    ///
+    /// * `samples_by_series` - What the saved block holds: every series with its samples, strictly
+    ///   increasing in time.
+    /// * `held_records` - The first and the last record whose samples those are.
+    pub(crate) fn from_saved(
+        samples_by_series: BTreeMap<Labels, Vec<Sample>>,
+        held_records: (SequenceNumber, SequenceNumber),
+    ) -> Self {
+        let mut rebuilt = Self {
+            samples_by_series,
+            held_records: Some(held_records),
+            ..Self::default()
+        };
+        for samples in rebuilt.samples_by_series.values() {
+            let (Some(earliest), Some(latest)) = (samples.first(), samples.last()) else {
+                continue;
+            };
+            if rebuilt.sample_count == 0 {
+                rebuilt.min_time_millis = earliest.timestamp_millis;
+                rebuilt.max_time_millis = latest.timestamp_millis;
+            } else {
+                rebuilt.min_time_millis = rebuilt.min_time_millis.min(earliest.timestamp_millis);
+                rebuilt.max_time_millis = rebuilt.max_time_millis.max(latest.timestamp_millis);
+            }
+            rebuilt.sample_count += samples.len() as u64;
+        }
+        rebuilt
+    }
+
+    /// Whether the part holds as many samples, or samples that span as much time, as one block may.
+    pub(crate) const fn is_full(&self, limits: BlockLimits) -> bool {
+        self.sample_count >= limits.max_samples || self.time_span_millis() >= limits.max_span_millis
+    }
+
+    /// The last record whose samples are held, if any record was added.
+    fn last_record(&self) -> Option<SequenceNumber> {
+        self.held_records.map(|(_first_held, last_held)| last_held)
+    }
+
     /// Adds the samples of the record at `sequence`.
     ///
     /// # Arguments
@@ -122,7 +174,9 @@ impl HeadSamples {
         &self.samples_by_series
     }
 
-    /// How many samples are held.
+    /// How many samples are held. Only the tests ask; the head itself uses the count through
+    /// [`HeadSamples::is_full`].
+    #[cfg(test)]
     pub(crate) const fn sample_count(&self) -> u64 {
         self.sample_count
     }
@@ -176,22 +230,43 @@ pub(crate) struct HeadSnapshot {
     pub sealed_through: SequenceNumber,
 }
 
-/// How full the head is: what decides whether a block is cut.
+/// When a part of the head is full: the limits of one block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct HeadFill {
-    /// How many samples the head holds.
-    pub sample_count: u64,
-    /// How many milliseconds lie between the earliest and the latest sample the head holds.
-    pub time_span_millis: u64,
+pub(crate) struct BlockLimits {
+    /// A part is full once it holds this many samples.
+    pub max_samples: u64,
+    /// A part is full once its samples span this many milliseconds, by their own timestamps.
+    pub max_span_millis: u64,
 }
 
 /// What the builder and the queries share of a head.
 #[derive(Debug)]
 struct HeadState {
-    /// The samples applied and not yet in a block.
-    unsealed: HeadSamples,
+    /// The parts that are full and wait to be sealed, oldest first. Each becomes one block.
+    full_parts: VecDeque<HeadSamples>,
+    /// The part that takes the next record: the samples of the records after the last full part.
+    filling: HeadSamples,
     /// The last record whose samples were dropped from the head because a block holds them.
     sealed_through: SequenceNumber,
+}
+
+impl HeadState {
+    /// How many of the head's parts, oldest first, end at or before `last_record`, if a part ends
+    /// exactly there. The filling part counts as one more part after the full ones.
+    fn parts_through(&self, last_record: SequenceNumber) -> Option<usize> {
+        let mut part_count = 0;
+        for part in self.full_parts.iter().chain([&self.filling]) {
+            let part_end = part.last_record()?;
+            part_count += 1;
+            if part_end == last_record {
+                return Some(part_count);
+            }
+            if part_end > last_record {
+                return None;
+            }
+        }
+        None
+    }
 }
 
 /// A head that queries can read while the builder adds to it.
@@ -206,7 +281,8 @@ impl Default for SharedHead {
     fn default() -> Self {
         Self {
             state: RwLock::new(HeadState {
-                unsealed: HeadSamples::default(),
+                full_parts: VecDeque::new(),
+                filling: HeadSamples::default(),
                 sealed_through: SequenceNumber::ZERO,
             }),
         }
@@ -214,42 +290,98 @@ impl Default for SharedHead {
 }
 
 impl SharedHead {
-    /// Adds the samples of consecutive records, in one step as far as queries can tell.
+    /// Adds the samples of consecutive records, in one step as far as queries can tell. A record that
+    /// fills the part it goes into closes that part.
     ///
     /// # Arguments
     ///
     /// * `decoded_records` - Each record's position and its samples, in log order, following the last
     ///   record added.
-    pub(crate) fn add_records(&self, decoded_records: &[(SequenceNumber, Vec<SeriesSamples>)]) {
+    /// * `limits` - When a part is full.
+    pub(crate) fn add_records(&self, decoded_records: &[(SequenceNumber, Vec<SeriesSamples>)], limits: BlockLimits) {
         let mut state = self.write();
         for (sequence, batch) in decoded_records {
-            state.unsealed.add_record(*sequence, batch);
+            state.filling.add_record(*sequence, batch);
+            if state.filling.is_full(limits) {
+                let full_part = std::mem::take(&mut state.filling);
+                state.full_parts.push_back(full_part);
+            }
         }
     }
 
-    /// How full the head is.
-    pub(crate) fn fill(&self) -> HeadFill {
+    /// The last record of the oldest full part: where the next block ends. `None` while no part is full.
+    pub(crate) fn oldest_full_part_end(&self) -> Option<SequenceNumber> {
+        self.read().full_parts.front().and_then(HeadSamples::last_record)
+    }
+
+    /// The samples of the records up to `last_record`, as the bytes of a block. The head is left as it
+    /// is.
+    ///
+    /// # Returns
+    ///
+    /// `None` if no part of the head ends at `last_record`: a block is made of whole parts.
+    pub(crate) fn encode_through(&self, last_record: SequenceNumber) -> Option<EncodedBlock> {
         let state = self.read();
-        HeadFill {
-            sample_count: state.unsealed.sample_count(),
-            time_span_millis: state.unsealed.time_span_millis(),
+        let part_count = state.parts_through(last_record)?;
+        let mut parts = state.full_parts.iter().chain([&state.filling]).take(part_count);
+        let first_part = parts.next()?;
+        if part_count == 1 {
+            return Some(encode_block(first_part.samples_by_series()));
         }
+        // Several parts in one block: their samples are merged, the later part winning.
+        let mut merged = first_part.samples_by_series().clone();
+        for later_part in parts {
+            for (labels, samples) in later_part.samples_by_series() {
+                merge_series_later_wins(&mut merged, labels, samples);
+            }
+        }
+        Some(encode_block(&merged))
     }
 
-    /// Everything the head holds, as the bytes of a block. The head is left as it is.
-    pub(crate) fn encode_block(&self) -> EncodedBlock {
-        encode_block(self.read().unsealed.samples_by_series())
-    }
-
-    /// Drops every sample from the head, because a block now holds the records up to `sealed_through`.
+    /// Drops the parts that end at or before `sealed_through` from the head, because a block now holds
+    /// their records.
     ///
     /// The block is not in the catalog yet when the builder calls this; the framework lists it a moment
     /// later. A query that looks in between is told by [`HeadSnapshot::sealed_through`] that the catalog
     /// it sees is too short.
-    pub(crate) fn drop_sealed(&self, sealed_through: SequenceNumber) {
+    pub(crate) fn drop_through(&self, sealed_through: SequenceNumber) {
         let mut state = self.write();
-        state.unsealed = HeadSamples::default();
+        while let Some(oldest_end) = state.full_parts.front().and_then(HeadSamples::last_record) {
+            if oldest_end > sealed_through {
+                break;
+            }
+            state.full_parts.pop_front();
+        }
+        let is_filling_part_sealed = state.filling.last_record().is_some_and(|end| end <= sealed_through);
+        if state.full_parts.is_empty() && is_filling_part_sealed {
+            state.filling = HeadSamples::default();
+        }
         state.sealed_through = sealed_through;
+    }
+
+    /// The filling part as the bytes of a block, to be saved at a checkpoint. The head is left as it is.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a full part still waits to be sealed. The framework seals every block that is due
+    /// before it saves; saving around a full part would make the next instance cut other blocks.
+    pub(crate) fn encode_filling_part(&self) -> EncodedBlock {
+        let state = self.read();
+        assert!(
+            state.full_parts.is_empty(),
+            "the head was asked to save its filling part while {} full parts wait to be sealed",
+            state.full_parts.len()
+        );
+        encode_block(state.filling.samples_by_series())
+    }
+
+    /// Makes a head that holds nothing hold the part that an earlier instance saved.
+    ///
+    /// # Arguments
+    ///
+    /// * `saved_part` - The part, rebuilt with [`HeadSamples::from_saved`].
+    pub(crate) fn restore_filling_part(&self, saved_part: HeadSamples) {
+        self.write().filling = saved_part;
     }
 
     /// Copies the selected samples in `time_range` out of the head, with the records they come from.
@@ -257,12 +389,20 @@ impl SharedHead {
         let state = self.read();
         let mut snapshot = HeadSnapshot {
             samples_by_series: BTreeMap::new(),
-            held_records: state.unsealed.held_records(),
+            held_records: None,
             sealed_through: state.sealed_through,
         };
-        state
-            .unsealed
-            .select_into(selector, time_range, &mut snapshot.samples_by_series);
+        // Oldest part first, so that a later record wins a shared timestamp.
+        for part in state.full_parts.iter().chain([&state.filling]) {
+            let Some((first_held, last_held)) = part.held_records() else {
+                continue;
+            };
+            snapshot.held_records = match snapshot.held_records {
+                Some((first_of_all, _last_so_far)) => Some((first_of_all, last_held)),
+                None => Some((first_held, last_held)),
+            };
+            part.select_into(selector, time_range, &mut snapshot.samples_by_series);
+        }
         snapshot
     }
 

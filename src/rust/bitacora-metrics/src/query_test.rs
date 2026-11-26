@@ -15,7 +15,8 @@
 //!
 //! [`View`] is the store's materializer, the framework's catalog over the block builder, driven by hand: a test says which record is applied and when a
 //! checkpoint cuts a block, with no cluster and no timing involved. The blocks go to the in-memory
-//! artifact store of `test_support.rs`. `UnmergedBlocks` keeps every block as it was cut.
+//! artifact store of `test_support.rs`. Under `BlockPerRecord` every record with a sample is a block,
+//! and every block stays as it was cut.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,10 +27,11 @@ use bitacora_materializer::Materializer;
 use bytes::Bytes;
 
 use super::*;
+use crate::head::BlockLimits;
 use crate::materializer::{METRICS_MATERIALIZER, MetricsMaterializer};
 use crate::selector::Matcher;
 use crate::test_support::{
-    TEST_STREAM_ID, TestArtifacts, UnmergedBlocks, batch, job, record, sample, samples_at, series,
+    BlockPerRecord, TEST_STREAM_ID, TestArtifacts, batch, job, record, sample, samples_at, series,
 };
 
 /// The record position `sequence`.
@@ -42,7 +44,7 @@ struct View {
     /// Where the blocks go.
     artifacts: TestArtifacts,
     /// The materializer: a catalog of blocks and a head.
-    materializer: MetricsMaterializer<UnmergedBlocks>,
+    materializer: MetricsMaterializer<BlockPerRecord>,
     /// The cache of block indexes the queries share.
     cache: BlockIndexCache,
 }
@@ -68,7 +70,8 @@ impl View {
             .expect("a valid record");
     }
 
-    /// Writes a checkpoint: everything applied since the last one becomes a block.
+    /// Writes a checkpoint: every record applied since the last one that holds a sample becomes a
+    /// block of its own.
     async fn checkpoint(&mut self) {
         self.materializer
             .write_checkpoint(&self.artifacts.namespace)
@@ -115,10 +118,14 @@ impl View {
     }
 }
 
-/// A head that holds the given records and nothing else.
+/// A head that holds the given records, in one part, and nothing else.
 fn head_holding(decoded_records: &[(SequenceNumber, Vec<SeriesSamples>)]) -> SharedHead {
+    let never_full = BlockLimits {
+        max_samples: u64::MAX,
+        max_span_millis: u64::MAX,
+    };
     let head = SharedHead::default();
-    head.add_records(decoded_records);
+    head.add_records(decoded_records, never_full);
     head
 }
 

@@ -164,14 +164,24 @@ Nothing is used before the checksum that covers it has been verified.
 ## Blocks and the log
 
 A block covers a range of sequence numbers: it holds what the records of
-that range, applied in order, leave. The blocks of a stream cover every
-record from the first to the materializer's checkpoint, without gap or
-overlap, and are listed in that order in the **catalog**.
+that range, applied in order, leave. The blocks of a stream are listed in
+log order in the **catalog**, without gap or overlap.
+
+A block ends with the record that fills it: the record that brings it to its
+limit of samples, or that makes its samples span its limit of time. The
+limits are the store's, and a reader does not need them. What matters to a
+reader is the consequence: the catalog usually ends before the
+materializer's checkpoint. The samples of the records in between are the
+**saved head**: one more object in the layout of a block, named by the
+catalog as its pending records ([checkpoint-manifest.md](checkpoint-manifest.md)).
+It is replaced at every checkpoint. The blocks, and after them the saved
+head, cover every record from the first to the checkpoint.
 
 Blocks are aligned to the log, not to time. Two blocks can hold samples for
 the same span of time, and even for the same series and timestamp. A reader
 goes through the blocks in catalog order and lets a later block replace what
-an earlier one said about a series and timestamp.
+an earlier one said about a series and timestamp. The saved head comes
+last.
 
 Neighbouring blocks are merged into larger ones over time. A merged block
 covers the ranges of its inputs together, and the inputs are deleted once
@@ -198,13 +208,15 @@ The store's materializer is registered on the stream under the name
 
 1. Read the stream record for the stream identifier, and the checkpoint
    record of `bitacora-metrics` ([metadata.md](metadata.md)). Its
-   `checkpoint` is the last record the blocks cover; its `manifest` is a
-   key.
+   `checkpoint` is the last record the blocks and the saved head cover; its
+   `manifest` is a key.
 2. Read the object `materializers/<stream id>/bitacora-metrics/<manifest>`.
    It is a checkpoint manifest; its details are an artifact catalog
    ([checkpoint-manifest.md](checkpoint-manifest.md)).
 3. Each catalog entry gives the range of records a block covers, the block's
    key under the same prefix, its size, and its summary.
+4. If the catalog has pending records, their entry names the saved head in
+   the same way. Read it after the blocks, as one more block.
 
-Samples above the checkpoint are not in any block. They are in the log, and
-in the memory of the store that owns the stream.
+Samples above the checkpoint are in no object. They are in the log, and in
+the memory of the store that owns the stream.

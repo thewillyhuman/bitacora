@@ -37,7 +37,7 @@ use crate::record::decode_record;
 use crate::sample::{Labels, Sample};
 use crate::selector::Matcher;
 use crate::test_support::{
-    CHECKPOINT_AFTER, Harness, PATIENCE, RECORD_WITHOUT_SERIES, STREAM, SmallBlocks, UnmergedBlocks, batch, job,
+    BlockPerRecord, CHECKPOINT_AFTER, Harness, PATIENCE, RECORD_WITHOUT_SERIES, STREAM, SmallBlocks, batch, job,
     sample, samples_at, series,
 };
 
@@ -247,15 +247,158 @@ async fn series_that_stopped_and_series_that_started_are_answered_for_their_own_
 
 // ---- blocks ----
 
+/// The samples of one record that fills a block of the default test policy: eight samples of `api`, at 1
+/// to 8.
+fn batch_that_fills_a_block() -> Vec<SeriesSamples> {
+    batch("api", &[1, 2, 3, 4, 5, 6, 7, 8])
+}
+
+/// The samples of a second record that fills a block: eight samples of `api`, at 11 to 18.
+fn second_batch_that_fills_a_block() -> Vec<SeriesSamples> {
+    batch("api", &[11, 12, 13, 14, 15, 16, 17, 18])
+}
+
 #[tokio::test(start_paused = true)]
-async fn checkpoint_cuts_a_block_from_the_records_applied_since_the_last_one() {
+async fn checkpoint_does_not_cut_a_block_that_is_not_full() {
     let harness = Harness::start().await;
     let store = harness.open().await;
     append(&store, &batch("api", &[10])).await;
 
     append_and_checkpoint(&store, &batch("api", &[20])).await;
 
+    assert_eq!(covered_records(&store), []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn block_ends_with_the_record_that_fills_it() {
+    let harness = Harness::start().await;
+    let store = harness.open().await;
+    append(&store, &batch("api", &[10, 20, 30, 40])).await;
+    append(&store, &batch("api", &[50, 60, 70, 80])).await;
+
+    append_and_checkpoint(&store, &batch("api", &[90])).await;
+
     assert_eq!(covered_records(&store), [(1, 2)]);
+}
+
+/// The bytes of every block of `store`, in log order.
+async fn block_contents<P: BlockPolicy>(harness: &Harness, store: &MetricsStore<P>) -> Vec<Bytes> {
+    let mut contents = Vec::new();
+    for object_key in block_object_keys(harness, store).await {
+        let block = harness
+            .artifact_store
+            .get_object(&object_key)
+            .await
+            .expect("a block of the catalog is stored");
+        contents.push(block);
+    }
+    contents
+}
+
+/// A block policy under which four samples fill a block and blocks are never merged, so that the blocks
+/// a store cut can be compared with the blocks another store cut.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BlockPerRecordOfFour;
+
+impl BlockPolicy for BlockPerRecordOfFour {
+    const MAX_BLOCK_SAMPLES: u64 = 4;
+    const MAX_BLOCK_SPAN_MILLIS: u64 = u64::MAX;
+    const COMPACTION: bitacora_materializer::CompactionPolicy = bitacora_materializer::CompactionPolicy {
+        merge_fan_in: usize::MAX,
+        smallest_tier_bytes: 1024 * 1024,
+    };
+}
+
+/// The same records must give the same blocks, whenever the checkpoints happen (invariant I6).
+#[tokio::test(start_paused = true)]
+async fn same_records_give_the_same_blocks_whenever_the_checkpoints_happen() {
+    let batches = [
+        batch("api", &[10, 20]),
+        batch("web", &[15]),
+        batch("api", &[30, 40, 50]),
+        batch("api", &[60]),
+        batch("web", &[70, 80, 90, 100]),
+        batch("api", &[110]),
+    ];
+    let checkpointed_often = Harness::start().await;
+    let store_checkpointed_often = checkpointed_often
+        .open_with::<BlockPerRecordOfFour>(WriterSettings::default(), CHECKPOINT_AFTER)
+        .await;
+    for samples in &batches {
+        append_and_checkpoint(&store_checkpointed_often, samples).await;
+    }
+    let checkpointed_once = Harness::start().await;
+    let store_checkpointed_once = checkpointed_once
+        .open_with::<BlockPerRecordOfFour>(WriterSettings::default(), CHECKPOINT_AFTER)
+        .await;
+    for samples in &batches[..5] {
+        append(&store_checkpointed_once, samples).await;
+    }
+
+    append_and_checkpoint(&store_checkpointed_once, &batches[5]).await;
+
+    assert_eq!(covered_records(&store_checkpointed_often), [(1, 3), (4, 5)]);
+    assert_eq!(
+        covered_records(&store_checkpointed_once),
+        covered_records(&store_checkpointed_often)
+    );
+    assert_eq!(
+        block_contents(&checkpointed_once, &store_checkpointed_once).await,
+        block_contents(&checkpointed_often, &store_checkpointed_often).await
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_store_reads_the_head_the_replaced_one_saved() {
+    let harness = Harness::start().await;
+    let replaced = harness.open().await;
+    let saved_at = append_and_checkpoint(&replaced, &batch("api", &[10, 20])).await;
+
+    let successor = harness.open().await;
+
+    let expected = QueryResult {
+        as_of: saved_at,
+        series: vec![series("api", samples_at(&[10, 20]))],
+    };
+    assert_eq!(everything_at(&successor, saved_at).await, expected);
+    assert_eq!(covered_records(&successor), []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_store_cuts_the_block_the_replaced_one_was_filling() {
+    let harness = Harness::start().await;
+    let replaced = harness.open().await;
+    append_and_checkpoint(&replaced, &batch("api", &[10, 20, 30, 40])).await;
+    let successor = harness.open().await;
+
+    append_and_checkpoint(&successor, &batch("api", &[50, 60, 70, 80])).await;
+
+    assert_eq!(covered_records(&successor), [(1, 2)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn saved_head_of_an_earlier_checkpoint_is_deleted_from_the_store() {
+    let harness = Harness::start().await;
+    let store = harness.open().await;
+    append_and_checkpoint(&store, &batch("api", &[10])).await;
+    let objects_after_the_first_checkpoint = stored_object_count(&harness).await;
+
+    append_and_checkpoint(&store, &batch("api", &[20])).await;
+    // The deletion follows the commit within the same step of the runner.
+    sleep(Duration::from_secs(1)).await;
+
+    // A manifest and a saved head, each time: the earlier two are gone.
+    assert_eq!(stored_object_count(&harness).await, objects_after_the_first_checkpoint);
+}
+
+/// How many objects the artifact store of `harness` holds.
+async fn stored_object_count(harness: &Harness) -> usize {
+    harness
+        .artifact_store
+        .list_prefix("")
+        .await
+        .expect("the store answers")
+        .len()
 }
 
 #[tokio::test(start_paused = true)]
@@ -296,7 +439,7 @@ async fn block_of_one_sample_is_read_back() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn record_without_samples_becomes_a_block_without_series() {
+async fn record_without_samples_is_checkpointed_without_a_block() {
     let harness = Harness::start().await;
     // A producer in another language may append a record that holds no series; this crate's own
     // encoder refuses to. The record is format version 1 with a series count of 0.
@@ -321,14 +464,14 @@ async fn record_without_samples_becomes_a_block_without_series() {
         series: Vec::new(),
     };
     assert_eq!(everything_at(&store, appended_at).await, nothing);
-    assert_eq!(covered_records(&store), [(1, 1)]);
+    assert_eq!(covered_records(&store), []);
 }
 
 #[tokio::test(start_paused = true)]
 async fn range_from_the_end_of_one_block_to_the_start_of_the_next_includes_both_ends() {
     let harness = Harness::start().await;
     let store = harness
-        .open_with::<UnmergedBlocks>(WriterSettings::default(), CHECKPOINT_AFTER)
+        .open_with::<BlockPerRecord>(WriterSettings::default(), CHECKPOINT_AFTER)
         .await;
     append_and_checkpoint(&store, &batch("api", &[10, 20])).await;
     let appended_at = append_and_checkpoint(&store, &batch("api", &[30, 40])).await;
@@ -346,9 +489,9 @@ async fn range_from_the_end_of_one_block_to_the_start_of_the_next_includes_both_
 async fn two_neighbouring_blocks_are_merged_into_one() {
     let harness = Harness::start().await;
     let store = harness.open().await;
-    append_and_checkpoint(&store, &batch("api", &[10])).await;
+    append_and_checkpoint(&store, &batch_that_fills_a_block()).await;
 
-    append_and_checkpoint(&store, &batch("api", &[20])).await;
+    append_and_checkpoint(&store, &second_batch_that_fills_a_block()).await;
 
     assert_eq!(covered_records(&store), [(1, 2)]);
 }
@@ -357,10 +500,10 @@ async fn two_neighbouring_blocks_are_merged_into_one() {
 async fn blocks_that_were_merged_are_deleted_from_the_store() {
     let harness = Harness::start().await;
     let store = harness.open().await;
-    append_and_checkpoint(&store, &batch("api", &[10])).await;
+    append_and_checkpoint(&store, &batch_that_fills_a_block()).await;
     let first_block = block_object_keys(&harness, &store).await;
 
-    append_and_checkpoint(&store, &batch("api", &[20])).await;
+    append_and_checkpoint(&store, &second_batch_that_fills_a_block()).await;
 
     let first_block_now = harness.artifact_store.get_object(&first_block[0]).await;
     assert!(first_block_now.is_err());
@@ -594,11 +737,11 @@ async fn replaced_store_whose_materializer_was_stopped_says_so() {
 async fn new_store_goes_on_from_the_blocks_of_the_replaced_one() {
     let harness = Harness::start().await;
     let replaced = harness
-        .open_with::<UnmergedBlocks>(WriterSettings::default(), CHECKPOINT_AFTER)
+        .open_with::<BlockPerRecord>(WriterSettings::default(), CHECKPOINT_AFTER)
         .await;
     append_and_checkpoint(&replaced, &batch("api", &[10])).await;
     let successor = harness
-        .open_with::<UnmergedBlocks>(WriterSettings::default(), CHECKPOINT_AFTER)
+        .open_with::<BlockPerRecord>(WriterSettings::default(), CHECKPOINT_AFTER)
         .await;
 
     append_and_checkpoint(&successor, &batch("api", &[20])).await;
@@ -802,8 +945,23 @@ async fn sweeper_leaves_every_block_of_the_committed_catalog_in_place() {
     assert_eq!(everything_at(&interrupted.successor, marker).await, before_the_sweep);
 }
 
+/// The keys of every object the metrics materializer of the harness's stream has in the store.
+async fn materializer_object_keys(harness: &Harness) -> Vec<String> {
+    let prefix = namespace_prefix(harness.stream_id().await, METRICS_MATERIALIZER);
+    let objects = harness
+        .artifact_store
+        .list_prefix(&prefix)
+        .await
+        .expect("the store answers");
+    let mut object_keys = Vec::new();
+    for object in objects {
+        object_keys.push(object.object_key);
+    }
+    object_keys
+}
+
 #[tokio::test(start_paused = true)]
-async fn sweeper_deletes_the_block_a_replaced_store_cut_after_it_was_replaced() {
+async fn sweeper_deletes_what_a_replaced_store_wrote_after_it_was_replaced() {
     let harness = Harness::start().await;
     let replaced = harness.open().await;
     let appended_at = append(&replaced, &batch("api", &[10])).await;
@@ -811,12 +969,17 @@ async fn sweeper_deletes_the_block_a_replaced_store_cut_after_it_was_replaced() 
     // The successor takes the materializer over and stops before it checkpoints, so nothing but the
     // sweeper is left to clean up after the replaced store.
     drop(harness.open().await);
-    // The replaced store cuts a block at its next checkpoint and learns, too late, that it may not
+    // The replaced store saves its head at its next checkpoint and learns, too late, that it may not
     // commit it.
     sleep(CHECKPOINT_AFTER * 2).await;
-    let orphans = block_object_keys(&harness, &replaced).await;
-    assert_eq!(orphans.len(), 1);
-    assert!(harness.artifact_store.get_object(&orphans[0]).await.is_ok());
+    let orphans = materializer_object_keys(&harness).await;
+    let mut saved_heads = 0;
+    for orphan in &orphans {
+        if orphan.ends_with("-head") {
+            saved_heads += 1;
+        }
+    }
+    assert_eq!(saved_heads, 1, "{orphans:?}");
 
     sweep_orphans(
         harness.cluster.metadata(),
@@ -827,8 +990,7 @@ async fn sweeper_deletes_the_block_a_replaced_store_cut_after_it_was_replaced() 
     .await
     .expect("the sweep runs");
 
-    let orphan_now = harness.artifact_store.get_object(&orphans[0]).await;
-    assert!(orphan_now.is_err(), "orphan {} is still there", orphans[0]);
+    assert_eq!(materializer_object_keys(&harness).await, Vec::<String>::new());
 }
 
 // ---- truncation ----
@@ -957,7 +1119,7 @@ async fn queries_are_answered_in_full_while_the_log_is_being_truncated() {
 async fn damaged_block_fails_the_query_that_reads_it() {
     let harness = Harness::start().await;
     let store = harness.open().await;
-    let appended_at = append_and_checkpoint(&store, &batch("api", &[10, 20])).await;
+    let appended_at = append_and_checkpoint(&store, &batch_that_fills_a_block()).await;
     let object_keys = block_object_keys(&harness, &store).await;
     harness.artifact_store.corrupt_byte(&object_keys[0], 5, 0x20);
 
@@ -978,7 +1140,7 @@ async fn damaged_block_fails_the_query_that_reads_it() {
 async fn damaged_block_does_not_keep_the_store_from_answering_from_the_head() {
     let harness = Harness::start().await;
     let store = harness.open().await;
-    append_and_checkpoint(&store, &batch("api", &[10, 20])).await;
+    append_and_checkpoint(&store, &batch_that_fills_a_block()).await;
     let object_keys = block_object_keys(&harness, &store).await;
     harness.artifact_store.corrupt_byte(&object_keys[0], 5, 0x20);
     let appended_at = append(&store, &batch("api", &[500])).await;

@@ -39,10 +39,12 @@ The bytes are specified in `docs/protocol/metrics.md`.
 **The life of a sample.** A batch of samples is one log record. The store's
 materializer applies committed records in order: it decodes each one and
 adds its samples to the **head**, an ordered map in memory from label set to
-samples. At a checkpoint, everything in the head is written as one **block**
-and the head is emptied. Neighbouring blocks of similar size are merged into
-larger ones. Once a block is committed, the log below it can be truncated;
-the block is then the only copy.
+samples. The record that fills the head ends a **block**: the samples up to
+it are written as one object and leave the head. At a checkpoint, the part
+of the head that is still filling is saved next to the blocks, so that the
+log below the checkpoint can be truncated; the next store reads it back and
+goes on where this one was. Neighbouring blocks of similar size are merged
+into larger ones.
 
 **One sample per series and timestamp.** If two records hold a sample for
 the same series and timestamp, the later record wins. Samples may arrive in
@@ -54,10 +56,11 @@ numbers. Blocks never overlap in sequence numbers and may overlap in time. A
 query reads them in log order, so the latest record always wins.
 
 **When a block is cut.** A `BlockPolicy` gives two limits: a number of
-samples and a span of time, measured by the samples' own timestamps. When
-the head reaches either, the materializer asks for a checkpoint. A
-checkpoint also cuts a block whenever the framework's timer fires, however
-little the head holds.
+samples and a span of time, measured by the samples' own timestamps. The
+record that brings the head to either one ends the block. Nothing else cuts
+a block: not a checkpoint, not a restart, not a clock. The same records
+therefore give the same blocks, bit for bit, whenever checkpoints happen and
+whichever store runs.
 
 ### What a query sees
 
@@ -99,11 +102,12 @@ was read is kept in memory.
 
 ### A reader that is not the store
 
-`BlockReader` answers from the blocks of the last committed checkpoint. It
-shares nothing with the store but the metadata store and the object store.
-Its answers are exact up to that checkpoint; it does not see the head. It
-looks for a newer checkpoint when asked to (`refresh`) and when it finds a
-block gone.
+`BlockReader` answers from the blocks of the last committed checkpoint and
+from the part of the head that checkpoint saved, which has the layout of a
+block. It shares nothing with the store but the metadata store and the
+object store. Its answers are exact up to that checkpoint; it does not see
+what the store applied since. It looks for a newer checkpoint when asked to
+(`refresh`) and when it finds a block gone.
 
 ## Invariants
 
@@ -111,8 +115,9 @@ block gone.
   sequence number.
 - An answer with `as_of` = N holds exactly what the records 1 to N make of
   the selected series.
-- The blocks of the catalog cover every record up to the checkpoint, without
-  gap or overlap.
+- The blocks of the catalog, and after them the saved head, cover every
+  record up to the checkpoint, without gap or overlap.
+- Where a block ends depends on the records alone.
 - Nothing is returned from a block before the checksum that covers it was
   verified.
 - Encoding is deterministic: the same samples give the same block, bit for
