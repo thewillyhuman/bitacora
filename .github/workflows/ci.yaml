@@ -22,6 +22,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      # Most of the runner's disk is taken by toolchains this build never
+      # uses. What is left was once not enough for the Bazel caches, the
+      # toolchains Bazel downloads and the outputs of a build: a link step
+      # failed with nothing but an exit status, and only the upload of the
+      # cache afterwards said that the disk was full. Removing the largest of
+      # those toolchains takes seconds.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       # Restores Bazel itself, the downloaded dependencies and the action
       # cache, so an unchanged crate is neither rebuilt nor retested.
       - uses: bazel-contrib/setup-bazel@0.19.2
@@ -30,6 +41,11 @@ jobs:
           disk-cache: ci
           repository-cache: true
       - run: bazel test --config=ci //...
+      # How much room the run had left, also when it failed: the next time
+      # the disk fills up, the log shows it coming.
+      - name: Report disk usage
+        if: always()
+        run: df -h /
 
   changelog:
     name: changelog entries
