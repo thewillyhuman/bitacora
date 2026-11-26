@@ -22,3 +22,20 @@ may still be about to be committed from garbage.
 Every process of a cluster must be given the same bucket and prefix. The
 controller refuses to record a tiered segment that it cannot see in its own
 view of the store, which catches a replica configured with another bucket.
+
+## A local directory as the object store
+
+A cluster on one machine, or on machines that share a file system, can use
+a directory instead of a bucket: the `local_directory` kind of the cluster
+configuration, with a `path`. Every program that reads objects from it must
+agree on where they are:
+
+```text
+<path>/
+  objects/<object key>   one file per object; the `/` of a key are directories
+  scratch/               objects being written, not yet visible
+```
+
+A file below `objects/` is a whole object: it is written below `scratch/`,
+flushed, and renamed into place. A reader opens `objects/<object key>` and
+never looks at `scratch/`.
