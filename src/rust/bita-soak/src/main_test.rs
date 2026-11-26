@@ -7,18 +7,21 @@
 //! - The metrics endpoint: without an address nothing is served; with one, the counters of the run can be scraped;
 //!   an address that cannot be listened on is an error with the address in it.
 //! - The client's writers record the tool's name with their leases.
+//! - How faults reach the cluster: not at all with `--no-faults`; otherwise through the Kubernetes API, found from
+//!   what a pod is given, with an error that says what is missing when the tool does not run in a pod.
 //!
 //! # How the fixtures work
 //!
 //! The lingering tests run on a paused clock and measure the virtual time that passed. The metrics tests listen on
 //! a port the operating system picks, which they find by listening first and asking for the address.
 
-// The tests talk to the tool's own metrics endpoint over a socket.
-#![allow(clippy::disallowed_types)]
+// The tests talk to the tool's own metrics endpoint over a socket and write the files a pod would find mounted.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use std::io::{Read as _, Write as _};
 
 use super::*;
+use crate::kubernetes_stand_in::TEST_AUTHORITY_PEM;
 
 /// A stop that nobody fires, and the sender that keeps it that way.
 fn no_stop() -> (watch::Sender<bool>, watch::Receiver<bool>) {
@@ -144,8 +147,62 @@ fn writers_of_the_tool_record_its_name_with_their_leases() {
     assert_eq!(client_settings().writer.writer_identity, "bita-soak");
 }
 
-/// This version of the tool has no way to break a cluster: its rounds are plain workloads, judged.
+/// Parses a command line that names one etcd endpoint and `options`.
+fn arguments_with(options: &[&str]) -> Arguments {
+    let mut command_line = vec!["bita-soak", "--etcd-endpoint", "http://etcd:2379"];
+    command_line.extend_from_slice(options);
+    Arguments::try_parse_from(command_line).expect("a valid command line")
+}
+
+/// A directory with what a pod's service account mount holds, in the namespace `storage`.
+fn service_account_mount() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    std::fs::write(directory.path().join("ca.crt"), TEST_AUTHORITY_PEM).expect("the authority is written");
+    std::fs::write(directory.path().join("namespace"), "storage").expect("the namespace is written");
+    std::fs::write(directory.path().join("token"), "token-1").expect("the token is written");
+    directory
+}
+
+/// A run without faults must work anywhere, also on a laptop: it asks nothing of Kubernetes.
 #[test]
-fn nemesis_of_this_version_injects_nothing() {
-    assert_eq!(nemesis_settings().kinds, Vec::new());
+fn run_without_faults_needs_no_kubernetes() {
+    let injector = fault_injector(&arguments_with(&["--no-faults"]));
+
+    assert!(injector.is_ok());
+}
+
+#[tokio::test]
+async fn faults_are_made_from_what_a_pod_is_given() {
+    let mount = service_account_mount();
+
+    let faults = kubernetes_faults(&arguments_with(&[]), mount.path(), Some("10.96.0.1"), Some("443"));
+
+    assert!(faults.is_ok(), "{faults:?}");
+}
+
+#[test]
+fn faults_outside_a_pod_are_an_error_that_says_so() {
+    let mount = service_account_mount();
+
+    let faults = kubernetes_faults(&arguments_with(&[]), mount.path(), None, None);
+
+    assert_eq!(
+        faults.err().as_deref(),
+        Some("KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT are not set, so this is not a pod")
+    );
+}
+
+#[test]
+fn faults_without_a_service_account_are_an_error_that_names_the_missing_file() {
+    let empty_directory = tempfile::tempdir().expect("a temporary directory");
+
+    let faults = kubernetes_faults(
+        &arguments_with(&[]),
+        empty_directory.path(),
+        Some("10.96.0.1"),
+        Some("443"),
+    );
+
+    let reason = faults.expect_err("nothing is mounted there");
+    assert!(reason.contains("ca.crt cannot be read"), "{reason}");
 }

@@ -11,6 +11,8 @@
 //!
 //! - [`Arguments`]: everything written after `bita-soak`.
 //! - [`Arguments::soak_settings`]: the settings of the run those arguments ask for.
+//! - [`Arguments::nemesis_settings`]: which faults the run injects, and how often.
+//! - [`Arguments::kubernetes_targets`]: where the pods are that the faults hit.
 //!
 //! # How it works
 //!
@@ -21,20 +23,24 @@
 //! # Invariants
 //!
 //! - Parsing reads nothing but the command line: no environment variable, no file.
-//! - Every default is modest. A soak is about days of correct behaviour; the cluster it was first written for
-//!   needs five to ten milliseconds to make a write durable.
+//! - Every default is modest. A soak is about days of correct behaviour, not about load, and a cluster on network
+//!   volumes needs several milliseconds to make a write durable.
 //!
 //! # See also
 //!
 //! - `main.rs`: parses the arguments and runs what they ask for.
 //! - `docs/soak.md`: the options, for whoever writes the manifest.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use bitacora::DEFAULT_ETCD_KEY_PREFIX;
 use clap::Parser;
 
+use crate::cut_check::CutCheckSettings;
+use crate::faults::FaultKind;
+use crate::kubernetes_faults::{KubernetesTargets, parse_labels};
 use crate::nemesis::NemesisSettings;
 use crate::round::RoundSettings;
 use crate::soak::SoakSettings;
@@ -107,6 +113,60 @@ pub(crate) struct Arguments {
     #[arg(long)]
     pub(crate) seed: Option<u64>,
 
+    /// The kinds of fault to inject, separated by commas. A kind that is named twice is twice as likely.
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        value_name = "KIND,...",
+        default_value = "kill-replica,kill-controller,kill-etcd-member,cut-replica,cut-zone"
+    )]
+    pub(crate) faults: Vec<FaultKind>,
+
+    /// Inject no faults: rounds are plain workloads, judged. The tool then needs no access to the Kubernetes API.
+    #[arg(long, conflicts_with = "faults")]
+    pub(crate) no_faults: bool,
+
+    /// How long the nemesis waits between two faults, in seconds, at least one. No fault is injected while the
+    /// cluster has not recovered from the one before.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) fault_interval_seconds: u64,
+
+    /// How long a network cut stays in place once it was seen to be in effect, in seconds.
+    #[arg(long, default_value_t = 30)]
+    pub(crate) cut_seconds: u64,
+
+    /// Keep trying a kind of network cut that was seen not to be in effect. Without this, such a kind is given up
+    /// for the rest of the run. Either way a cut counts only if it was seen to be in effect.
+    #[arg(long)]
+    pub(crate) retry_cuts_not_in_effect: bool,
+
+    /// The namespace the cluster's pods run in. Without it, the namespace of the tool's own pod.
+    #[arg(long, value_name = "NAMESPACE")]
+    pub(crate) namespace: Option<String>,
+
+    /// The labels every replica pod carries, as name=value pairs separated by commas.
+    #[arg(
+        long,
+        value_name = "LABELS",
+        value_parser = parse_labels,
+        default_value = "app.kubernetes.io/name=bitacora,app.kubernetes.io/component=replica"
+    )]
+    pub(crate) replica_selector: BTreeMap<String, String>,
+
+    /// The labels every pod of the etcd cluster carries, as name=value pairs separated by commas.
+    #[arg(
+        long,
+        value_name = "LABELS",
+        value_parser = parse_labels,
+        default_value = "app.kubernetes.io/name=etcd"
+    )]
+    pub(crate) etcd_selector: BTreeMap<String, String>,
+
+    /// The name of the pod label that holds a pod's zone.
+    #[arg(long, value_name = "LABEL", default_value = "topology.kubernetes.io/zone")]
+    pub(crate) zone_label: String,
+
     /// A drill: claim, in the first round, a commit that never happened. The run must end with a violation, which
     /// proves that the alarm is wired and says nothing about the cluster.
     #[arg(long)]
@@ -146,6 +206,44 @@ impl Arguments {
                 dump_directory: self.dump_directory.clone(),
             },
             plants_lost_record: self.drill_lost_record,
+        }
+    }
+
+    /// Works out what the nemesis of every round does.
+    ///
+    /// # Arguments
+    ///
+    /// * `cut_check` - How a network cut is checked before it counts.
+    ///
+    /// # Returns
+    ///
+    /// The settings. With `--no-faults` they name no kind of fault.
+    pub(crate) fn nemesis_settings(&self, cut_check: CutCheckSettings) -> NemesisSettings {
+        let kinds = if self.no_faults {
+            Vec::new()
+        } else {
+            self.faults.clone()
+        };
+        NemesisSettings {
+            kinds,
+            fault_interval: Duration::from_secs(self.fault_interval_seconds),
+            cut_duration: Duration::from_secs(self.cut_seconds),
+            cut_check,
+            retries_cuts_not_in_effect: self.retry_cuts_not_in_effect,
+        }
+    }
+
+    /// Says where the cluster's pods are and how they are labelled.
+    ///
+    /// # Arguments
+    ///
+    /// * `own_namespace` - The namespace of the tool's own pod, which is used unless the command line names one.
+    pub(crate) fn kubernetes_targets(&self, own_namespace: &str) -> KubernetesTargets {
+        KubernetesTargets {
+            namespace: self.namespace.clone().unwrap_or_else(|| own_namespace.to_owned()),
+            replica_labels: self.replica_selector.clone(),
+            etcd_labels: self.etcd_selector.clone(),
+            zone_label: self.zone_label.clone(),
         }
     }
 }

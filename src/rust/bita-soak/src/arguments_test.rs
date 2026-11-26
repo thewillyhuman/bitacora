@@ -6,6 +6,10 @@
 //! - What the parser refuses: no etcd endpoint, a rate of zero, no stream, a run or a round of no time.
 //! - How the options become the settings of a run: durations from seconds, the name and the seed from the time the
 //!   run starts unless the command line gives them, the drill.
+//! - The faults: every kind by default, the kinds named, none with `--no-faults`; how often, and how long a cut
+//!   lasts; whether a kind of cut that was not in effect is tried again.
+//! - Where the faults land: the tool's own namespace unless one is named, the labels of the chart's replicas and
+//!   of the test etcd unless others are given, and no selector that selects everything.
 //!
 //! # How the fixtures work
 //!
@@ -37,6 +41,28 @@ fn no_nemesis() -> NemesisSettings {
         },
         retries_cuts_not_in_effect: false,
     }
+}
+
+/// How the tests have cuts checked: the values do not matter here, only that they are passed through.
+const CUT_CHECK: CutCheckSettings = CutCheckSettings {
+    quiet_period: Duration::from_secs(15),
+    time_limit: Duration::from_secs(45),
+};
+
+/// The nemesis that `options` ask for.
+fn nemesis_of(options: &[&str]) -> NemesisSettings {
+    parse(options)
+        .expect("a valid command line")
+        .nemesis_settings(CUT_CHECK)
+}
+
+/// The labels `pairs`, as a selector holds them.
+fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    for (name, value) in pairs {
+        labels.insert((*name).to_owned(), (*value).to_owned());
+    }
+    labels
 }
 
 /// The settings of the run that `options` ask for.
@@ -182,4 +208,119 @@ fn etcd_key_prefix_is_the_cluster_default_unless_given() {
 
     assert_eq!(by_default.etcd_key_prefix, DEFAULT_ETCD_KEY_PREFIX);
     assert_eq!(given.etcd_key_prefix, "/staging");
+}
+
+#[test]
+fn every_kind_of_fault_is_injected_by_default() {
+    let nemesis = nemesis_of(&[]);
+
+    assert_eq!(nemesis.kinds, FaultKind::ALL);
+}
+
+#[test]
+fn only_the_kinds_that_are_named_are_injected() {
+    let nemesis = nemesis_of(&["--faults", "kill-replica,cut-zone"]);
+
+    assert_eq!(nemesis.kinds, [FaultKind::KillReplica, FaultKind::CutZone]);
+}
+
+#[test]
+fn no_kind_is_injected_when_no_faults_are_asked_for() {
+    let nemesis = nemesis_of(&["--no-faults"]);
+
+    assert_eq!(nemesis.kinds, []);
+}
+
+/// Asking for faults and for none is a mistake, not a choice the tool should make.
+#[test]
+fn faults_and_no_faults_together_are_refused() {
+    assert!(parse(&["--no-faults", "--faults", "kill-replica"]).is_err());
+}
+
+#[test]
+fn kind_of_fault_that_does_not_exist_is_refused() {
+    assert!(parse(&["--faults", "kill-replica,lose-disk"]).is_err());
+}
+
+#[test]
+fn fault_is_due_every_minute_and_a_cut_lasts_thirty_seconds_by_default() {
+    let nemesis = nemesis_of(&[]);
+
+    assert_eq!(nemesis.fault_interval, Duration::from_secs(60));
+    assert_eq!(nemesis.cut_duration, Duration::from_secs(30));
+}
+
+#[test]
+fn pace_of_the_faults_follows_the_options() {
+    let nemesis = nemesis_of(&["--fault-interval-seconds", "20", "--cut-seconds", "45"]);
+
+    assert_eq!(nemesis.fault_interval, Duration::from_secs(20));
+    assert_eq!(nemesis.cut_duration, Duration::from_secs(45));
+}
+
+#[test]
+fn fault_interval_of_no_time_is_refused() {
+    assert!(parse(&["--fault-interval-seconds", "0"]).is_err());
+}
+
+#[test]
+fn kind_of_cut_that_was_not_in_effect_is_given_up_unless_asked_otherwise() {
+    assert!(!nemesis_of(&[]).retries_cuts_not_in_effect);
+    assert!(nemesis_of(&["--retry-cuts-not-in-effect"]).retries_cuts_not_in_effect);
+}
+
+#[test]
+fn way_cuts_are_checked_is_the_one_handed_in() {
+    assert_eq!(nemesis_of(&[]).cut_check, CUT_CHECK);
+}
+
+#[test]
+fn faults_land_in_the_namespace_of_the_tool_unless_one_is_named() {
+    let by_default = parse(&[]).expect("a valid command line");
+    let named = parse(&["--namespace", "staging"]).expect("a valid command line");
+
+    assert_eq!(by_default.kubernetes_targets("storage").namespace, "storage");
+    assert_eq!(named.kubernetes_targets("storage").namespace, "staging");
+}
+
+/// The labels of the chart's replicas, of `development/kubernetes/etcd.yaml`, and the zone label of Kubernetes.
+#[test]
+fn pods_are_found_by_the_labels_of_the_chart_by_default() {
+    let targets = parse(&[]).expect("a valid command line").kubernetes_targets("storage");
+
+    assert_eq!(
+        targets.replica_labels,
+        labels(&[
+            ("app.kubernetes.io/name", "bitacora"),
+            ("app.kubernetes.io/component", "replica")
+        ])
+    );
+    assert_eq!(targets.etcd_labels, labels(&[("app.kubernetes.io/name", "etcd")]));
+    assert_eq!(targets.zone_label, "topology.kubernetes.io/zone");
+}
+
+#[test]
+fn labels_of_the_pods_follow_the_options() {
+    let arguments = parse(&[
+        "--replica-selector",
+        "app=log,role=replica",
+        "--etcd-selector",
+        "app=etcd",
+        "--zone-label",
+        "example.org/zone",
+    ])
+    .expect("a valid command line");
+
+    let targets = arguments.kubernetes_targets("storage");
+
+    assert_eq!(targets.replica_labels, labels(&[("app", "log"), ("role", "replica")]));
+    assert_eq!(targets.etcd_labels, labels(&[("app", "etcd")]));
+    assert_eq!(targets.zone_label, "example.org/zone");
+}
+
+/// A selector without labels would select every pod of the namespace.
+#[test]
+fn selector_that_is_not_made_of_labels_is_refused() {
+    assert!(parse(&["--replica-selector", ""]).is_err());
+    assert!(parse(&["--etcd-selector", "etcd"]).is_err());
 }

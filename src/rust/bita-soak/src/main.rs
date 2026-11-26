@@ -12,19 +12,22 @@
 //! # What it contains
 //!
 //! - `main`: parses the command line, connects, runs the soak and turns its verdict into an exit code, with one
-//!   function per step: `print_usage_error`, `run`, `connect`, `serve_metrics`, `listen_for_shutdown`,
-//!   `linger_unless_clean`, `exit_code_of`.
+//!   function per step: `print_usage_error`, `run`, `fault_injector`, `kubernetes_faults`, `connect`,
+//!   `serve_metrics`, `listen_for_shutdown`, `linger_unless_clean`, `exit_code_of`.
 //! - The modules of the tool: `arguments` (the command line), `cluster` (what a run holds of the cluster), `soak`
 //!   (the run), `round` (one round), `workload` (writers and readers), `nemesis`, `faults`, `targets` and
-//!   `cut_check` (what goes wrong, and whether it really did), `health` (when the cluster is whole again), `audit`
-//!   and `judge` (the verdict), `report` and `metrics` (what the tool says about itself).
+//!   `cut_check` (what goes wrong, and whether it really did), `kubernetes_faults` and `kubernetes_api` (how it
+//!   is made to go wrong on Kubernetes), `health` (when the cluster is whole again), `audit` and `judge` (the
+//!   verdict), `report` and `metrics` (what the tool says about itself).
 //!
 //! # How it works
 //!
 //! 1. The command line is parsed. A mistake ends the tool with exit code 2.
-//! 2. A client and the metadata store are connected, as an application would connect them.
-//! 3. The soak runs: round after round, a line of JSON for each on standard output, and one for the run at the end.
-//! 4. The verdict of the run becomes the exit code.
+//! 2. Unless the command line asks for no faults, the Kubernetes API is found the way every pod finds it: its
+//!    address in the environment, a service account in a mounted directory.
+//! 3. A client and the metadata store are connected, as an application would connect them.
+//! 4. The soak runs: round after round, a line of JSON for each on standard output, and one for the run at the end.
+//! 5. The verdict of the run becomes the exit code.
 //!
 //! Exit codes: 0 if the run lasted as long as it was asked to and every round was clean; 1 if it could not start;
 //! 2 if the command line is wrong; 3 if a round broke an invariant; 4 if the cluster did not recover after a round;
@@ -50,6 +53,7 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,9 +69,11 @@ use tokio::time::Instant;
 use crate::arguments::Arguments;
 use crate::cluster::SoakedCluster;
 use crate::cut_check::CutCheckSettings;
-use crate::faults::NoFaults;
+use crate::faults::{FaultInjector, NoFaults};
+use crate::kubernetes_api::ApiClient;
+use crate::kubernetes_faults::{KubernetesFaults, SERVICE_ACCOUNT_DIRECTORY, ServiceAccount};
 use crate::metrics::SoakMetrics;
-use crate::nemesis::{NemesisSettings, pause};
+use crate::nemesis::pause;
 use crate::report::RunVerdict;
 use crate::soak::run_soak;
 
@@ -78,6 +84,10 @@ mod cut_check;
 mod faults;
 mod health;
 mod judge;
+mod kubernetes_api;
+mod kubernetes_faults;
+#[cfg(test)]
+mod kubernetes_stand_in;
 mod metrics;
 mod nemesis;
 mod report;
@@ -105,6 +115,10 @@ const CUT_CHECK: CutCheckSettings = CutCheckSettings {
     quiet_period: Duration::from_secs(15),
     time_limit: Duration::from_secs(45),
 };
+/// The environment variable in which every pod finds the host of the API server.
+const API_SERVER_HOST_VARIABLE: &str = "KUBERNETES_SERVICE_HOST";
+/// The environment variable in which every pod finds the port of the API server.
+const API_SERVER_PORT_VARIABLE: &str = "KUBERNETES_SERVICE_PORT";
 /// The name the tool's writers record with their lease.
 const WRITER_IDENTITY: &str = "bita-soak";
 
@@ -151,8 +165,10 @@ fn print_usage_error(usage_error: &clap::Error) -> ExitCode {
 /// Returns the text to show if the cluster configuration cannot be used, the signals cannot be listened for, or
 /// the metrics cannot be served.
 async fn run(arguments: &Arguments) -> Result<RunVerdict, String> {
-    let cluster = connect(arguments).await?;
-    let settings = arguments.soak_settings(SystemClock.now().unix_millis(), nemesis_settings());
+    let faults = fault_injector(arguments)?;
+    let cluster = connect(arguments, faults).await?;
+    let nemesis = arguments.nemesis_settings(CUT_CHECK);
+    let settings = arguments.soak_settings(SystemClock.now().unix_millis(), nemesis);
     let metrics = SoakMetrics::new();
     let mut stop = listen_for_shutdown()?;
     if let Some(address) = serve_metrics(arguments.metrics_listen_address.as_deref(), &metrics, stop.clone()).await? {
@@ -172,12 +188,60 @@ async fn run(arguments: &Arguments) -> Result<RunVerdict, String> {
     Ok(summary.verdict)
 }
 
+/// Says how the faults of the run reach the cluster: through the Kubernetes API, as the tool's own pod finds it,
+/// or not at all if the command line asks for no faults.
+///
+/// # Errors
+///
+/// Returns the text to show if faults are asked for and the tool does not run in a pod with a service account.
+fn fault_injector(arguments: &Arguments) -> Result<Arc<dyn FaultInjector>, String> {
+    if arguments.no_faults {
+        return Ok(Arc::new(NoFaults));
+    }
+    let host = std::env::var(API_SERVER_HOST_VARIABLE).ok();
+    let port = std::env::var(API_SERVER_PORT_VARIABLE).ok();
+    let service_account_directory = Path::new(SERVICE_ACCOUNT_DIRECTORY);
+    match kubernetes_faults(arguments, service_account_directory, host.as_deref(), port.as_deref()) {
+        Ok(faults) => Ok(Arc::new(faults)),
+        Err(reason) => Err(format!(
+            "faults are injected through the Kubernetes API, which cannot be used: {reason}; with --no-faults the \
+             tool runs without it"
+        )),
+    }
+}
+
+/// Makes the faults of a cluster on Kubernetes from what a pod is given: the address of the API server in its
+/// environment and a service account in a directory.
+///
+/// # Errors
+///
+/// Returns the text to show if either is missing or cannot be used.
+fn kubernetes_faults(
+    arguments: &Arguments,
+    service_account_directory: &Path,
+    host: Option<&str>,
+    port: Option<&str>,
+) -> Result<KubernetesFaults, String> {
+    let (Some(host), Some(port)) = (host, port) else {
+        return Err(format!(
+            "{API_SERVER_HOST_VARIABLE} and {API_SERVER_PORT_VARIABLE} are not set, so this is not a pod"
+        ));
+    };
+    let service_account = ServiceAccount::read_from(service_account_directory)?;
+    let api = match ApiClient::new(service_account.api_settings(host, port)) {
+        Ok(api) => api,
+        Err(api_error) => return Err(api_error.to_string()),
+    };
+    let targets = arguments.kubernetes_targets(&service_account.namespace);
+    Ok(KubernetesFaults::new(api, targets))
+}
+
 /// Connects a client and the metadata store of the cluster the command line names.
 ///
 /// # Errors
 ///
 /// Returns the text to show if the etcd endpoints can never work.
-async fn connect(arguments: &Arguments) -> Result<SoakedCluster, String> {
+async fn connect(arguments: &Arguments, faults: Arc<dyn FaultInjector>) -> Result<SoakedCluster, String> {
     let config = ClusterConfig {
         etcd_endpoints: arguments.etcd_endpoints.clone(),
         etcd_key_prefix: arguments.etcd_key_prefix.clone(),
@@ -195,7 +259,7 @@ async fn connect(arguments: &Arguments) -> Result<SoakedCluster, String> {
         client,
         metadata,
         clock: Arc::new(SystemClock),
-        faults: Arc::new(NoFaults),
+        faults,
     })
 }
 
@@ -207,17 +271,6 @@ fn client_settings() -> ClientSettings {
             ..WriterSettings::default()
         },
         ..ClientSettings::default()
-    }
-}
-
-/// What the nemesis of every round does: nothing. This version of the tool injects no faults.
-fn nemesis_settings() -> NemesisSettings {
-    NemesisSettings {
-        kinds: Vec::new(),
-        fault_interval: Duration::from_secs(60),
-        cut_duration: Duration::from_secs(30),
-        cut_check: CUT_CHECK,
-        retries_cuts_not_in_effect: false,
     }
 }
 

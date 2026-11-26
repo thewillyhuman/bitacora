@@ -241,6 +241,7 @@ name = "bita-soak"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "axum",
  "bitacora",
  "bitacora-controller",
  "bitacora-meta",
@@ -252,6 +253,8 @@ dependencies = [
  "bitacora-types",
  "bytes",
  "clap",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",

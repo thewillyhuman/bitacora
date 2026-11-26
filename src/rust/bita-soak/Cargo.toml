@@ -23,6 +23,11 @@ bitacora-sim.workspace = true
 bitacora-types.workspace = true
 bytes.workspace = true
 clap.workspace = true
+# The Kubernetes API is four HTTPS requests. These are the HTTP client and
+# the TLS implementation the S3 backend already builds; nothing new enters
+# the build.
+reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -31,6 +36,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
 
 [dev-dependencies]
+# The stand-in for the Kubernetes API server in the tests.
+axum.workspace = true
 bitacora-controller.workspace = true
 bitacora-replica.workspace = true
 bitacora-segment.workspace = true
