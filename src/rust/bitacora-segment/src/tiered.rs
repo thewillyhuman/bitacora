@@ -713,6 +713,45 @@ impl TieredSegmentEncoder {
         Ok(())
     }
 
+    /// The sequence number the next frame must begin with: the one after the last record taken so far, or
+    /// the segment's first before any frame was taken.
+    ///
+    /// This is where an uploader reads its copy next, and how it knows where it stands without decoding
+    /// the frames a second time: the copy was read to its end once this is past the sealed end, and a
+    /// chunk that did not move it held no record.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_segment::format::{Batch, SegmentHeader};
+    /// use bitacora_segment::tiered::TieredSegmentEncoder;
+    /// use bitacora_types::{Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId};
+    /// use bytes::Bytes;
+    ///
+    /// let address = SegmentAddress::new(StreamId::new(7), SegmentId::new(3));
+    /// let segment = SegmentHeader {
+    ///     address,
+    ///     epoch: Epoch::new(5),
+    ///     first_sequence: SequenceNumber::new(100),
+    /// };
+    /// let two_records = [Bytes::from_static(b"a"), Bytes::from_static(b"b")];
+    /// let batch = Batch::encode(address, SequenceNumber::new(100), &two_records)?;
+    /// let mut encoder = TieredSegmentEncoder::new(segment, SequenceNumber::new(101));
+    /// assert_eq!(encoder.next_sequence(), SequenceNumber::new(100));
+    ///
+    /// encoder.add_frames(batch.frame())?;
+    ///
+    /// assert_eq!(encoder.next_sequence(), SequenceNumber::new(102));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn next_sequence(&self) -> SequenceNumber {
+        match self.found_end {
+            Some(found_end) => found_end.next(),
+            None => self.segment.first_sequence,
+        }
+    }
+
     /// Ends the object: checks that the frames were the whole segment and builds what follows them.
     ///
     /// # Returns

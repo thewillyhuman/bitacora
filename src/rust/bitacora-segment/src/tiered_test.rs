@@ -6,7 +6,7 @@
 //!   segment (short, long, misplaced, empty or damaged) is refused.
 //! - Encoding piece by piece: an object built from the frames in chunks, however they are cut between two
 //!   frames, is byte for byte the object built in one go, and what is wrong with a chunk is reported as it
-//!   would be for the whole.
+//!   would be for the whole. The encoder says which record its next chunk must begin with.
 //! - The footer: what it says about the object, and every way bytes are refused as one.
 //! - The block index: every sequence number is found in the blocks fetched for it, and fetch limits are
 //!   rounded to whole blocks.
@@ -485,6 +485,63 @@ fn chunk_that_skips_records_is_refused_like_a_gap_between_two_frames() {
             found: SequenceNumber::new(FIRST_SEQUENCE + 21 * LARGE_RECORDS_PER_BATCH),
         }))
     );
+}
+
+#[test]
+fn encoder_without_frames_goes_on_at_the_first_record_of_the_segment() {
+    let encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+
+    assert_eq!(encoder.next_sequence(), SequenceNumber::new(FIRST_SEQUENCE));
+}
+
+#[test]
+fn encoder_goes_on_after_the_last_record_it_was_given() {
+    let chunks = frames_cut_after(&[20]);
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+
+    encoder.add_frames(&chunks[0]).expect("whole frames are taken");
+
+    assert_eq!(
+        encoder.next_sequence(),
+        SequenceNumber::new(FIRST_SEQUENCE + 20 * LARGE_RECORDS_PER_BATCH)
+    );
+}
+
+/// How an uploader knows that it has read the whole copy.
+#[test]
+fn encoder_given_the_whole_segment_goes_on_past_the_sealed_end() {
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+
+    encoder.add_frames(&large_frames()).expect("whole frames are taken");
+
+    assert_eq!(encoder.next_sequence(), LARGE_SEALED_END.next());
+}
+
+/// How an uploader notices a copy that ends short of its sealed end: a read past the end returns no
+/// frames, and the encoder stays where it was.
+#[test]
+fn encoder_given_a_chunk_without_frames_goes_on_where_it_was() {
+    let chunks = frames_cut_after(&[20]);
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+    encoder.add_frames(&chunks[0]).expect("whole frames are taken");
+    let before_the_empty_chunk = encoder.next_sequence();
+
+    encoder.add_frames(&Bytes::new()).expect("no frames are taken");
+
+    assert_eq!(encoder.next_sequence(), before_the_empty_chunk);
+}
+
+#[test]
+fn encoder_that_refused_a_chunk_goes_on_where_it_was() {
+    let chunks = frames_cut_after(&[20, 21]);
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+    encoder.add_frames(&chunks[0]).expect("whole frames are taken");
+    let before_the_refusal = encoder.next_sequence();
+
+    // The twenty-first batch is left out.
+    let _refused = encoder.add_frames(&chunks[2]);
+
+    assert_eq!(encoder.next_sequence(), before_the_refusal);
 }
 
 #[test]
