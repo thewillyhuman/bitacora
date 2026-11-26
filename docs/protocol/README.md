@@ -44,7 +44,7 @@ Every format carries its own version, so that each can change alone:
 | Metadata records | `schema_version` field | 1 |
 | Wire protocol | Protobuf package (`bitacora.v1`) | 1 |
 | Checkpoint manifest | Header | 1 |
-| Artifact catalog | First field | 2 |
+| Artifact catalog | First field | 3 |
 | Metrics record | First byte | 1 |
 | Metrics block | Footer | 1 |
 

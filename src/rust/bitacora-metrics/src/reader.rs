@@ -186,7 +186,7 @@ impl BlockReader {
                 Err(read_error) => return Err(BlockReaderError::Block(read_error)),
             };
             let (checkpoint, manifest) = decode_manifest(&stored_manifest)?;
-            let entries = decode_catalog(&manifest.details)?;
+            let entries = decode_catalog(&manifest.details)?.entries;
             self.committed = CommittedBlocks { checkpoint, entries };
             return Ok(checkpoint);
         }

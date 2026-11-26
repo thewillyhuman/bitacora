@@ -72,10 +72,15 @@ below which pages can no longer be read.
 
 `ArtifactCatalog` implements the contract for a workload that only says how
 records become a file (`ArtifactBuilder`). The catalog is the list of files in
-log order, each covering a range of sequence numbers. A checkpoint seals what
-the builder holds into one more file, then merges the oldest run of
-neighbours of similar size into one larger file, at most one run per
-checkpoint. Merging reads the files, never the log, because the log below the
+log order, each covering a range of sequence numbers. The builder decides
+when a file is cut and after which record. A checkpoint seals the files that
+are due. What the builder holds beyond them must be durable too, because the
+log may be truncated up to the checkpoint: a builder that can save its
+pending records has them saved, in an artifact the manifest names next to
+the catalog, and the next instance reads them back; a builder that cannot
+has them sealed into one more file, however small. The checkpoint then
+merges the oldest run of neighbours of similar size into one larger file, at
+most one run per checkpoint. Merging reads the files, never the log, because the log below the
 checkpoint may be gone. Files a merge replaced are dropped from the manifest
 and deleted by the sweep after the commit.
 
@@ -101,8 +106,11 @@ data behind a shared handle in its builder.
   that its writer may still commit.
 - A page read at any sequence from the horizon to the last record applied
   sees exactly the records up to it, whatever was flushed or dropped since.
-- An artifact catalog covers every record from the first one applied to the
-  last checkpoint, without gap or overlap, also across crashes and merges.
+- An artifact catalog, with the saved pending records after it if there are
+  any, covers every record from the first one applied to the last
+  checkpoint, without gap or overlap, also across crashes and merges.
+- A builder that cuts at boundaries it derives from the records, and saves
+  its pending records, cuts the same artifacts whenever checkpoints happen.
 
 ## Which file holds what
 

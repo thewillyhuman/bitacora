@@ -16,23 +16,31 @@
 //! - [`CatalogView`]: a cloneable handle that shows the catalog while the runner works.
 //! - [`CatalogEntry`] and [`ArtifactDescriptor`]: one artifact and the range it covers.
 //! - [`CompactionPolicy`]: when small artifacts are merged.
-//! - [`decode_catalog`]: the catalog out of a committed manifest, for a process that only queries.
+//! - [`decode_catalog`] and [`StoredCatalog`]: the catalog out of a committed manifest, for a process
+//!   that only queries.
 //!
 //! # How it works
 //!
-//! The catalog is a list of artifacts in log order. Each covers a range of sequence numbers; together
-//! they cover every record from the first one applied to the last checkpoint, without gap or overlap.
+//! The catalog is a list of artifacts in log order. Each covers a range of sequence numbers, without gap
+//! or overlap, from the first record applied onwards.
 //!
 //! - Applying records hands them to the builder, which buffers them however it likes.
-//! - Writing a checkpoint seals whatever the builder holds into one artifact that covers exactly the
-//!   records added since the last seal, and appends it to the catalog. A checkpoint must persist
-//!   everything applied, so it always seals, however little there is. The builder can ask for a
-//!   checkpoint earlier through [`ArtifactBuilder::should_seal`].
-//! - Checkpoints that come often therefore make small artifacts. After sealing, a checkpoint looks for
-//!   the oldest run of [`CompactionPolicy::merge_fan_in`] neighbours in the same size tier and has the
-//!   builder merge them into one artifact that covers their ranges together. At most one merge happens
-//!   per checkpoint, which bounds the work a checkpoint does. The merged artifact is larger, lands in a
-//!   higher tier, and is merged again once enough peers exist: size-tiered compaction.
+//! - The builder decides when an artifact is cut ([`ArtifactBuilder::should_seal`]) and where
+//!   ([`ArtifactBuilder::seal_boundary`]). A builder that decides both from the records alone cuts the
+//!   same artifacts whenever checkpoints happen and whichever instance runs, which is what makes its
+//!   artifacts a function of the log (invariant I6).
+//! - Writing a checkpoint first seals every artifact the builder asks for. A checkpoint must also
+//!   persist the records the builder holds beyond those, because the log may be truncated up to the
+//!   checkpoint. A builder that can save them does so ([`ArtifactBuilder::save_pending_records`]): the
+//!   saved artifact is named by the manifest next to the catalog, is not part of the catalog, and is
+//!   read back by the next instance ([`ArtifactBuilder::restore_pending_records`]). A builder that
+//!   cannot save has everything it holds sealed instead, however little there is; its artifacts then
+//!   follow the pace of the checkpoints.
+//! - After sealing, a checkpoint looks for the oldest run of [`CompactionPolicy::merge_fan_in`]
+//!   neighbours in the same size tier and has the builder merge them into one artifact that covers
+//!   their ranges together. At most one merge happens per checkpoint, which bounds the work a
+//!   checkpoint does. The merged artifact is larger, lands in a higher tier, and is merged again once
+//!   enough peers exist: size-tiered compaction.
 //!
 //! **What is not sealed yet.** The records applied since the last seal are in the builder and nowhere
 //! else. A workload that answers queries needs them: the newest data is the data most asked for. The
@@ -58,7 +66,9 @@
 //! # Invariants
 //!
 //! - Catalog entries are in log order, each starts right after the previous one ends, and none is empty.
-//! - The catalog covers exactly the records applied up to the last checkpoint written.
+//! - The catalog, and after it the saved pending records if there are any, cover exactly the records
+//!   applied up to the last checkpoint written.
+//! - Saving pending records changes neither the builder nor the catalog.
 //! - A replaced artifact stays readable until the manifest that drops it is committed.
 //!
 //! # See also
@@ -78,7 +88,7 @@ use crate::contract::{CheckpointManifest, Materializer, MaterializerError};
 use crate::namespace::ArtifactNamespace;
 
 /// The format of the details an artifact catalog puts in its checkpoint manifest.
-const DETAILS_FORMAT_VERSION: u32 = 2;
+const DETAILS_FORMAT_VERSION: u32 = 3;
 
 /// Where one immutable artifact is, how large it is, and what its builder says about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,8 +154,10 @@ impl CompactionPolicy {
 
 /// What a workload with append-only data implements, instead of the whole [`Materializer`] contract.
 ///
-/// The builder is created with `Default` and restored empty: whatever it had buffered when the process
-/// stopped was not sealed, and the runner hands those records over again.
+/// The builder is created with `Default`. What it held when the last checkpoint was written is either in
+/// sealed artifacts or, for a builder that saves its pending records, handed back to
+/// [`ArtifactBuilder::restore_pending_records`]. Whatever was added after that checkpoint is handed over
+/// again by the runner.
 ///
 /// # Examples
 ///
@@ -215,15 +227,36 @@ pub trait ArtifactBuilder: Default + Send + 'static {
     fn add_records(&mut self, committed_records: &[LogRecord]) -> Result<(), MaterializerError>;
 
     /// Has enough accumulated to cut an artifact? If so the runner checkpoints without waiting for its
-    /// own thresholds, which seals what the builder holds.
+    /// own thresholds, and the checkpoint seals: once, or for as long as the answer stays yes.
     fn should_seal(&self) -> bool;
 
-    /// Writes one immutable artifact from every record added since the last seal, and empties the
-    /// builder.
+    /// Where the next artifact ends, for a builder that cuts artifacts at boundaries of its own.
+    ///
+    /// The adapter asks when [`ArtifactBuilder::should_seal`] says yes. A builder that answers from
+    /// the records alone, for example "after the record that brought the samples to a million", cuts
+    /// the same artifacts whenever checkpoints happen.
+    ///
+    /// # Returns
+    ///
+    /// The last record the next artifact covers; it must be one of the records the builder holds.
+    /// `None`, the default, means everything the builder holds.
+    ///
+    /// # Panics
+    ///
+    /// The adapter panics if the record is not one the builder holds: that is a mistake in the
+    /// builder, and sealing anything else would put records in the wrong artifact.
+    fn seal_boundary(&self) -> Option<SequenceNumber> {
+        None
+    }
+
+    /// Writes one immutable artifact from the oldest records the builder holds, and drops those
+    /// records from the builder.
     ///
     /// # Arguments
     ///
-    /// * `covered_range` - Exactly the records added since the last seal.
+    /// * `covered_range` - The records the artifact must hold: from the first record not sealed yet to
+    ///   [`ArtifactBuilder::seal_boundary`], or to the last record added if the builder names no
+    ///   boundary or cannot save its pending records.
     /// * `artifacts` - Where the artifact goes.
     ///
     /// # Errors
@@ -235,6 +268,56 @@ pub trait ArtifactBuilder: Default + Send + 'static {
         covered_range: SequenceRange,
         artifacts: &ArtifactNamespace,
     ) -> Result<ArtifactDescriptor, MaterializerError>;
+
+    /// Saves the records the builder holds, without sealing them, so that a checkpoint can be written
+    /// while an artifact is still filling.
+    ///
+    /// The adapter calls it at a checkpoint, after every artifact that was due has been sealed, if the
+    /// builder still holds records. The builder keeps what it holds.
+    ///
+    /// # Returns
+    ///
+    /// The artifact that [`ArtifactBuilder::restore_pending_records`] rebuilds the builder's present
+    /// state from. `None`, the default, means that this builder cannot save: the adapter then seals
+    /// what the builder holds, with [`ArtifactBuilder::seal_artifact`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MaterializerError`] if the artifact cannot be stored. The checkpoint is tried again.
+    async fn save_pending_records(
+        &mut self,
+        _artifacts: &ArtifactNamespace,
+    ) -> Result<Option<ArtifactDescriptor>, MaterializerError> {
+        Ok(None)
+    }
+
+    /// Puts a new builder into the state that [`ArtifactBuilder::save_pending_records`] saved.
+    ///
+    /// The adapter calls it once, on a builder fresh from `Default`, when the checkpoint it restores
+    /// from holds saved records. Afterwards the builder must behave exactly as the one that saved did:
+    /// ask for the same seals at the same boundaries, and seal the same artifacts.
+    ///
+    /// # Arguments
+    ///
+    /// * `saved` - The saved artifact and the records it holds.
+    /// * `artifacts` - Where the artifact is read from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MaterializerError`] if the artifact cannot be read or is damaged. The default, for a
+    /// builder that never saves, refuses: such a checkpoint was not written by this builder.
+    async fn restore_pending_records(
+        &mut self,
+        saved: &CatalogEntry,
+        _artifacts: &ArtifactNamespace,
+    ) -> Result<(), MaterializerError> {
+        Err(MaterializerError::InvalidManifest {
+            reason: format!(
+                "the checkpoint holds saved records in {:?}, and this builder does not save any",
+                saved.artifact.artifact_key
+            ),
+        })
+    }
 
     /// Writes one artifact that holds what `inputs` hold together. The inputs are left as they are.
     ///
@@ -287,7 +370,8 @@ pub struct CatalogView {
 }
 
 impl CatalogView {
-    /// Every artifact of the catalog, in log order: gapless and without overlap.
+    /// Every sealed artifact of the catalog, in log order: gapless and without overlap. The records
+    /// the builder holds beyond them are not listed, saved or not.
     #[must_use]
     pub fn entries(&self) -> Vec<CatalogEntry> {
         self.shared.snapshot()
@@ -321,6 +405,9 @@ pub struct ArtifactCatalog<B: ArtifactBuilder> {
     first_pending_sequence: Option<SequenceNumber>,
     /// The last record added to the builder.
     applied_sequence: SequenceNumber,
+    /// The artifact the builder's pending records were last saved to, for as long as the builder holds
+    /// exactly those records. A checkpoint that finds it names it again instead of saving once more.
+    saved_pending: Option<CatalogEntry>,
 }
 
 impl<B: ArtifactBuilder> ArtifactCatalog<B> {
@@ -399,13 +486,36 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
         &self.builder
     }
 
-    /// Seals what the builder holds into one more catalog entry, if it holds anything.
-    async fn seal_pending(&mut self, artifacts: &ArtifactNamespace) -> Result<(), MaterializerError> {
+    /// Seals artifacts for as long as the builder asks for one and holds records.
+    async fn seal_what_is_due(&mut self, artifacts: &ArtifactNamespace) -> Result<(), MaterializerError> {
+        while let Some(first_pending_sequence) = self.first_pending_sequence {
+            if !self.builder.should_seal() {
+                break;
+            }
+            let last_sealed = self.builder.seal_boundary().unwrap_or(self.applied_sequence);
+            assert!(
+                first_pending_sequence <= last_sealed && last_sealed <= self.applied_sequence,
+                "the builder asked to seal up to record {last_sealed}, which is not among the records \
+                 {first_pending_sequence} to {} that it holds",
+                self.applied_sequence
+            );
+            self.seal_through(last_sealed, artifacts).await?;
+        }
+        Ok(())
+    }
+
+    /// Seals the builder's records up to `last_sealed` into one more catalog entry, if the builder holds
+    /// any.
+    async fn seal_through(
+        &mut self,
+        last_sealed: SequenceNumber,
+        artifacts: &ArtifactNamespace,
+    ) -> Result<(), MaterializerError> {
         let Some(first_pending_sequence) = self.first_pending_sequence else {
             return Ok(());
         };
-        let covered_range = SequenceRange::new(first_pending_sequence, self.applied_sequence)
-            .expect("the first pending record is at or before the last one applied");
+        let covered_range = SequenceRange::new(first_pending_sequence, last_sealed)
+            .expect("the first pending record is at or before the last one sealed");
         let artifact = self.builder.seal_artifact(covered_range, artifacts).await?;
         let mut entries = self.shared.snapshot();
         entries.push(CatalogEntry {
@@ -413,8 +523,45 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
             artifact,
         });
         self.shared.replace(entries);
-        self.first_pending_sequence = None;
+        self.first_pending_sequence = if last_sealed == self.applied_sequence {
+            None
+        } else {
+            Some(last_sealed.next())
+        };
+        self.saved_pending = None;
         Ok(())
+    }
+
+    /// Makes the records the builder still holds durable: saved, if the builder can save, and sealed
+    /// otherwise.
+    ///
+    /// # Returns
+    ///
+    /// The saved artifact and the records it holds, or `None` if nothing is pending any more.
+    async fn save_or_seal_pending(
+        &mut self,
+        artifacts: &ArtifactNamespace,
+    ) -> Result<Option<CatalogEntry>, MaterializerError> {
+        let Some(first_pending_sequence) = self.first_pending_sequence else {
+            return Ok(None);
+        };
+        let covered_range = SequenceRange::new(first_pending_sequence, self.applied_sequence)
+            .expect("the first pending record is at or before the last one applied");
+        if let Some(saved) = &self.saved_pending
+            && saved.covered_range == covered_range
+        {
+            return Ok(Some(saved.clone()));
+        }
+        let Some(artifact) = self.builder.save_pending_records(artifacts).await? else {
+            self.seal_through(self.applied_sequence, artifacts).await?;
+            return Ok(None);
+        };
+        let saved = CatalogEntry {
+            covered_range,
+            artifact,
+        };
+        self.saved_pending = Some(saved.clone());
+        Ok(Some(saved))
     }
 
     /// Merges the oldest run of same-tier neighbours into one artifact, if there is such a run.
@@ -471,19 +618,81 @@ fn is_gapless(entries: &[CatalogEntry]) -> bool {
     true
 }
 
-/// Serializes a catalog as the details of a checkpoint manifest.
-fn encode_catalog(entries: &[CatalogEntry]) -> Bytes {
+/// A catalog as a checkpoint stored it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredCatalog {
+    /// The sealed artifacts, in log order: gapless and without overlap.
+    pub entries: Vec<CatalogEntry>,
+    /// The artifact that holds the records the builder had not sealed at the checkpoint, and those
+    /// records, if the builder saves its pending records and held any. They follow the last sealed
+    /// artifact and end at the checkpoint. Only the builder's own readers understand the artifact.
+    pub pending: Option<CatalogEntry>,
+}
+
+/// Appends one entry to the stored form of a catalog.
+fn put_entry(details: &mut BytesMut, entry: &CatalogEntry) {
+    details.put_u64_le(entry.covered_range.first().get());
+    details.put_u64_le(entry.covered_range.last().get());
+    details.put_u64_le(entry.artifact.size_bytes);
+    details.put_u32_le(u32::try_from(entry.artifact.artifact_key.len()).expect("an artifact key is short"));
+    details.put_slice(entry.artifact.artifact_key.as_bytes());
+    details.put_u32_le(u32::try_from(entry.artifact.summary.len()).expect("a summary is small"));
+    details.put_slice(&entry.artifact.summary);
+}
+
+/// Reads one entry of a stored catalog and moves `unread` past it.
+fn take_entry(unread: &mut Bytes) -> Result<CatalogEntry, &'static str> {
+    /// What is wrong with a catalog that ends inside an entry.
+    const CUT_SHORT: &str = "it is cut short";
+    // The two ends of the range, the size and the length of the key.
+    if unread.remaining() < 8 + 8 + 8 + 4 {
+        return Err(CUT_SHORT);
+    }
+    let first = SequenceNumber::new(unread.get_u64_le());
+    let last = SequenceNumber::new(unread.get_u64_le());
+    let size_bytes = unread.get_u64_le();
+    let key_bytes = unread.get_u32_le() as usize;
+    if unread.remaining() < key_bytes {
+        return Err(CUT_SHORT);
+    }
+    let Ok(artifact_key) = String::from_utf8(unread.split_to(key_bytes).to_vec()) else {
+        return Err("an artifact key is not text");
+    };
+    let Ok(summary_bytes) = unread.try_get_u32_le() else {
+        return Err(CUT_SHORT);
+    };
+    if unread.remaining() < summary_bytes as usize {
+        return Err(CUT_SHORT);
+    }
+    let summary = unread.split_to(summary_bytes as usize);
+    let Ok(covered_range) = SequenceRange::new(first, last) else {
+        return Err("an artifact covers no record");
+    };
+    Ok(CatalogEntry {
+        covered_range,
+        artifact: ArtifactDescriptor {
+            artifact_key,
+            size_bytes,
+            summary,
+        },
+    })
+}
+
+/// Serializes a catalog, and the saved pending records if there are any, as the details of a checkpoint
+/// manifest.
+fn encode_catalog(entries: &[CatalogEntry], pending: Option<&CatalogEntry>) -> Bytes {
     let mut details = BytesMut::new();
     details.put_u32_le(DETAILS_FORMAT_VERSION);
     details.put_u32_le(u32::try_from(entries.len()).expect("far fewer than 2^32 artifacts"));
     for entry in entries {
-        details.put_u64_le(entry.covered_range.first().get());
-        details.put_u64_le(entry.covered_range.last().get());
-        details.put_u64_le(entry.artifact.size_bytes);
-        details.put_u32_le(u32::try_from(entry.artifact.artifact_key.len()).expect("an artifact key is short"));
-        details.put_slice(entry.artifact.artifact_key.as_bytes());
-        details.put_u32_le(u32::try_from(entry.artifact.summary.len()).expect("a summary is small"));
-        details.put_slice(&entry.artifact.summary);
+        put_entry(&mut details, entry);
+    }
+    match pending {
+        Some(pending) => {
+            details.put_u8(1);
+            put_entry(&mut details, pending);
+        }
+        None => details.put_u8(0),
     }
     details.freeze()
 }
@@ -499,7 +708,7 @@ fn encode_catalog(entries: &[CatalogEntry]) -> Bytes {
 ///
 /// # Returns
 ///
-/// The catalog as of that checkpoint, in log order: gapless and without overlap.
+/// The catalog as of that checkpoint, and the builder's saved pending records if it saved any.
 ///
 /// # Errors
 ///
@@ -515,7 +724,7 @@ fn encode_catalog(entries: &[CatalogEntry]) -> Bytes {
 /// let not_a_catalog = Bytes::from_static(b"something else");
 /// assert!(decode_catalog(&not_a_catalog).is_err());
 /// ```
-pub fn decode_catalog(details: &Bytes) -> Result<Vec<CatalogEntry>, MaterializerError> {
+pub fn decode_catalog(details: &Bytes) -> Result<StoredCatalog, MaterializerError> {
     let invalid = |reason: &str| MaterializerError::InvalidManifest {
         reason: format!("the artifact catalog is not valid: {reason}"),
     };
@@ -527,40 +736,25 @@ pub fn decode_catalog(details: &Bytes) -> Result<Vec<CatalogEntry>, Materializer
     let entry_count = unread.try_get_u32_le().map_err(cut_short)?;
     let mut entries = Vec::new();
     for _entry in 0..entry_count {
-        let first = SequenceNumber::new(unread.try_get_u64_le().map_err(cut_short)?);
-        let last = SequenceNumber::new(unread.try_get_u64_le().map_err(cut_short)?);
-        let size_bytes = unread.try_get_u64_le().map_err(cut_short)?;
-        let key_bytes = unread.try_get_u32_le().map_err(cut_short)? as usize;
-        if unread.remaining() < key_bytes {
-            return Err(invalid("it is cut short"));
-        }
-        let Ok(artifact_key) = String::from_utf8(unread.split_to(key_bytes).to_vec()) else {
-            return Err(invalid("an artifact key is not text"));
-        };
-        let summary_bytes = unread.try_get_u32_le().map_err(cut_short)? as usize;
-        if unread.remaining() < summary_bytes {
-            return Err(invalid("it is cut short"));
-        }
-        let summary = unread.split_to(summary_bytes);
-        let Ok(covered_range) = SequenceRange::new(first, last) else {
-            return Err(invalid("an artifact covers no record"));
-        };
-        entries.push(CatalogEntry {
-            covered_range,
-            artifact: ArtifactDescriptor {
-                artifact_key,
-                size_bytes,
-                summary,
-            },
-        });
+        entries.push(take_entry(&mut unread).map_err(invalid)?);
     }
+    let pending = match unread.try_get_u8().map_err(cut_short)? {
+        0 => None,
+        1 => Some(take_entry(&mut unread).map_err(invalid)?),
+        _other => return Err(invalid("it does not say whether pending records were saved")),
+    };
     if unread.has_remaining() {
         return Err(invalid("it holds more than its lengths say"));
     }
     if !is_gapless(&entries) {
         return Err(invalid("its artifacts leave a gap or overlap"));
     }
-    Ok(entries)
+    if let (Some(last_entry), Some(pending)) = (entries.last(), &pending)
+        && pending.covered_range.first() != last_entry.covered_range.last().next()
+    {
+        return Err(invalid("its saved records do not follow its last artifact"));
+    }
+    Ok(StoredCatalog { entries, pending })
 }
 
 #[async_trait]
@@ -575,6 +769,8 @@ impl<B: ArtifactBuilder> Materializer for ArtifactCatalog<B> {
             self.first_pending_sequence = Some(first_record.sequence);
         }
         self.applied_sequence = last_record.sequence;
+        // The builder holds more than was saved.
+        self.saved_pending = None;
         Ok(())
     }
 
@@ -583,44 +779,58 @@ impl<B: ArtifactBuilder> Materializer for ArtifactCatalog<B> {
         self.first_pending_sequence.is_some() && self.builder.should_seal()
     }
 
-    /// Seals what the builder holds, merges one run of small artifacts if there is one, and names every
-    /// artifact of the catalog.
+    /// Seals the artifacts that are due, saves or seals what the builder holds beyond them, merges one
+    /// run of small artifacts if there is one, and names every artifact the checkpoint needs.
     async fn write_checkpoint(
         &mut self,
         artifacts: &ArtifactNamespace,
     ) -> Result<CheckpointManifest, MaterializerError> {
-        self.seal_pending(artifacts).await?;
+        self.seal_what_is_due(artifacts).await?;
+        let pending = self.save_or_seal_pending(artifacts).await?;
         self.compact_once(artifacts).await?;
         let entries = self.shared.snapshot();
-        let mut artifact_keys = Vec::with_capacity(entries.len());
+        let mut artifact_keys = Vec::with_capacity(entries.len() + 1);
         for entry in &entries {
             artifact_keys.push(entry.artifact.artifact_key.clone());
         }
+        if let Some(pending) = &pending {
+            artifact_keys.push(pending.artifact.artifact_key.clone());
+        }
         Ok(CheckpointManifest {
             artifact_keys,
-            details: encode_catalog(&entries),
+            details: encode_catalog(&entries, pending.as_ref()),
         })
     }
 
-    /// Reads the catalog out of the manifest and starts with an empty builder.
+    /// Reads the catalog out of the manifest and gives a new builder the pending records the manifest
+    /// holds, if any.
     async fn restore_from_checkpoint(
         last_checkpoint: Option<CheckpointManifest>,
-        _artifacts: &ArtifactNamespace,
+        artifacts: &ArtifactNamespace,
     ) -> Result<Self, MaterializerError> {
-        let entries = match last_checkpoint {
+        let stored = match last_checkpoint {
             Some(manifest) => decode_catalog(&manifest.details)?,
-            None => Vec::new(),
+            None => StoredCatalog::default(),
         };
-        let applied_sequence = entries
+        let mut builder = B::default();
+        let mut first_pending_sequence = None;
+        let mut applied_sequence = stored
+            .entries
             .last()
             .map_or(SequenceNumber::ZERO, |entry| entry.covered_range.last());
+        if let Some(pending) = &stored.pending {
+            builder.restore_pending_records(pending, artifacts).await?;
+            first_pending_sequence = Some(pending.covered_range.first());
+            applied_sequence = pending.covered_range.last();
+        }
         Ok(Self {
-            builder: B::default(),
+            builder,
             shared: Arc::new(SharedCatalog {
-                entries: RwLock::new(entries),
+                entries: RwLock::new(stored.entries),
             }),
-            first_pending_sequence: None,
+            first_pending_sequence,
             applied_sequence,
+            saved_pending: stored.pending,
         })
     }
 }

@@ -8,13 +8,16 @@
 //! - Compaction: runs of small neighbours are merged, tiers are respected, one merge per checkpoint.
 //! - Restoring, the view, and the catalog as a process that only queries reads it, with what the
 //!   builder says about each artifact.
-//! - Failures: a seal that fails keeps the records; a catalog with a gap is refused.
+//! - A builder that cuts at boundaries of its own and saves the records beyond them: what is sealed, what
+//!   is saved, that the artifacts do not depend on when checkpoints happen, and restarts.
+//! - Failures: a seal or a save that fails keeps the records; a catalog with a gap is refused.
 //!
 //! # How the fixtures work
 //!
 //! [`Sequencer`] is the builder under test. It summarizes an artifact as the number of records in it.
 //! Its artifacts list the sequence number and payload of every record they were built from, so a test can read all artifacts in catalog order and see which records
-//! are really there, not just which ranges are claimed. [`Fixture`] plays the runner by hand: it applies
+//! are really there, not just which ranges are claimed. [`FixedCuts`] is a second builder, which cuts an
+//! artifact after every fourth record and saves the rest. [`CatalogFixture`] plays the runner by hand: it applies
 //! records, writes checkpoints, and restarts from a chosen manifest, which is how a crash is staged.
 
 use std::sync::Arc;
@@ -133,8 +136,14 @@ fn summarized_record_count(artifact: &ArtifactDescriptor) -> u64 {
     u64::from_le_bytes(stated)
 }
 
+/// A catalog of [`Sequencer`] artifacts with someone playing the runner.
+type Fixture = CatalogFixture<Sequencer>;
+
+/// A catalog of [`FixedCuts`] artifacts with someone playing the runner.
+type CutFixture = CatalogFixture<FixedCuts>;
+
 /// An artifact catalog with someone playing the runner.
-struct Fixture {
+struct CatalogFixture<B: ArtifactBuilder> {
     /// The artifact store, also switched off by the tests.
     artifact_store: MemoryArtifactStore,
     /// The view the current instance writes through.
@@ -142,14 +151,14 @@ struct Fixture {
     /// The fencing token of the current instance.
     fencing_token: u64,
     /// The adapter under test.
-    catalog: ArtifactCatalog<Sequencer>,
+    catalog: ArtifactCatalog<B>,
     /// A view of the adapter under test.
     view: CatalogView,
     /// The sequence number the next record gets.
     next_sequence: u64,
 }
 
-impl Fixture {
+impl<B: ArtifactBuilder> CatalogFixture<B> {
     /// A catalog that has never been checkpointed.
     async fn new() -> Self {
         Self::restored(MemoryArtifactStore::new(), 1, None, 1).await
@@ -251,6 +260,140 @@ impl Fixture {
         }
         sequences
     }
+
+    /// The bytes of every artifact of the catalog, in catalog order.
+    async fn artifact_contents(&self) -> Vec<Bytes> {
+        let mut contents = Vec::new();
+        for entry in self.view.entries() {
+            let artifact = self
+                .artifacts
+                .get_artifact(&entry.artifact.artifact_key)
+                .await
+                .expect("a catalogued artifact exists");
+            contents.push(artifact);
+        }
+        contents
+    }
+}
+
+/// How many records one artifact of [`FixedCuts`] holds.
+const RECORDS_PER_CUT: usize = 4;
+
+/// A builder that cuts an artifact after every fourth record, whenever checkpoints happen, and saves
+/// the records beyond the last cut. Its artifacts have the layout of [`Sequencer`]'s.
+#[derive(Default)]
+struct FixedCuts {
+    /// The records added and not sealed yet, in order.
+    pending: Vec<LogRecord>,
+}
+
+impl FixedCuts {
+    /// The first `record_count` pending records in artifact form.
+    fn encode_pending(&self, record_count: usize) -> Bytes {
+        let mut contents = BytesMut::new();
+        for record in &self.pending[..record_count] {
+            contents.put_u64_le(record.sequence.get());
+            contents.put_u32_le(u32::try_from(record.payload.len()).expect("test payloads are small"));
+            contents.put_slice(&record.payload);
+        }
+        contents.freeze()
+    }
+}
+
+#[async_trait]
+impl ArtifactBuilder for FixedCuts {
+    fn add_records(&mut self, committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
+        self.pending.extend_from_slice(committed_records);
+        Ok(())
+    }
+
+    fn should_seal(&self) -> bool {
+        self.pending.len() >= RECORDS_PER_CUT
+    }
+
+    fn seal_boundary(&self) -> Option<SequenceNumber> {
+        self.pending.get(RECORDS_PER_CUT - 1).map(|record| record.sequence)
+    }
+
+    async fn seal_artifact(
+        &mut self,
+        covered_range: SequenceRange,
+        artifacts: &ArtifactNamespace,
+    ) -> Result<ArtifactDescriptor, MaterializerError> {
+        let record_count = usize::try_from(covered_range.record_count()).expect("a small range");
+        let contents = self.encode_pending(record_count);
+        let size_bytes = contents.len() as u64;
+        let artifact_key = artifacts.put_artifact("sealed", contents).await?;
+        drop(self.pending.drain(..record_count));
+        Ok(ArtifactDescriptor {
+            artifact_key,
+            size_bytes,
+            summary: record_count_summary(covered_range.record_count()),
+        })
+    }
+
+    async fn save_pending_records(
+        &mut self,
+        artifacts: &ArtifactNamespace,
+    ) -> Result<Option<ArtifactDescriptor>, MaterializerError> {
+        let contents = self.encode_pending(self.pending.len());
+        let size_bytes = contents.len() as u64;
+        let artifact_key = artifacts.put_artifact("pending", contents).await?;
+        Ok(Some(ArtifactDescriptor {
+            artifact_key,
+            size_bytes,
+            summary: record_count_summary(self.pending.len() as u64),
+        }))
+    }
+
+    async fn restore_pending_records(
+        &mut self,
+        saved: &CatalogEntry,
+        artifacts: &ArtifactNamespace,
+    ) -> Result<(), MaterializerError> {
+        let mut unread = artifacts.get_artifact(&saved.artifact.artifact_key).await?;
+        while unread.has_remaining() {
+            let sequence = SequenceNumber::new(unread.get_u64_le());
+            let payload_bytes = unread.get_u32_le() as usize;
+            let payload = unread.split_to(payload_bytes);
+            self.pending.push(LogRecord { sequence, payload });
+        }
+        Ok(())
+    }
+
+    async fn merge_artifacts(
+        &mut self,
+        inputs: &[CatalogEntry],
+        artifacts: &ArtifactNamespace,
+    ) -> Result<ArtifactDescriptor, MaterializerError> {
+        let mut merged = BytesMut::new();
+        for input in inputs {
+            merged.put_slice(&artifacts.get_artifact(&input.artifact.artifact_key).await?);
+        }
+        let size_bytes = merged.len() as u64;
+        let artifact_key = artifacts.put_artifact("merged", merged.freeze()).await?;
+        Ok(ArtifactDescriptor {
+            artifact_key,
+            size_bytes,
+            summary: Bytes::new(),
+        })
+    }
+
+    /// Nothing is merged, so that the cuts stay visible in the catalog.
+    fn compaction_policy(&self) -> CompactionPolicy {
+        CompactionPolicy {
+            merge_fan_in: usize::MAX,
+            smallest_tier_bytes: 100,
+        }
+    }
+}
+
+/// The records the saved pending artifact of `manifest` covers, as first and last sequence.
+fn saved_pending_records(manifest: &CheckpointManifest) -> Option<(u64, u64)> {
+    let stored = decode_catalog(&manifest.details).expect("a valid catalog");
+    stored
+        .pending
+        .map(|pending| (pending.covered_range.first().get(), pending.covered_range.last().get()))
 }
 
 /// The sequence numbers from 1 to `last`.
@@ -597,7 +740,11 @@ async fn stored_catalog_is_read_back_by_a_process_that_only_queries() {
 
     let read_by_a_query_node = decode_catalog(&manifest.details);
 
-    assert_eq!(read_by_a_query_node, Ok(fixture.view.entries()));
+    let expected = StoredCatalog {
+        entries: fixture.view.entries(),
+        pending: None,
+    };
+    assert_eq!(read_by_a_query_node, Ok(expected));
 }
 
 /// A catalog entry that covers `first` to `last` with a made-up artifact.
@@ -631,7 +778,7 @@ async fn summary_of_an_artifact_is_in_the_stored_catalog() {
     let manifest = fixture.checkpoint().await;
 
     let stored_entries = decode_catalog(&manifest.details).expect("a valid catalog");
-    assert_eq!(summarized_record_count(&stored_entries[0].artifact), 5);
+    assert_eq!(summarized_record_count(&stored_entries.entries[0].artifact), 5);
 }
 
 #[tokio::test]
@@ -651,15 +798,19 @@ async fn summaries_of_any_length_survive_the_stored_catalog() {
     without_summary.artifact.summary = Bytes::new();
     let entries = [without_summary, entry(6, 9)];
 
-    let stored = encode_catalog(&entries);
+    let stored = encode_catalog(&entries, None);
 
-    assert_eq!(decode_catalog(&stored), Ok(entries.to_vec()));
+    let expected = StoredCatalog {
+        entries: entries.to_vec(),
+        pending: None,
+    };
+    assert_eq!(decode_catalog(&stored), Ok(expected));
 }
 
 #[tokio::test]
 async fn stored_catalog_of_an_earlier_format_is_refused() {
-    // Format version 1, which had no summaries, with no entry.
-    let earlier_format = Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0]);
+    // Format version 2, which had no place for saved pending records, with no entry.
+    let earlier_format = Bytes::from_static(&[2, 0, 0, 0, 0, 0, 0, 0]);
 
     let decoded = decode_catalog(&earlier_format);
 
@@ -671,7 +822,7 @@ async fn stored_catalog_of_an_earlier_format_is_refused() {
 
 #[tokio::test]
 async fn catalog_with_a_gap_is_refused_at_restore() {
-    let with_a_gap = encode_catalog(&[entry(1, 5), entry(7, 9)]);
+    let with_a_gap = encode_catalog(&[entry(1, 5), entry(7, 9)], None);
 
     assert!(matches!(
         decode_catalog(&with_a_gap),
@@ -681,7 +832,7 @@ async fn catalog_with_a_gap_is_refused_at_restore() {
 
 #[tokio::test]
 async fn catalog_with_an_overlap_is_refused_at_restore() {
-    let with_an_overlap = encode_catalog(&[entry(1, 5), entry(5, 9)]);
+    let with_an_overlap = encode_catalog(&[entry(1, 5), entry(5, 9)], None);
 
     assert!(matches!(
         decode_catalog(&with_an_overlap),
@@ -691,7 +842,7 @@ async fn catalog_with_an_overlap_is_refused_at_restore() {
 
 #[tokio::test]
 async fn stored_catalog_that_is_cut_short_is_refused() {
-    let stored = encode_catalog(&[entry(1, 5), entry(6, 9)]);
+    let stored = encode_catalog(&[entry(1, 5), entry(6, 9)], Some(&entry(10, 12)));
 
     for kept_bytes in 0..stored.len() {
         let decoded = decode_catalog(&stored.slice(..kept_bytes));
@@ -701,6 +852,301 @@ async fn stored_catalog_that_is_cut_short_is_refused() {
             "a catalog cut to {kept_bytes} bytes gave {decoded:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn saved_pending_records_survive_the_stored_catalog() {
+    let stored = encode_catalog(&[entry(1, 5)], Some(&entry(6, 9)));
+
+    let expected = StoredCatalog {
+        entries: vec![entry(1, 5)],
+        pending: Some(entry(6, 9)),
+    };
+    assert_eq!(decode_catalog(&stored), Ok(expected));
+}
+
+#[tokio::test]
+async fn saved_pending_records_without_any_artifact_survive_the_stored_catalog() {
+    let stored = encode_catalog(&[], Some(&entry(1, 3)));
+
+    let expected = StoredCatalog {
+        entries: Vec::new(),
+        pending: Some(entry(1, 3)),
+    };
+    assert_eq!(decode_catalog(&stored), Ok(expected));
+}
+
+#[tokio::test]
+async fn saved_pending_records_that_do_not_follow_the_last_artifact_are_refused() {
+    let with_a_gap = encode_catalog(&[entry(1, 5)], Some(&entry(7, 9)));
+
+    let refused = MaterializerError::InvalidManifest {
+        reason: "the artifact catalog is not valid: its saved records do not follow its last artifact".to_owned(),
+    };
+    assert_eq!(decode_catalog(&with_a_gap), Err(refused));
+}
+
+#[tokio::test]
+async fn stored_catalog_with_bytes_after_it_is_refused() {
+    let mut longer = encode_catalog(&[entry(1, 5)], None).to_vec();
+    longer.push(0);
+
+    let decoded = decode_catalog(&Bytes::from(longer));
+
+    assert!(matches!(decoded, Err(MaterializerError::InvalidManifest { .. })));
+}
+
+#[tokio::test]
+async fn stored_catalog_that_does_not_say_whether_records_were_saved_is_refused() {
+    let mut unclear = encode_catalog(&[entry(1, 5)], None).to_vec();
+    let last_byte = unclear.len() - 1;
+    unclear[last_byte] = 7;
+
+    let decoded = decode_catalog(&Bytes::from(unclear));
+
+    assert!(matches!(decoded, Err(MaterializerError::InvalidManifest { .. })));
+}
+
+// ---- a builder that cuts at its own boundaries and saves the rest ----
+
+#[tokio::test]
+async fn builder_that_names_a_boundary_has_only_the_records_up_to_it_sealed() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+
+    fixture.checkpoint().await;
+
+    assert_eq!(fixture.ranges(), [(1, 4)]);
+}
+
+#[tokio::test]
+async fn sealed_artifact_holds_the_records_up_to_the_boundary_and_no_more() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+
+    fixture.checkpoint().await;
+
+    assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(4));
+}
+
+#[tokio::test]
+async fn records_beyond_the_boundary_are_saved() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+
+    let manifest = fixture.checkpoint().await;
+
+    assert_eq!(saved_pending_records(&manifest), Some((5, 6)));
+}
+
+#[tokio::test]
+async fn manifest_names_the_saved_pending_records_after_the_artifacts() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+
+    let manifest = fixture.checkpoint().await;
+
+    let stored = decode_catalog(&manifest.details).expect("a valid catalog");
+    let saved_key = stored.pending.expect("saved records").artifact.artifact_key;
+    assert_eq!(
+        manifest.artifact_keys,
+        [stored.entries[0].artifact.artifact_key.clone(), saved_key]
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_seals_every_artifact_that_is_due() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(9, 0);
+
+    let manifest = fixture.checkpoint().await;
+
+    assert_eq!(fixture.ranges(), [(1, 4), (5, 8)]);
+    assert_eq!(saved_pending_records(&manifest), Some((9, 9)));
+}
+
+#[tokio::test]
+async fn builder_that_is_not_full_is_saved_and_nothing_is_sealed() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(3, 0);
+
+    let manifest = fixture.checkpoint().await;
+
+    assert_eq!(fixture.ranges(), []);
+    assert_eq!(saved_pending_records(&manifest), Some((1, 3)));
+}
+
+#[tokio::test]
+async fn nothing_is_saved_when_the_last_record_ends_an_artifact() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(8, 0);
+
+    let manifest = fixture.checkpoint().await;
+
+    assert_eq!(saved_pending_records(&manifest), None);
+}
+
+#[tokio::test]
+async fn builder_that_saves_asks_for_a_checkpoint_only_when_an_artifact_is_due() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+    fixture.checkpoint().await;
+
+    assert!(!fixture.catalog.wants_checkpoint());
+}
+
+#[tokio::test]
+async fn artifacts_are_cut_at_the_same_records_whenever_checkpoints_happen() {
+    let mut checkpointed_often = CutFixture::new().await;
+    for _record in 0..10 {
+        checkpointed_often.apply(1, SMALL_PAYLOAD_BYTES);
+        checkpointed_often.checkpoint().await;
+    }
+    let mut checkpointed_once = CutFixture::new().await;
+    checkpointed_once.apply(10, SMALL_PAYLOAD_BYTES);
+
+    checkpointed_once.checkpoint().await;
+
+    assert_eq!(checkpointed_often.ranges(), [(1, 4), (5, 8)]);
+    assert_eq!(checkpointed_once.ranges(), checkpointed_often.ranges());
+}
+
+#[tokio::test]
+async fn artifacts_hold_the_same_bytes_whenever_checkpoints_happen() {
+    let mut checkpointed_often = CutFixture::new().await;
+    for _record in 0..10 {
+        checkpointed_often.apply(1, SMALL_PAYLOAD_BYTES);
+        checkpointed_often.checkpoint().await;
+    }
+    let mut checkpointed_once = CutFixture::new().await;
+    checkpointed_once.apply(10, SMALL_PAYLOAD_BYTES);
+
+    checkpointed_once.checkpoint().await;
+
+    assert_eq!(
+        checkpointed_once.artifact_contents().await,
+        checkpointed_often.artifact_contents().await
+    );
+}
+
+#[tokio::test]
+async fn restored_builder_holds_the_records_that_were_saved() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+    let manifest = fixture.checkpoint().await;
+    // The next instance is handed records 7 and 8 only: the log may hold nothing older.
+    let mut restarted = fixture.restart_from(Some((manifest, 6))).await;
+    restarted.apply(2, 0);
+
+    restarted.checkpoint().await;
+
+    assert_eq!(restarted.ranges(), [(1, 4), (5, 8)]);
+    assert_eq!(restarted.sequences_in_the_artifacts().await, sequences_through(8));
+}
+
+#[tokio::test]
+async fn restart_cuts_the_artifacts_an_uninterrupted_run_cuts() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, SMALL_PAYLOAD_BYTES);
+    let manifest = fixture.checkpoint().await;
+    let mut restarted = fixture.restart_from(Some((manifest, 6))).await;
+    restarted.apply(4, SMALL_PAYLOAD_BYTES);
+    restarted.checkpoint().await;
+    let mut uninterrupted = CutFixture::new().await;
+    uninterrupted.apply(10, SMALL_PAYLOAD_BYTES);
+
+    uninterrupted.checkpoint().await;
+
+    assert_eq!(
+        restarted.artifact_contents().await,
+        uninterrupted.artifact_contents().await
+    );
+}
+
+#[tokio::test]
+async fn crash_before_saved_records_are_committed_replays_them_from_the_log() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+    fixture.checkpoint().await;
+    let mut restarted = fixture.restart_from(None).await;
+    restarted.apply(8, 0);
+
+    restarted.checkpoint().await;
+
+    assert_eq!(restarted.ranges(), [(1, 4), (5, 8)]);
+    assert_eq!(restarted.sequences_in_the_artifacts().await, sequences_through(8));
+}
+
+#[tokio::test]
+async fn pending_records_are_not_saved_again_while_they_are_the_same() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+    let first_manifest = fixture.checkpoint().await;
+
+    let second_manifest = fixture.checkpoint().await;
+
+    assert_eq!(second_manifest, first_manifest);
+}
+
+#[tokio::test]
+async fn pending_records_are_saved_again_once_there_are_more() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(5, 0);
+    let first_manifest = fixture.checkpoint().await;
+    fixture.apply(1, 0);
+
+    let second_manifest = fixture.checkpoint().await;
+
+    assert_eq!(saved_pending_records(&second_manifest), Some((5, 6)));
+    assert_ne!(second_manifest.artifact_keys, first_manifest.artifact_keys);
+}
+
+#[tokio::test]
+async fn restored_pending_records_are_not_saved_again_while_they_are_the_same() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+    let manifest = fixture.checkpoint().await;
+    let mut restarted = fixture.restart_from(Some((manifest.clone(), 6))).await;
+
+    let manifest_after_restart = restarted.checkpoint().await;
+
+    assert_eq!(manifest_after_restart, manifest);
+}
+
+#[tokio::test]
+async fn view_lists_sealed_artifacts_and_not_the_saved_pending_records() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+
+    let manifest = fixture.checkpoint().await;
+
+    assert_eq!(fixture.view.entries().len() + 1, manifest.artifact_keys.len());
+}
+
+#[tokio::test]
+async fn checkpoint_with_saved_records_is_refused_by_a_builder_that_never_saves() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(6, 0);
+    let manifest = fixture.checkpoint().await;
+
+    let restored = ArtifactCatalog::<Sequencer>::restore_from_checkpoint(Some(manifest), &fixture.artifacts).await;
+
+    assert!(matches!(restored, Err(MaterializerError::InvalidManifest { .. })));
+}
+
+#[tokio::test]
+async fn save_that_fails_leaves_the_builder_and_the_catalog_as_they_were() {
+    let mut fixture = CutFixture::new().await;
+    fixture.apply(3, 0);
+    fixture.artifact_store.set_unavailable(true);
+    let failed = fixture.catalog.write_checkpoint(&fixture.artifacts).await;
+    fixture.artifact_store.set_unavailable(false);
+    fixture.apply(1, 0);
+
+    fixture.checkpoint().await;
+
+    assert!(failed.is_err_and(|error| error.is_transient()));
+    assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(4));
 }
 
 // ---- failures ----
@@ -737,16 +1183,20 @@ struct RunningCatalog {
 }
 
 impl RunningCatalog {
-    /// Starts a runner that checkpoints every ten seconds.
+    /// Starts a runner of [`Sequencer`] artifacts that checkpoints every ten seconds.
     async fn start(harness: &Harness) -> Self {
+        Self::start_with::<Sequencer>(harness).await
+    }
+
+    /// Starts a runner of the artifacts of the builder `B` that checkpoints every ten seconds.
+    async fn start_with<B: ArtifactBuilder>(harness: &Harness) -> Self {
         let settings = RunnerSettings {
             checkpoint_after: Duration::from_secs(10),
             ..RunnerSettings::for_materializer(MATERIALIZER)
         };
-        let runner =
-            MaterializerRunner::<ArtifactCatalog<Sequencer>>::start(harness.dependencies(), STREAM_NAME, settings)
-                .await
-                .expect("the runner starts");
+        let runner = MaterializerRunner::<ArtifactCatalog<B>>::start(harness.dependencies(), STREAM_NAME, settings)
+            .await
+            .expect("the runner starts");
         Self {
             progress: runner.progress(),
             view: runner.materializer().view(),
@@ -809,6 +1259,43 @@ async fn inputs_of_a_merge_are_deleted_once_the_merging_checkpoint_is_committed(
 
     // The merged artifact and the manifest that names it.
     assert_eq!(running.view.entries().len(), 1);
+    assert_eq!(harness.stored_object_count().await, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn saved_pending_records_carry_a_runner_across_a_crash() {
+    let harness = Harness::start().await;
+    let writer = harness.open_writer().await;
+    let mut first_run = RunningCatalog::start_with::<FixedCuts>(&harness).await;
+    append_numbered(&writer, 6).await;
+    first_run.committed(6).await;
+    first_run.crash().await;
+
+    let mut second_run = RunningCatalog::start_with::<FixedCuts>(&harness).await;
+    append_numbered(&writer, 2).await;
+    second_run.committed(8).await;
+
+    let mut ranges = Vec::new();
+    for entry in second_run.view.entries() {
+        ranges.push((entry.covered_range.first().get(), entry.covered_range.last().get()));
+    }
+    assert_eq!(ranges, [(1, 4), (5, 8)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn saved_pending_records_of_an_earlier_checkpoint_are_deleted_after_the_next_commit() {
+    let harness = Harness::start().await;
+    let writer = harness.open_writer().await;
+    let mut running = RunningCatalog::start_with::<FixedCuts>(&harness).await;
+    append_numbered(&writer, 2).await;
+    running.committed(2).await;
+
+    append_numbered(&writer, 1).await;
+    running.committed(3).await;
+    // The deletion follows the commit within the same step of the runner.
+    sleep(Duration::from_secs(1)).await;
+
+    // The records saved at the second checkpoint and the manifest that names them.
     assert_eq!(harness.stored_object_count().await, 2);
 }
 

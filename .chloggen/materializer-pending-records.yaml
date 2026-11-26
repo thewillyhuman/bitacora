@@ -1,0 +1,4 @@
+change_type: breaking
+component: materializer
+note: "A builder of the artifacts adapter decides where an artifact ends and can save the records beyond it at a checkpoint, so that artifacts no longer follow the pace of checkpoints; the stored catalog is format version 3 and decode_catalog returns the saved records next to the catalog."
+issues: [6]

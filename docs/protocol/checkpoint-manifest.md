@@ -45,10 +45,11 @@ key       length u32 | bytes
 A reader refuses another magic, another format version, a wrong checksum,
 and bytes that do not end where their lengths say.
 
-## Artifact catalog, format version 2
+## Artifact catalog, format version 3
 
 ```text
-catalog  format version u32 = 2 | entry count u32 | entry*
+catalog  format version u32 = 3 | entry count u32 | entry*
+         | pending flag u8 | entry, if the flag is 1
 entry    first sequence u64 | last sequence u64 | size u64
          | key length u32 | key | summary length u32 | summary
 ```
@@ -59,11 +60,19 @@ entry    first sequence u64 | last sequence u64 | size u64
   reader should know before it fetches anything. It may be empty. The page
   of each materializer says what its summaries hold.
 - Entries are in log order. Each starts right after the previous one ends.
-  Together they cover every record from the first one the materializer
-  applied to the checkpoint.
+- The pending flag is 0 or 1. With 1, one more entry follows: the
+  **pending records**. It names an artifact that holds the records the
+  materializer had applied and not yet put into an artifact of the catalog.
+  Its range starts right after the last entry and ends at the checkpoint.
+  It is not part of the catalog: it is replaced at every checkpoint, never
+  merged, and only the materializer that wrote it says what is in it.
+- The entries, and the pending records after them, cover every record from
+  the first one the materializer applied to the checkpoint. Without pending
+  records the entries alone do.
 
 A reader refuses another format version, an entry that covers no record,
-entries that leave a gap or overlap, and bytes that do not end where their
+entries that leave a gap or overlap, pending records that do not follow the
+last entry, a flag other than 0 or 1, and bytes that do not end where their
 lengths say.
 
 ## Reading the catalog while it changes

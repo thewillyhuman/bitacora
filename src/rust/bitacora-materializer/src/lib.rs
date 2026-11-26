@@ -54,7 +54,8 @@ mod sweeper;
 mod test_harness;
 
 pub use artifact_catalog::{
-    ArtifactBuilder, ArtifactCatalog, ArtifactDescriptor, CatalogEntry, CatalogView, CompactionPolicy, decode_catalog,
+    ArtifactBuilder, ArtifactCatalog, ArtifactDescriptor, CatalogEntry, CatalogView, CompactionPolicy, StoredCatalog,
+    decode_catalog,
 };
 pub use contract::{CheckpointManifest, Materializer, MaterializerError};
 pub use manifest::{decode_manifest, encode_manifest};
