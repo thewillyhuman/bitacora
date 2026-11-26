@@ -80,6 +80,18 @@ impl LatencyReport {
             max: micros_of(latencies.largest()),
         }
     }
+
+    /// The percentiles on one line, in milliseconds with three decimals.
+    fn render_text(&self) -> String {
+        format!(
+            "p50 {}  p90 {}  p99 {}  p99.9 {}  max {}",
+            format_milliseconds(self.p50),
+            format_milliseconds(self.p90),
+            format_milliseconds(self.p99),
+            format_milliseconds(self.p999),
+            format_milliseconds(self.max)
+        )
+    }
 }
 
 /// A duration in whole microseconds.
@@ -162,43 +174,32 @@ impl AppendReport {
 
     /// Renders the report as text, one value per line.
     pub(crate) fn render_text(&self) -> String {
-        let pace = match self.target_records_per_second {
-            Some(rate) => format!("paced to {rate} records/s per stream"),
-            None => "as fast as the cluster commits".to_owned(),
-        };
-        let latency = &self.latency_microseconds;
+        let records = format!("{} ({} records/s)", self.records, self.records_per_second);
+        let throughput = format_mebibytes_per_second(self.bytes_per_second);
         let mut rendered = String::new();
-        let _ = writeln!(
-            rendered,
-            "append      stream {}, {} stream(s), {} appends in flight each, {} record(s) of {} B per \
-             append, {pace}",
-            self.stream, self.streams, self.appends_in_flight, self.records_per_append, self.record_bytes
-        );
+        let _ = writeln!(rendered, "append      {}", self.workload_text());
         let _ = writeln!(rendered, "elapsed     {}", format_seconds(self.elapsed_milliseconds));
         let _ = writeln!(rendered, "appends     {}", self.appends);
-        let _ = writeln!(
-            rendered,
-            "records     {} ({} records/s)",
-            self.records, self.records_per_second
-        );
-        let _ = writeln!(
-            rendered,
-            "throughput  {}",
-            format_mebibytes_per_second(self.bytes_per_second)
-        );
-        let _ = writeln!(
-            rendered,
-            "latency     p50 {}  p90 {}  p99 {}  p99.9 {}  max {}",
-            format_milliseconds(latency.p50),
-            format_milliseconds(latency.p90),
-            format_milliseconds(latency.p99),
-            format_milliseconds(latency.p999),
-            format_milliseconds(latency.max)
-        );
+        let _ = writeln!(rendered, "records     {records}");
+        let _ = writeln!(rendered, "throughput  {throughput}");
+        let _ = writeln!(rendered, "latency     {}", self.latency_microseconds.render_text());
         if let Some(failure) = &self.failure {
             let _ = writeln!(rendered, "stopped     {failure}");
         }
         rendered
+    }
+
+    /// What was asked for, as one phrase: the streams, the appends in flight, the size of an append and
+    /// the pace.
+    fn workload_text(&self) -> String {
+        let pace = match self.target_records_per_second {
+            Some(rate) => format!("paced to {rate} records/s per stream"),
+            None => "as fast as the cluster commits".to_owned(),
+        };
+        format!(
+            "stream {}, {} stream(s), {} appends in flight each, {} record(s) of {} B per append, {pace}",
+            self.stream, self.streams, self.appends_in_flight, self.records_per_append, self.record_bytes
+        )
     }
 }
 

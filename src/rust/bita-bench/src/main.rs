@@ -9,7 +9,8 @@
 //!
 //! # What it contains
 //!
-//! - `main`: parses the command line, finds the cluster, runs the workload and prints the report.
+//! - `main`: parses the command line, finds the cluster, runs the workload and prints the report, with
+//!   one function per step: `print_usage_error`, `run`, `requested_workload`, `run_append`, `run_read`.
 //! - The modules of the tool: `arguments` (the command line), `cluster` (finding the cluster), `workload`
 //!   (driving and measuring), `histogram` and `pacing` (the measuring instruments), `report` (the
 //!   output).
@@ -72,16 +73,7 @@ const WRITER_IDENTITY: &str = "bita-bench";
 fn main() -> ExitCode {
     let arguments = match Arguments::try_parse() {
         Ok(arguments) => arguments,
-        Err(usage_error) => {
-            // Help and version requests arrive here too; they go to standard output and succeed.
-            let is_mistake = usage_error.use_stderr();
-            let _ = usage_error.print();
-            return if is_mistake {
-                ExitCode::from(EXIT_USAGE)
-            } else {
-                ExitCode::SUCCESS
-            };
-        }
+        Err(usage_error) => return print_usage_error(&usage_error),
     };
     let config = match resolve_cluster_config(
         arguments.config.as_deref(),
@@ -111,6 +103,20 @@ fn main() -> ExitCode {
     }
 }
 
+/// Prints what the command line parser has to say and returns the exit code that goes with it.
+///
+/// A mistake is printed to standard error and is a usage error. A request for help or for the version
+/// arrives the same way; it is printed to standard output and succeeds.
+fn print_usage_error(usage_error: &clap::Error) -> ExitCode {
+    let is_mistake = usage_error.use_stderr();
+    let _ = usage_error.print();
+    if is_mistake {
+        ExitCode::from(EXIT_USAGE)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// How a workload that could be started ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkloadOutcome {
@@ -127,18 +133,57 @@ enum WorkloadOutcome {
 /// Returns the text to show if the cluster configuration cannot be used, the workload could not start,
 /// or the report could not be printed.
 async fn run(arguments: &Arguments, config: &ClusterConfig) -> Result<WorkloadOutcome, String> {
-    let settings = ClientSettings {
+    let client = match bitacora::connect(config, client_settings()).await {
+        Ok(client) => client,
+        Err(connect_error) => return Err(connect_error.to_string()),
+    };
+    let report = match requested_workload(&arguments.workload) {
+        RequestedWorkload::Append {
+            workload,
+            creates_missing_streams,
+        } => run_append(&client, &workload, creates_missing_streams, arguments.output).await?,
+        RequestedWorkload::Read(workload) => run_read(&client, &workload, arguments.output).await?,
+    };
+    if let Err(io_error) = std::io::stdout().write_all(report.text.as_bytes()) {
+        return Err(format!("cannot write the report: {io_error}"));
+    }
+    if report.has_stopped_early {
+        Ok(WorkloadOutcome::StoppedEarly)
+    } else {
+        Ok(WorkloadOutcome::RanToItsLimit)
+    }
+}
+
+/// The settings of the tool's client: an application's defaults, with the tool's name on its leases.
+fn client_settings() -> ClientSettings {
+    ClientSettings {
         writer: WriterSettings {
             writer_identity: WRITER_IDENTITY.to_owned(),
             ..WriterSettings::default()
         },
         ..ClientSettings::default()
-    };
-    let client = match bitacora::connect(config, settings).await {
-        Ok(client) => client,
-        Err(connect_error) => return Err(connect_error.to_string()),
-    };
-    let (rendered, has_stopped_early) = match &arguments.workload {
+    }
+}
+
+/// The workload a command line asks for, in the terms of `workload.rs`.
+enum RequestedWorkload {
+    /// Append records.
+    Append {
+        /// What to append, to which streams, and when to stop.
+        workload: AppendWorkload,
+        /// Whether to create the streams that do not exist before the workload starts.
+        creates_missing_streams: bool,
+    },
+    /// Scan a stream.
+    Read(ReadWorkload),
+}
+
+/// Translates the parsed command into the workload to run.
+///
+/// A field-by-field mapping, one arm per workload: the options keep their meaning and only the two
+/// limits and `--force` are turned into the values the workload works with.
+fn requested_workload(command: &WorkloadCommand) -> RequestedWorkload {
+    match command {
         WorkloadCommand::Append {
             stream,
             record_bytes,
@@ -150,8 +195,8 @@ async fn run(arguments: &Arguments, config: &ClusterConfig) -> Result<WorkloadOu
             streams,
             create,
             force,
-        } => {
-            let workload = AppendWorkload {
+        } => RequestedWorkload::Append {
+            workload: AppendWorkload {
                 stream: stream.clone(),
                 stream_count: *streams,
                 record_bytes: *record_bytes,
@@ -159,52 +204,42 @@ async fn run(arguments: &Arguments, config: &ClusterConfig) -> Result<WorkloadOu
                 appends_in_flight: *appends_in_flight,
                 limit: workload_limit(*seconds, *records),
                 target_records_per_second: *rate,
-                takeover: if *force {
-                    TakeoverPolicy::Force
-                } else {
-                    TakeoverPolicy::WaitForLeaseExpiry
-                },
-            };
-            run_append(&client, &workload, *create, arguments.output).await?
-        }
+                takeover: takeover_policy(*force),
+            },
+            creates_missing_streams: *create,
+        },
         WorkloadCommand::Read {
             stream,
             from,
             seconds,
             records,
-        } => {
-            let workload = ReadWorkload {
-                stream: stream.clone(),
-                from: *from,
-                limit: workload_limit(*seconds, *records),
-            };
-            let measured = match run_read_workload(&client, &workload).await {
-                Ok(measured) => measured,
-                Err(workload_error) => return Err(workload_error.to_string()),
-            };
-            let report = ReadReport::of(&workload, &measured);
-            let rendered = match arguments.output {
-                OutputFormat::Text => report.render_text(),
-                OutputFormat::Json => to_json(&report),
-            };
-            (rendered, report.failure.is_some())
-        }
-    };
-    if let Err(io_error) = std::io::stdout().write_all(rendered.as_bytes()) {
-        return Err(format!("cannot write the report: {io_error}"));
-    }
-    if has_stopped_early {
-        Ok(WorkloadOutcome::StoppedEarly)
-    } else {
-        Ok(WorkloadOutcome::RanToItsLimit)
+        } => RequestedWorkload::Read(ReadWorkload {
+            stream: stream.clone(),
+            from: *from,
+            limit: workload_limit(*seconds, *records),
+        }),
     }
 }
 
+/// How an append workload takes its streams: at once if `--force` was given, otherwise only after the
+/// lease of a live writer has expired.
+const fn takeover_policy(is_forced: bool) -> TakeoverPolicy {
+    if is_forced {
+        TakeoverPolicy::Force
+    } else {
+        TakeoverPolicy::WaitForLeaseExpiry
+    }
+}
+
+/// A report that is ready to print.
+struct RenderedReport {
+    /// The report as text or as JSON, ended by a newline.
+    text: String,
+    /// Whether the workload stopped before its limit because an append or a read failed.
+    has_stopped_early: bool,
+}
+
 /// Runs an append workload and renders its report.
-///
-/// # Returns
-///
-/// The rendered report, and whether the workload stopped early.
 ///
 /// # Errors
 ///
@@ -214,7 +249,7 @@ async fn run_append(
     workload: &AppendWorkload,
     creates_missing_streams: bool,
     format: OutputFormat,
-) -> Result<(String, bool), String> {
+) -> Result<RenderedReport, String> {
     if creates_missing_streams && let Err(workload_error) = create_missing_streams(client, workload).await {
         return Err(workload_error.to_string());
     }
@@ -223,11 +258,39 @@ async fn run_append(
         Err(workload_error) => return Err(workload_error.to_string()),
     };
     let report = AppendReport::of(workload, &measured);
-    let rendered = match format {
+    let text = match format {
         OutputFormat::Text => report.render_text(),
         OutputFormat::Json => to_json(&report),
     };
-    Ok((rendered, report.failure.is_some()))
+    Ok(RenderedReport {
+        text,
+        has_stopped_early: report.failure.is_some(),
+    })
+}
+
+/// Runs a read workload and renders its report.
+///
+/// # Errors
+///
+/// Returns the text to show if the stream could not be found.
+async fn run_read(
+    client: &BitacoraClient,
+    workload: &ReadWorkload,
+    format: OutputFormat,
+) -> Result<RenderedReport, String> {
+    let measured = match run_read_workload(client, workload).await {
+        Ok(measured) => measured,
+        Err(workload_error) => return Err(workload_error.to_string()),
+    };
+    let report = ReadReport::of(workload, &measured);
+    let text = match format {
+        OutputFormat::Text => report.render_text(),
+        OutputFormat::Json => to_json(&report),
+    };
+    Ok(RenderedReport {
+        text,
+        has_stopped_early: report.failure.is_some(),
+    })
 }
 
 /// Renders a report as indented JSON, ended by a newline.

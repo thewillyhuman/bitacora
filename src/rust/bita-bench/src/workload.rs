@@ -19,6 +19,10 @@
 //! - [`WorkloadLimit`]: when a workload stops.
 //! - [`AppendMeasurement`], [`ReadMeasurement`]: what was measured.
 //! - [`WorkloadError`]: why a workload could not run at all.
+//! - Private steps: `run_append_workload` (one stream: open the writer, run the workers, close the
+//!   writer), `run_append_worker` (the measured loop) and `SharedAppendState` (what the workers of a
+//!   stream share and the questions they ask it); `first_sequence_to_read` and `records_to_ask_for` for
+//!   the scan.
 //!
 //! # How it works
 //!
@@ -49,6 +53,9 @@
 //! - Time is read through Tokio's clock only, so the workloads run under a paused clock in tests.
 //! - A writer opened by a workload is closed before the workload returns.
 //! - The payload of every record is one shared buffer; no payload is allocated per record.
+//! - `run_append_worker` is the measured loop. It takes no lock, and what it awaits per append is the
+//!   wait for a paced send and the append itself, in that order; the steps around them are plain
+//!   functions. Both waits stay in that one function, so that this can be read off it.
 //!
 //! # See also
 //!
@@ -61,7 +68,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bitacora::{
-    BitacoraClient, OpenError, ReadError, SequenceNumber, SequenceRange, StreamOptions, StreamWriter, TakeoverPolicy,
+    BitacoraClient, LogRecord, OpenError, ReadError, SequenceNumber, SequenceRange, StreamOptions, StreamReader,
+    StreamWriter, TakeoverPolicy,
 };
 use bytes::Bytes;
 use thiserror::Error;
@@ -128,6 +136,33 @@ pub(crate) struct AppendMeasurement {
     pub(crate) failure: Option<String>,
 }
 
+impl AppendMeasurement {
+    /// The measurement of a workload that has not appended anything yet.
+    fn nothing_measured() -> Self {
+        Self {
+            appends: 0,
+            records: 0,
+            payload_bytes: 0,
+            elapsed: Duration::ZERO,
+            latencies: LatencyHistogram::new(),
+            failure: None,
+        }
+    }
+
+    /// Adds what another stream measured: counts are summed, latencies merged, the run time is the
+    /// longer of the two, and the failure that was added first is kept.
+    fn add(&mut self, measured: Self) {
+        self.appends += measured.appends;
+        self.records += measured.records;
+        self.payload_bytes += measured.payload_bytes;
+        self.elapsed = self.elapsed.max(measured.elapsed);
+        self.latencies.merge(&measured.latencies);
+        if self.failure.is_none() {
+            self.failure = measured.failure;
+        }
+    }
+}
+
 /// A read workload: a scan of one stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReadWorkload {
@@ -150,6 +185,26 @@ pub(crate) struct ReadMeasurement {
     pub(crate) elapsed: Duration,
     /// Why the scan stopped early, if it did.
     pub(crate) failure: Option<String>,
+}
+
+impl ReadMeasurement {
+    /// The measurement of a scan that has not read anything yet.
+    const fn nothing_read() -> Self {
+        Self {
+            records: 0,
+            payload_bytes: 0,
+            elapsed: Duration::ZERO,
+            failure: None,
+        }
+    }
+
+    /// Counts the records one request returned, and their payload bytes.
+    fn count(&mut self, found: &[LogRecord]) {
+        for record in found {
+            self.payload_bytes += record.payload.len() as u64;
+        }
+        self.records += found.len() as u64;
+    }
 }
 
 /// Why a workload could not run.
@@ -209,12 +264,58 @@ struct SharedAppendState {
     has_failed: AtomicBool,
 }
 
+impl SharedAppendState {
+    /// What the workers of one stream share for a workload that starts at `started_at`.
+    fn new(writer: StreamWriter, workload: &AppendWorkload, started_at: Instant) -> Self {
+        let records_per_append = workload.records_per_append as u64;
+        let (send_limit, deadline) = match workload.limit {
+            WorkloadLimit::Records(records) => (Some(records.div_ceil(records_per_append)), None),
+            WorkloadLimit::Duration(duration) => (None, Some(started_at + duration)),
+        };
+        let target_rate = workload.target_records_per_second;
+        let pace = target_rate.map(|rate| Pace::new(rate, records_per_append));
+        Self {
+            writer,
+            payload: Bytes::from(vec![PAYLOAD_BYTE; workload.record_bytes]),
+            records_per_append: workload.records_per_append,
+            next_send: AtomicU64::new(0),
+            send_limit,
+            deadline,
+            pace,
+            started_at,
+            has_failed: AtomicBool::new(false),
+        }
+    }
+
+    /// When the send with this number is due, if the workload is paced.
+    fn due_at(&self, send_number: u64) -> Option<Instant> {
+        self.pace.map(|pace| self.started_at + pace.due_after(send_number))
+    }
+
+    /// Whether a send would start at or after the deadline of a workload that is limited by a duration.
+    /// A send starts when it is due, and now if the workload is not paced or the send is overdue.
+    fn is_too_late_to_start(&self, due_at: Option<Instant>) -> bool {
+        let starts_at = due_at.unwrap_or_else(Instant::now).max(Instant::now());
+        self.deadline.is_some_and(|deadline| starts_at >= deadline)
+    }
+}
+
 /// What one worker measured.
 struct WorkerMeasurement {
     /// The latency of every append this worker saw commit.
     latencies: LatencyHistogram,
     /// Why this worker stopped early, if an append of its own failed.
     failure: Option<String>,
+}
+
+impl WorkerMeasurement {
+    /// The measurement of a worker that has not appended anything yet.
+    fn nothing_measured() -> Self {
+        Self {
+            latencies: LatencyHistogram::new(),
+            failure: None,
+        }
+    }
 }
 
 /// Runs an append workload on every one of its streams at once and adds the measurements up.
@@ -246,27 +347,11 @@ pub(crate) async fn run_append_workloads(
         let workload = workload.clone();
         streams.spawn(async move { run_append_workload(&client, &workload, &stream_name).await });
     }
-    let mut total = AppendMeasurement {
-        appends: 0,
-        records: 0,
-        payload_bytes: 0,
-        elapsed: Duration::ZERO,
-        latencies: LatencyHistogram::new(),
-        failure: None,
-    };
+    let mut total = AppendMeasurement::nothing_measured();
     let mut first_error = None;
     while let Some(joined) = streams.join_next().await {
         match joined.expect("a stream's workload does not panic") {
-            Ok(measured) => {
-                total.appends += measured.appends;
-                total.records += measured.records;
-                total.payload_bytes += measured.payload_bytes;
-                total.elapsed = total.elapsed.max(measured.elapsed);
-                total.latencies.merge(&measured.latencies);
-                if total.failure.is_none() {
-                    total.failure = measured.failure;
-                }
-            }
+            Ok(measured) => total.add(measured),
             Err(workload_error) => first_error = first_error.or(Some(workload_error)),
         }
     }
@@ -342,6 +427,9 @@ fn validate(workload: &AppendWorkload) -> Result<(), WorkloadError> {
 }
 
 /// Runs the append workload on one stream: opens its writer, runs the workers, closes the writer.
+///
+/// The run time is taken from the moment the writer is open to the moment the last worker returns, so
+/// neither the takeover nor the closing of the writer counts.
 async fn run_append_workload(
     client: &BitacoraClient,
     workload: &AppendWorkload,
@@ -356,73 +444,67 @@ async fn run_append_workload(
             });
         }
     };
-    let records_per_append = workload.records_per_append as u64;
     let started_at = Instant::now();
-    let shared = Arc::new(SharedAppendState {
-        writer,
-        payload: Bytes::from(vec![PAYLOAD_BYTE; workload.record_bytes]),
-        records_per_append: workload.records_per_append,
-        next_send: AtomicU64::new(0),
-        send_limit: match workload.limit {
-            WorkloadLimit::Records(records) => Some(records.div_ceil(records_per_append)),
-            WorkloadLimit::Duration(_) => None,
-        },
-        deadline: match workload.limit {
-            WorkloadLimit::Records(_) => None,
-            WorkloadLimit::Duration(duration) => Some(started_at + duration),
-        },
-        pace: workload
-            .target_records_per_second
-            .map(|rate| Pace::new(rate, records_per_append)),
-        started_at,
-        has_failed: AtomicBool::new(false),
-    });
-
-    let mut workers = JoinSet::new();
-    for _worker in 0..workload.appends_in_flight {
-        workers.spawn(run_append_worker(Arc::clone(&shared)));
-    }
-    let mut latencies = LatencyHistogram::new();
-    let mut failure = None;
-    while let Some(joined) = workers.join_next().await {
-        let measured = joined.expect("a worker does not panic");
-        latencies.merge(&measured.latencies);
-        failure = failure.or(measured.failure);
-    }
+    let shared = Arc::new(SharedAppendState::new(writer, workload, started_at));
+    let mut measured = run_append_workers(&shared, workload.appends_in_flight).await;
     let elapsed = started_at.elapsed();
-
-    // Every worker has returned, so this is the last reference and the writer can be closed.
-    if let Ok(shared) = Arc::try_unwrap(shared)
-        && let Err(close_error) = shared.writer.close().await
-    {
-        failure = failure.or(Some(format!("the writer did not close cleanly: {close_error}")));
+    if let Some(close_failure) = close_writer_of(shared).await {
+        measured.failure = measured.failure.or(Some(close_failure));
     }
-    let appends = latencies.count();
-    let records = appends * records_per_append;
+    let appends = measured.latencies.count();
+    let records = appends * workload.records_per_append as u64;
     Ok(AppendMeasurement {
         appends,
         records,
         payload_bytes: records * workload.record_bytes as u64,
         elapsed,
-        latencies,
-        failure,
+        latencies: measured.latencies,
+        failure: measured.failure,
     })
+}
+
+/// Runs `worker_count` workers on one stream until all of them have returned, and merges what they
+/// measured. If several appends failed, the failure of the worker that returned first is kept.
+async fn run_append_workers(shared: &Arc<SharedAppendState>, worker_count: usize) -> WorkerMeasurement {
+    let mut workers = JoinSet::new();
+    for _worker in 0..worker_count {
+        workers.spawn(run_append_worker(Arc::clone(shared)));
+    }
+    let mut total = WorkerMeasurement::nothing_measured();
+    while let Some(joined) = workers.join_next().await {
+        let measured = joined.expect("a worker does not panic");
+        total.latencies.merge(&measured.latencies);
+        total.failure = total.failure.or(measured.failure);
+    }
+    total
+}
+
+/// Closes the writer of a stream whose workers have all returned.
+///
+/// # Returns
+///
+/// The failure to report if the writer did not close cleanly, otherwise `None`.
+async fn close_writer_of(shared: Arc<SharedAppendState>) -> Option<String> {
+    // Every worker has returned, so this is the last reference and the writer can be taken out.
+    let Ok(shared) = Arc::try_unwrap(shared) else {
+        return None;
+    };
+    match shared.writer.close().await {
+        Ok(_closed) => None,
+        Err(close_error) => Some(format!("the writer did not close cleanly: {close_error}")),
+    }
 }
 
 /// One worker: appends, one append at a time, until the workload is over or an append fails.
 async fn run_append_worker(shared: Arc<SharedAppendState>) -> WorkerMeasurement {
-    let mut measured = WorkerMeasurement {
-        latencies: LatencyHistogram::new(),
-        failure: None,
-    };
+    let mut measured = WorkerMeasurement::nothing_measured();
     while !shared.has_failed.load(Ordering::Relaxed) {
         let send_number = shared.next_send.fetch_add(1, Ordering::Relaxed);
         if shared.send_limit.is_some_and(|limit| send_number >= limit) {
             break;
         }
-        let due_at = shared.pace.map(|pace| shared.started_at + pace.due_after(send_number));
-        let starts_at = due_at.unwrap_or_else(Instant::now).max(Instant::now());
-        if shared.deadline.is_some_and(|deadline| starts_at >= deadline) {
+        let due_at = shared.due_at(send_number);
+        if shared.is_too_late_to_start(due_at) {
             break;
         }
         if let Some(due_at) = due_at {
@@ -467,31 +549,11 @@ pub(crate) async fn run_read_workload(
     workload: &ReadWorkload,
 ) -> Result<ReadMeasurement, WorkloadError> {
     let reader = client.open_reader(&workload.stream);
-    let mut next_sequence = match workload.from {
-        Some(sequence) => SequenceNumber::new(sequence.max(1)),
-        None => match reader.low_water_mark().await {
-            Ok(low_water_mark) => low_water_mark,
-            Err(reason) => {
-                return Err(WorkloadError::CannotRead {
-                    stream: workload.stream.clone(),
-                    reason,
-                });
-            }
-        },
-    };
+    let mut next_sequence = first_sequence_to_read(&reader, workload).await?;
     let started_at = Instant::now();
-    let mut measured = ReadMeasurement {
-        records: 0,
-        payload_bytes: 0,
-        elapsed: Duration::ZERO,
-        failure: None,
-    };
+    let mut measured = ReadMeasurement::nothing_read();
     loop {
-        let records_wanted = match workload.limit {
-            WorkloadLimit::Records(limit) => READ_RANGE_RECORDS.min(limit - measured.records),
-            WorkloadLimit::Duration(duration) if started_at.elapsed() >= duration => 0,
-            WorkloadLimit::Duration(_) => READ_RANGE_RECORDS,
-        };
+        let records_wanted = records_to_ask_for(workload.limit, measured.records, started_at);
         if records_wanted == 0 {
             break;
         }
@@ -505,11 +567,8 @@ pub(crate) async fn run_read_workload(
                 break;
             }
         };
-        for record in &found {
-            measured.payload_bytes += record.payload.len() as u64;
-        }
+        measured.count(&found);
         let found_count = found.len() as u64;
-        measured.records += found_count;
         next_sequence = next_sequence.advanced_by(found_count);
         if found_count < records_wanted {
             // The range reached past the last committed record: the stream ends here.
@@ -518,6 +577,38 @@ pub(crate) async fn run_read_workload(
     }
     measured.elapsed = started_at.elapsed();
     Ok(measured)
+}
+
+/// Where a scan starts: at the sequence number the workload names, or at the oldest record the stream
+/// still keeps.
+///
+/// # Errors
+///
+/// Returns [`WorkloadError::CannotRead`] if the stream does not exist or its metadata cannot be read.
+async fn first_sequence_to_read(
+    reader: &StreamReader,
+    workload: &ReadWorkload,
+) -> Result<SequenceNumber, WorkloadError> {
+    if let Some(sequence) = workload.from {
+        return Ok(SequenceNumber::new(sequence.max(1)));
+    }
+    match reader.low_water_mark().await {
+        Ok(low_water_mark) => Ok(low_water_mark),
+        Err(reason) => Err(WorkloadError::CannotRead {
+            stream: workload.stream.clone(),
+            reason,
+        }),
+    }
+}
+
+/// How many records the next request of a scan asks for: a full range, less if the record limit leaves
+/// less, and none once the limit is reached.
+fn records_to_ask_for(limit: WorkloadLimit, records_read: u64, started_at: Instant) -> u64 {
+    match limit {
+        WorkloadLimit::Records(record_limit) => READ_RANGE_RECORDS.min(record_limit - records_read),
+        WorkloadLimit::Duration(duration) if started_at.elapsed() >= duration => 0,
+        WorkloadLimit::Duration(_) => READ_RANGE_RECORDS,
+    }
 }
 
 #[cfg(test)]
