@@ -345,6 +345,16 @@ impl SegmentHandle {
         self.ask(|reply| Command::Status { reply }).await
     }
 
+    /// Whether the task behind this handle has ended: its copy was deleted, or the replica was stopped. A request
+    /// to a task that has ended fails as unavailable; this tells that case from a task that is merely failing.
+    ///
+    /// # Returns
+    ///
+    /// `true` once the task no longer takes commands. It never becomes `false` again.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.commands.is_closed()
+    }
+
     /// Removes everything stored for the segment and ends the task.
     ///
     /// # Errors

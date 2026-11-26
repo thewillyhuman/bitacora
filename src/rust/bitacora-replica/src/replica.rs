@@ -60,7 +60,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bitacora_artifact::ArtifactStore;
 use bitacora_segment::Disk;
-use bitacora_types::replica_api::{ReplicaConnector, ReplicaError};
+use bitacora_types::replica_api::{ReplicaConnector, ReplicaError, SegmentStatus};
 use bitacora_types::{ReplicaId, SegmentAddress};
 use bytes::Bytes;
 use tokio::task::JoinSet;
@@ -507,6 +507,29 @@ impl Replica {
     /// that segment.
     fn existing_handle(&self, address: SegmentAddress) -> Option<SegmentHandle> {
         self.lock_registry().handles_by_address.get(&address).cloned()
+    }
+
+    /// Asks each of `handles` for the status of its copy, and returns those of the copies that exist.
+    ///
+    /// The handles were collected a moment ago, and a copy can be deleted in between: its task has then stopped.
+    /// Such a copy is left out, because the replica no longer holds it. Failing the whole listing instead would
+    /// fail whoever asked for it, and the replica's registration is one of them: a heartbeat would be missed
+    /// every time a segment is deleted at the wrong moment.
+    ///
+    /// # Errors
+    ///
+    /// Returns what a task that is still running failed with.
+    async fn statuses_of(&self, handles: &[SegmentHandle]) -> Result<Vec<SegmentStatus>, ReplicaError> {
+        let mut stored_copies = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.status().await {
+                Ok(Some(status)) => stored_copies.push(status),
+                Ok(None) => {}
+                Err(_task_stopped) if handle.is_stopped() => {}
+                Err(replica_error) => return Err(replica_error),
+            }
+        }
+        Ok(stored_copies)
     }
 
     /// Refuses the request at hand if the replica was stopped.

@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: replica
+note: "A replica's listing of its copies leaves out a copy that is deleted while the listing runs, instead of failing. The registration is such a listing, so a replica used to miss a heartbeat when a segment was deleted at the wrong moment, and the controller's survey of that replica failed."
+issues: [5]

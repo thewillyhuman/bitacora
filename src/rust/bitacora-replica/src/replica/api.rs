@@ -163,13 +163,7 @@ impl ReplicaApi for Replica {
     /// for, in the order of their addresses.
     async fn list_segments(&self) -> Result<Vec<SegmentStatus>, ReplicaError> {
         self.fail_if_stopped()?;
-        let mut stored_copies = Vec::new();
-        for handle in self.all_handles() {
-            if let Some(status) = handle.status().await? {
-                stored_copies.push(status);
-            }
-        }
-        Ok(stored_copies)
+        self.statuses_of(&self.all_handles()).await
     }
 
     /// Measures the disk afresh and counts the stored copies.

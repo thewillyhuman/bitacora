@@ -6,7 +6,8 @@
 //!   refused append leaves no segment behind.
 //! - A waiting read returns as soon as there is something to read, gives up empty after its wait, is
 //!   capped by the replica, and does not wait at the end of a sealed segment or for a recovering writer.
-//! - A deleted segment is gone, can be deleted again, and can be written again.
+//! - A deleted segment is gone, can be deleted again, and can be written again; a listing that was under way
+//!   when a segment was deleted leaves it out instead of failing.
 //! - The listing reports what the header of each records file says; the status reports the identity, the
 //!   disk, the draining switch and the number of segments.
 //!
@@ -231,6 +232,23 @@ async fn deleted_segment_is_not_listed() {
         .expect("a working disk removes the files");
 
     assert_eq!(replica.list_segments().await, Ok(Vec::new()));
+}
+
+/// A listing collects the segment tasks and then asks each one. A copy deleted in between has no task any more.
+/// The replica's registration is such a listing, so failing here made a replica miss a heartbeat every time a
+/// stream was deleted at the wrong moment.
+#[tokio::test]
+async fn listing_leaves_out_a_copy_that_was_deleted_while_it_ran() {
+    let replica = replica_with_records(104).await;
+    let tasks_the_listing_collected = replica.all_handles();
+    replica
+        .delete_segment(SEGMENT)
+        .await
+        .expect("a working disk removes the files");
+
+    let listed = replica.statuses_of(&tasks_the_listing_collected).await;
+
+    assert_eq!(listed, Ok(Vec::new()));
 }
 
 #[tokio::test]
