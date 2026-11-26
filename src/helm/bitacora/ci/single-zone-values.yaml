@@ -1,0 +1,6 @@
+# A cluster in a single zone, or on a Kubernetes that does not copy the zone
+# of a node onto its pods: replicas are kept on different nodes and report
+# only the node as failure domain. //src/helm:chart_test renders the chart
+# with this file.
+replica:
+  zoneAware: false

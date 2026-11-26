@@ -1,0 +1,28 @@
+bitacora {{ .Chart.AppVersion }} is starting in namespace {{ .Release.Namespace }}:
+{{ .Values.replica.replicas | int64 }} replicas and {{ .Values.controller.replicas | int64 }} controllers.
+
+A replica is ready once it has registered in etcd, a controller once it has
+completed a round. Watch them get there:
+
+  kubectl --namespace {{ .Release.Namespace }} get pods --selector app.kubernetes.io/instance={{ .Release.Name }} --watch
+
+Then ask the cluster itself:
+
+  kubectl --namespace {{ .Release.Namespace }} run bita --rm --stdin --tty --restart=Never \
+    --image={{ include "bitacora.image" (list . "bita") }} -- \
+    --etcd-endpoint {{ first .Values.etcd.endpoints }} --etcd-key-prefix {{ .Values.etcd.keyPrefix }} replica list
+
+A pod that restarts with exit code 2 was given a configuration it refuses;
+its log names the setting:
+
+  kubectl --namespace {{ .Release.Namespace }} logs --previous <pod>
+{{- if .Values.replica.zoneAware }}
+
+Replicas read their zone from the pod label topology.kubernetes.io/zone, which
+Kubernetes copies from the node since 1.35. A replica that restarts saying
+
+  setting `failure_domains` is invalid: a label is empty
+
+runs on a node without that label, or on an older Kubernetes: label the
+nodes, or set replica.zoneAware to false.
+{{- end }}

@@ -1,0 +1,28 @@
+{{/*
+The headless Service that gives every replica a DNS name of its own:
+<pod>.<this service>.<namespace>.svc.<cluster domain>, the address the replica
+advertises. Clients never go through a load balancer: they read the addresses
+from the metadata store and talk to each replica directly.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bitacora.fullname" . }}-replica
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  clusterIP: None
+  # A replica is only ready once it has registered, and it registers the name
+  # this Service gives it: the name must resolve before the pod is ready.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "bitacora.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+  ports:
+    - name: grpc
+      port: 7000
+      targetPort: grpc
+    - name: metrics
+      port: 9100
+      targetPort: metrics

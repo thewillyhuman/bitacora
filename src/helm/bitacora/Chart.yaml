@@ -1,0 +1,17 @@
+# The bitacora chart: the replicas and the controllers of one cluster.
+#
+# hack/create_release.sh rewrites the `version` and `appVersion` lines, so
+# each must stay on a line of its own, at the start of the line.
+apiVersion: v2
+name: bitacora
+description: Runs a bitacora cluster, a replicated log with tiering to an object store.
+type: application
+version: 0.0.0
+appVersion: "0.0.0"
+home: https://github.com/thewillyhuman/bitacora
+sources:
+  - https://github.com/thewillyhuman/bitacora
+keywords:
+  - log
+  - storage
+  - replication

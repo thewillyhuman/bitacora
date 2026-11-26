@@ -1,0 +1,8 @@
+# A cluster scraped by the Prometheus Operator, whose Prometheus selects
+# ServiceMonitors labelled `release: prometheus`. //src/helm:chart_test
+# renders the chart with this file.
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  labels:
+    release: prometheus

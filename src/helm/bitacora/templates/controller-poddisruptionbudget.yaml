@@ -1,0 +1,17 @@
+{{/*
+At most one controller may be taken down on purpose at a time, so that a node
+drain never leaves the cluster without one.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "bitacora.fullname" . }}-controller
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "bitacora.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller

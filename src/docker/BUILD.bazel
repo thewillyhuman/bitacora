@@ -3,6 +3,12 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
 
+# Read by the test of the chart, whose pods must run as the user of the images.
+exports_files(
+    ["Dockerfile"],
+    visibility = ["//src/helm:__pkg__"],
+)
+
 # What dockerfile_test.sh checks the Dockerfile against.
 _CHECKED_AGAINST = {
     "BAZELRC": "//:.bazelrc",

@@ -1,0 +1,18 @@
+{{/*
+At most one replica may be taken down on purpose at a time, for example by a
+node drain. A stream stays writable with one of its replicas away; with two
+away it may not.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "bitacora.fullname" . }}-replica
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "bitacora.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: replica

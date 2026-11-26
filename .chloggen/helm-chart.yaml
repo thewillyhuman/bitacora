@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "Add the bitacora Helm chart: replicas as a StatefulSet spread over zones and nodes, controllers as a Deployment, configuration rendered from values, object store credentials from an existing Secret, and an optional ServiceMonitor. etcd is not deployed by the chart."
+issues: [5]

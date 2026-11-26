@@ -1,0 +1,22 @@
+{{/*
+A headless Service over the controllers. Nothing connects to a controller; the
+Service exists so that Prometheus finds the metrics port of each of them.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bitacora.fullname" . }}-controller
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  clusterIP: None
+  # A controller that is not ready is the one whose metrics matter most.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "bitacora.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: metrics
+      port: 9101
+      targetPort: metrics

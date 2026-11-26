@@ -1,0 +1,72 @@
+"""The Helm chart, and the tests that lint and render it without a cluster."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
+
+# Every file of the chart.
+filegroup(
+    name = "chart",
+    srcs = glob(["bitacora/**"]),
+)
+
+# What chart_test.sh checks the chart with and against.
+_CHECKED_AGAINST = {
+    "BITA_CONTROLLER_BINARY": "//src/rust/bita-controller",
+    "BITA_REPLICA_BINARY": "//src/rust/bita-replica",
+    "CHART": "bitacora/Chart.yaml",
+    "CONTROLLER_CONFIG": "//src/rust/bita-controller:example.toml",
+    "DOCKERFILE": "//src/docker:Dockerfile",
+    "HELM": "//hack/tools:helm",
+    "MODULE": "//:MODULE.bazel",
+    "REPLICA_CONFIG": "//src/rust/bita-replica:example.toml",
+}
+
+_CHECK_ENVIRONMENT = {
+    variable: "$(rootpath {})".format(label)
+    for variable, label in _CHECKED_AGAINST.items()
+}
+
+_CHECK_DATA = [":chart"] + _CHECKED_AGAINST.values()
+
+# The chart linted, rendered with its defaults and with each file of
+# bitacora/ci, and what was rendered checked against the daemons.
+sh_test(
+    name = "chart_test",
+    size = "small",
+    srcs = ["chart_test.sh"],
+    data = _CHECK_DATA,
+    env = _CHECK_ENVIRONMENT,
+)
+
+# The same test must fail on a chart that was broken on purpose, and name
+# every mistake broken_chart_test.sh makes.
+rejection_test(
+    name = "chart_rejection_test",
+    args = ["$(rootpath chart_test.sh)"],
+    checker = "broken_chart_test.sh",
+    data = _CHECK_DATA + ["chart_test.sh"],
+    env = _CHECK_ENVIRONMENT,
+    findings = [
+        "appVersion is '9.9.9', but MODULE.bazel says",
+        "replica.spare is not documented: no comment stands above it",
+        "replica.spare is not used by any template",
+        "a template uses .Values.replica.replicaCount, which values.yaml does not have",
+        "replica.toml refers to BITA_NODE_NAME, which the replica pod does not set",
+        "bita-controller refuses the configuration the chart renders",
+        "replica-statefulset.yaml has no readiness probe on /readyz",
+        "a controller is given 5 seconds to stop, and needs up to 10",
+        "a replica runs as user 1000, but the images run as 65532",
+        "the chart does not keep replicas on different nodes",
+        "the chart lets more than one replica be taken down at a time",
+        "a replica that lost its volume would come back under its old identity",
+        "the chart's default 'scrub_interval_seconds = 3600' is not what bita-replica/example.toml has",
+    ],
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = [
+        "broken_chart_test.sh",
+        "chart_test.sh",
+    ],
+)

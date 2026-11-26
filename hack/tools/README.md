@@ -8,6 +8,7 @@ same answer on every machine and needs nothing installed.
 | --- | --- | --- |
 | `//hack/tools:shellcheck` | shellcheck | Every shell script of the repository |
 | `//hack/tools:hadolint` | hadolint | The Dockerfile of the container images |
+| `//hack/tools:helm` | helm | The Helm chart: lints it and renders it |
 
 The releases and their checksums are in `//:MODULE.bazel`; the aliases in `BUILD.bazel` pick the right
 one for macOS arm64, Linux x86-64 and Linux arm64. To add a platform, add its archive there and its

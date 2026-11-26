@@ -1,0 +1,182 @@
+# Values of the bitacora chart. Every value is explained where it is set.
+#
+# The chart runs the replicas and the controllers. It does not run etcd or an
+# object store: point it at yours with `etcd.endpoints` and `objectStore`.
+
+# Replaces the chart name ("bitacora") in the names of the resources.
+nameOverride: ""
+# Replaces the whole name prefix of the resources, release name included.
+fullnameOverride: ""
+
+image:
+  # What comes before the image name. The chart pulls
+  # `<repository>/bita-replica` and `<repository>/bita-controller`. No public
+  # registry has these images: build them with hack/build_images.sh and push
+  # them to the registry your cluster pulls from.
+  repository: bitacora
+  # The tag of both images. Empty means the version of the chart.
+  tag: ""
+  # When the kubelet pulls an image: IfNotPresent, Always or Never.
+  pullPolicy: IfNotPresent
+
+# Names of Secrets with the credentials of a private registry.
+imagePullSecrets: []
+
+# The DNS domain of the Kubernetes cluster. It is part of the address each
+# replica advertises to clients and to the other replicas.
+clusterDomain: cluster.local
+
+etcd:
+  # The etcd cluster that holds the metadata of this bitacora cluster, as
+  # URLs. The chart does not deploy etcd. The default is an etcd Service
+  # named `etcd` in the namespace of the release.
+  endpoints:
+    - http://etcd:2379
+  # The prefix of every key bitacora writes, so that one etcd can serve
+  # several clusters. Two releases must not share a prefix.
+  keyPrefix: /bitacora/
+
+objectStore:
+  # Where sealed segments are tiered to: `none` or `s3`. With `none` every
+  # segment stays on the replicas until its stream is truncated.
+  kind: none
+  s3:
+    # The bucket. It must exist. Required when `kind` is `s3`.
+    bucket: ""
+    # The region of the bucket. S3-compatible services usually accept any
+    # value, by convention us-east-1.
+    region: us-east-1
+    # The URL of an S3-compatible service, such as https://s3.example.org.
+    # Empty means Amazon S3.
+    endpoint: ""
+    # A prefix for every object key, so that several clusters can share a
+    # bucket.
+    keyPrefix: ""
+    # Whether the bucket goes in the path of the URL instead of in the host
+    # name. Most S3-compatible services need it.
+    forcePathStyle: true
+    # Whether an http:// endpoint is accepted. Traffic to an object store
+    # carries data and credentials: leave this off outside a test.
+    allowHttp: false
+    credentials:
+      # The name of an existing Secret with the access key of the bucket. The
+      # chart never creates this Secret and never writes a credential into a
+      # ConfigMap: the pods read the two keys below as environment variables.
+      # Empty means no access key: the pods must then get credentials from
+      # the platform, for example a web identity bound to the service account.
+      existingSecret: ""
+      # The key of that Secret that holds the access key id.
+      accessKeyIdKey: AWS_ACCESS_KEY_ID
+      # The key of that Secret that holds the secret access key.
+      secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
+
+log:
+  # The least severe level that is logged: error, warn, info, debug or trace.
+  level: info
+  # How a log line is written: json or text.
+  format: json
+
+serviceAccount:
+  # Whether the chart creates the ServiceAccount the pods run as.
+  create: true
+  # The name of the ServiceAccount. Empty means the name of the release
+  # resources when `create` is true, and `default` when it is false.
+  name: ""
+  # Annotations of the ServiceAccount, for example the role that a cloud
+  # provider binds to it to reach the object store.
+  annotations: {}
+
+replica:
+  # How many replicas run. A stream needs as many replicas as its replication
+  # factor, three by default, each in a failure domain of its own.
+  replicas: 3
+  # Whether replicas know the zone they run in.
+  #
+  # When true, replicas are spread evenly over the zones of the cluster, and
+  # each replica reports two failure domains: its zone, then its node. The
+  # zone is read from the pod's own `topology.kubernetes.io/zone` label, which
+  # Kubernetes copies from the node since 1.35 (on 1.33 and 1.34 the
+  # PodTopologyLabelsAdmission feature gate must be on). The nodes must carry
+  # that label: cloud providers set it, on your own machines you do. A replica
+  # that finds no zone refuses to start and says so.
+  #
+  # When false, replicas are only kept on different nodes and report one
+  # failure domain, the node. Use it on a cluster with a single zone or an
+  # older Kubernetes.
+  zoneAware: true
+  storage:
+    # The size of the volume of each replica. It holds the segments that are
+    # not tiered yet, or all of them when `objectStore.kind` is `none`.
+    size: 100Gi
+    # The StorageClass of that volume. Empty means the default of the
+    # cluster. Prefer local or zonal volumes with fast fsync.
+    storageClassName: ""
+  # Seconds between two registrations of a replica in etcd. A replica that
+  # stops registering is treated as gone by the controller.
+  registrationIntervalSeconds: 5
+  # Seconds between two full verifications of everything a replica stores.
+  scrubIntervalSeconds: 604800
+  # Bytes of disk reserved for a segment when it is opened.
+  preallocatedSegmentBytes: 67108864
+  # Used disk, in percent, from which a replica takes no new segment.
+  refuseNewSegmentsAtUsedPercent: 85
+  # Used disk, in percent, from which a replica refuses every append.
+  refuseAppendsAtUsedPercent: 95
+  # The most bytes per second a replica reads to repair copies elsewhere.
+  repairBytesPerSecond: 134217728
+  # Seconds a replica is given to stop before it is killed. It finishes
+  # requests in flight within ten seconds; keep this well above that.
+  terminationGracePeriodSeconds: 30
+  # CPU and memory requests and limits of the replica container.
+  resources: {}
+  # Node labels a node must have to run a replica.
+  nodeSelector: {}
+  # Taints a replica tolerates.
+  tolerations: []
+  # Extra annotations of the replica pods.
+  podAnnotations: {}
+  # The PriorityClass of the replica pods. Empty means none.
+  priorityClassName: ""
+
+controller:
+  # How many controllers run. One leads and the others stand by, so two is
+  # enough to survive the loss of a node and three the loss of a zone too.
+  replicas: 2
+  # Milliseconds between two rounds of the leading controller.
+  passIntervalMilliseconds: 1000
+  # Seconds a controller keeps the leadership without renewing it. It must be
+  # at least twice the pass interval.
+  leadershipDurationSeconds: 10
+  # Seconds without a registration after which a replica is given up and its
+  # copies are rebuilt elsewhere.
+  replicaLostAfterSeconds: 300
+  # Seconds a sealed segment waits before it is tiered to the object store.
+  tieringDelaySeconds: 900
+  # Seconds a tiered segment stays on the replicas for fast reads.
+  hotReadWindowSeconds: 86400
+  # Seconds without a registration after which a replica gets no new segment.
+  livenessWindowSeconds: 15
+  # Used disk, in percent, from which a replica gets no new segment.
+  refuseAtUsedPercent: 85
+  # Seconds a controller is given to stop before it is killed. It finishes a
+  # running round within ten seconds; keep this well above that.
+  terminationGracePeriodSeconds: 30
+  # CPU and memory requests and limits of the controller container.
+  resources: {}
+  # Node labels a node must have to run a controller.
+  nodeSelector: {}
+  # Taints a controller tolerates.
+  tolerations: []
+  # Extra annotations of the controller pods.
+  podAnnotations: {}
+  # The PriorityClass of the controller pods. Empty means none.
+  priorityClassName: ""
+
+serviceMonitor:
+  # Whether the chart creates a ServiceMonitor, for a cluster that runs the
+  # Prometheus Operator. It needs the monitoring.coreos.com/v1 API.
+  enabled: false
+  # How often Prometheus scrapes each pod.
+  interval: 30s
+  # Extra labels of the ServiceMonitor, for the selector of your Prometheus.
+  labels: {}

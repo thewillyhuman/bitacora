@@ -1,0 +1,109 @@
+{{/*
+The controllers: a Deployment, because a controller keeps nothing on disk.
+One of them leads at a time; the others take over when it stops renewing its
+leadership in the metadata store.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bitacora.fullname" . }}-controller
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas | int64 }}
+  selector:
+    matchLabels:
+      {{- include "bitacora.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "bitacora.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+      annotations:
+        # A change of configuration changes this value, which restarts the pods.
+        checksum/config: {{ include (print $.Template.BasePath "/controller-configmap.yaml") . | sha256sum }}
+        {{- with .Values.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "bitacora.serviceAccountName" . }}
+      # The daemons never talk to the Kubernetes API.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.controller.terminationGracePeriodSeconds | int64 }}
+      {{- with .Values.controller.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "bitacora.podSecurityContext" . | nindent 8 }}
+      affinity:
+        # Controllers on different nodes where possible, so that losing a
+        # node leaves one to take over. A preference, not a rule: one
+        # controller on a shared node is better than none.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "bitacora.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: controller
+      # And in different zones where there are several.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "bitacora.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: controller
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ include "bitacora.image" (list . "bita-controller") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/bitacora/controller.toml
+          env:
+            # What the configuration file refers to as "${BITA_POD_NAME}":
+            # the identity under which this controller asks for leadership.
+            - name: BITA_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- with include "bitacora.objectStoreEnvironment" . }}
+            # The access key of the object store, from the operator's Secret.
+            {{- . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 9101
+          {{- include "bitacora.probes" . | nindent 10 }}
+          securityContext:
+            {{- include "bitacora.containerSecurityContext" . | nindent 12 }}
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/bitacora
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "bitacora.fullname" . }}-controller

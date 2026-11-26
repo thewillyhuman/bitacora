@@ -1,0 +1,148 @@
+{{/*
+The replicas: a StatefulSet, so that each keeps its name and its volume across
+restarts. A replica that comes back with its volume is the same replica.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "bitacora.fullname" . }}-replica
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  serviceName: {{ include "bitacora.fullname" . }}-replica
+  replicas: {{ .Values.replica.replicas | int64 }}
+  # Replicas do not depend on one another to start, so all start at once.
+  podManagementPolicy: Parallel
+  # An upgrade restarts one replica at a time and waits until it is ready,
+  # that is registered again, before it takes the next.
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "bitacora.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: replica
+  template:
+    metadata:
+      labels:
+        {{- include "bitacora.labels" . | nindent 8 }}
+        app.kubernetes.io/component: replica
+      annotations:
+        # A change of configuration changes this value, which restarts the pods.
+        checksum/config: {{ include (print $.Template.BasePath "/replica-configmap.yaml") . | sha256sum }}
+        {{- with .Values.replica.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "bitacora.serviceAccountName" . }}
+      # The daemons never talk to the Kubernetes API.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.replica.terminationGracePeriodSeconds | int64 }}
+      {{- with .Values.replica.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "bitacora.podSecurityContext" . | nindent 8 }}
+      affinity:
+        # Never two replicas on one node: a node is a failure domain, and
+        # two copies of a segment on it are lost together.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "bitacora.selectorLabels" . | nindent 18 }}
+                  app.kubernetes.io/component: replica
+      {{- if .Values.replica.zoneAware }}
+      # As many replicas in one zone as in any other, give or take one.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "bitacora.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: replica
+      {{- end }}
+      {{- with .Values.replica.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.replica.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: replica
+          image: {{ include "bitacora.image" (list . "bita-replica") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/bitacora/replica.toml
+          env:
+            # What the configuration file refers to as "${NAME}": who this
+            # replica is and where it runs.
+            - name: BITA_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Different for every pod Kubernetes ever creates, also for one
+            # that takes the name of a pod before it.
+            - name: BITA_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: BITA_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- if .Values.replica.zoneAware }}
+            # Kubernetes copies this label from the node to the pod when it
+            # schedules the pod.
+            - name: BITA_ZONE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['topology.kubernetes.io/zone']
+            {{- end }}
+            {{- with include "bitacora.objectStoreEnvironment" . }}
+            # The access key of the object store, from the operator's Secret.
+            {{- . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: 7000
+            - name: metrics
+              containerPort: 9100
+          {{- include "bitacora.probes" . | nindent 10 }}
+          securityContext:
+            {{- include "bitacora.containerSecurityContext" . | nindent 12 }}
+          {{- with .Values.replica.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/bitacora
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/bitacora
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "bitacora.fullname" . }}-replica
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with .Values.replica.storage.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.replica.storage.size }}

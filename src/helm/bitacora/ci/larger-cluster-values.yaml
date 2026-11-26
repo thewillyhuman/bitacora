@@ -1,0 +1,23 @@
+# A larger cluster: three controllers, five replicas on a named StorageClass,
+# with resources and a private registry. //src/helm:chart_test renders the
+# chart with this file.
+image:
+  repository: registry.example.org/storage
+  tag: 1.4.0
+imagePullSecrets:
+  - name: registry-example-org
+
+replica:
+  replicas: 5
+  storage:
+    size: 500Gi
+    storageClassName: local-nvme
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+  terminationGracePeriodSeconds: 60
+
+controller:
+  replicas: 3
+  replicaLostAfterSeconds: 600

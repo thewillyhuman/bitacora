@@ -1,0 +1,29 @@
+{{/*
+The configuration of every controller. All controllers mount this one file:
+the only thing that differs between them, the identity, is written as
+"${BITA_POD_NAME}", which a controller replaces with the value of that
+environment variable when it reads the file.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bitacora.fullname" . }}-controller
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+data:
+  controller.toml: |
+    # Written by the bitacora Helm chart. "${NAME}" is replaced by the
+    # controller with the value of the environment variable NAME.
+    identity = "${BITA_POD_NAME}"
+    metrics_listen_address = "0.0.0.0:9101"
+    pass_interval_milliseconds = {{ .Values.controller.passIntervalMilliseconds | int64 }}
+    leadership_duration_seconds = {{ .Values.controller.leadershipDurationSeconds | int64 }}
+    replica_lost_after_seconds = {{ .Values.controller.replicaLostAfterSeconds | int64 }}
+    tiering_delay_seconds = {{ .Values.controller.tieringDelaySeconds | int64 }}
+    hot_read_window_seconds = {{ .Values.controller.hotReadWindowSeconds | int64 }}
+
+    [placement]
+    liveness_window_seconds = {{ .Values.controller.livenessWindowSeconds | int64 }}
+    refuse_at_used_percent = {{ .Values.controller.refuseAtUsedPercent | int64 }}
+    {{ include "bitacora.clusterConfig" . | nindent 4 }}

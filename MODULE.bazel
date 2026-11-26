@@ -238,3 +238,31 @@ http_file(
     sha256 = "f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d",
     urls = ["https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-arm64"],
 )
+
+# helm, which lints and renders the chart. The checksums are those of the
+# .sha256sum files next to the archives on get.helm.sh.
+HELM_BUILD_FILE = """exports_files(["helm"], visibility = ["//visibility:public"])"""
+
+http_archive(
+    name = "helm_macos_arm64",
+    build_file_content = HELM_BUILD_FILE,
+    sha256 = "6f3421de3a8cc2ac578c8cfb33b8edde290dde2871bc1bab12e24f2e5caeaa90",
+    strip_prefix = "darwin-arm64",
+    urls = ["https://get.helm.sh/helm-v4.3.2-darwin-arm64.tar.gz"],
+)
+
+http_archive(
+    name = "helm_linux_x86_64",
+    build_file_content = HELM_BUILD_FILE,
+    sha256 = "d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983",
+    strip_prefix = "linux-amd64",
+    urls = ["https://get.helm.sh/helm-v4.3.2-linux-amd64.tar.gz"],
+)
+
+http_archive(
+    name = "helm_linux_arm64",
+    build_file_content = HELM_BUILD_FILE,
+    sha256 = "df31cb61680ef728f82c770e5280dd565617bee6b039d37e85c677288be4bbb0",
+    strip_prefix = "linux-arm64",
+    urls = ["https://get.helm.sh/helm-v4.3.2-linux-arm64.tar.gz"],
+)

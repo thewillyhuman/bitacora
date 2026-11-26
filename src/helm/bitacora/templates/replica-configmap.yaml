@@ -1,0 +1,39 @@
+{{/*
+The configuration of every replica. All replicas mount this one file: what
+differs between them (name, address, where they run) is written as "${NAME}",
+which a replica replaces with the value of that environment variable when it
+reads the file. The StatefulSet sets those variables for each pod.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bitacora.fullname" . }}-replica
+  labels:
+    {{- include "bitacora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+data:
+  replica.toml: |
+    # Written by the bitacora Helm chart. "${NAME}" is replaced by the
+    # replica with the value of the environment variable NAME.
+    # The identity an empty volume gets; a volume that was used keeps its
+    # own. The pod's UID makes it one no replica had before, so a replica
+    # that lost its volume never comes back as the replica it was.
+    replica_id = "${BITA_POD_NAME}-${BITA_POD_UID}"
+    data_directory = "/var/lib/bitacora/replica"
+    listen_address = "0.0.0.0:7000"
+    advertised_address = "${BITA_POD_NAME}.{{ include "bitacora.fullname" . }}-replica.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:7000"
+    {{- if .Values.replica.zoneAware }}
+    failure_domains = ["${BITA_ZONE}", "${BITA_NODE_NAME}"]
+    {{- else }}
+    failure_domains = ["${BITA_NODE_NAME}"]
+    {{- end }}
+    metrics_listen_address = "0.0.0.0:9100"
+    registration_interval_seconds = {{ .Values.replica.registrationIntervalSeconds | int64 }}
+    scrub_interval_seconds = {{ .Values.replica.scrubIntervalSeconds | int64 }}
+    {{ include "bitacora.clusterConfig" . | nindent 4 }}
+
+    [storage]
+    preallocated_segment_bytes = {{ .Values.replica.preallocatedSegmentBytes | int64 }}
+    refuse_new_segments_at_used_percent = {{ .Values.replica.refuseNewSegmentsAtUsedPercent | int64 }}
+    refuse_appends_at_used_percent = {{ .Values.replica.refuseAppendsAtUsedPercent | int64 }}
+    repair_bytes_per_second = {{ .Values.replica.repairBytesPerSecond | int64 }}

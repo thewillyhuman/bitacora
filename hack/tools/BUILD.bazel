@@ -64,3 +64,17 @@ alias(
     ),
     visibility = ["//visibility:public"],
 )
+
+# helm, which lints and renders the chart.
+alias(
+    name = "helm",
+    actual = select(
+        {
+            ":linux_arm64": "@helm_linux_arm64//:helm",
+            ":linux_x86_64": "@helm_linux_x86_64//:helm",
+            ":macos_arm64": "@helm_macos_arm64//:helm",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)
