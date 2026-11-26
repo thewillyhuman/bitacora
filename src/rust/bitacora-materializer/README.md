@@ -10,6 +10,8 @@ queried, and makes it safe to truncate the log behind it (design, section 11).
   (`MaterializerRunner`).
 - A materializer's corner of the artifact store (`ArtifactNamespace`) and the
   deletion of what is no longer used in it (`sweep_orphans`).
+- The way a process that does not run the materializer reads what it last
+  committed (`read_committed_checkpoint`).
 - The two adapters most workloads use instead of the bare contract:
   `PageStore` for engines that update pages and log redo records, and
   `ArtifactCatalog` for append-only data that compacts into files.
@@ -32,7 +34,9 @@ The runner owns the instance and is the only thing that calls it:
    new artifacts, and a manifest that names every artifact in use.
 5. The runner commits the checkpoint with one conditional write that is valid
    only while the token is still its own.
-6. It publishes how far it has applied and committed.
+6. It publishes how far it has applied and committed and, when it stops,
+   why (`RunnerProgress`). A front end waits on that handle and needs no
+   channel of its own into the runner's task.
 
 Three decisions shape the rest:
 
@@ -80,9 +84,9 @@ pending records has them saved, in an artifact the manifest names next to
 the catalog, and the next instance reads them back; a builder that cannot
 has them sealed into one more file, however small. The checkpoint then
 merges the oldest run of neighbours of similar size into one larger file, at
-most one run per checkpoint. Merging reads the files, never the log, because the log below the
-checkpoint may be gone. Files a merge replaced are dropped from the manifest
-and deleted by the sweep after the commit.
+most one run per checkpoint. Merging reads the files, never the log, because
+the log below the checkpoint may be gone. Files a merge replaced are dropped
+from the manifest and deleted by the sweep after the commit.
 
 A catalog entry also carries a summary of its file, written by the builder
 and opaque to the framework: what a reader should know before it fetches
@@ -92,6 +96,21 @@ The records not sealed yet are in the builder only. `ArtifactCatalog::builder`
 gives the builder, so that a front end can take from it whatever it shares
 with readers: a workload that serves its newest data from memory keeps that
 data behind a shared handle in its builder.
+
+### Readers that are not the runner
+
+The artifacts are plain objects, and a query node or a tool may read them
+without running the materializer. Such a process opens the namespace with
+`ArtifactNamespace::read_only` and calls `read_committed_checkpoint`, which
+reads the checkpoint record and the manifest it names. The runner may commit
+a newer checkpoint between the two reads and delete the manifest; the
+function then reads the record again. For a catalog, `decode_catalog` turns
+the manifest's details into the list of files. The stored forms are
+specified in `docs/protocol/checkpoint-manifest.md`.
+
+A reader holds the catalog of the moment it looked. A file it names can be
+merged away afterwards; a reader that finds one gone reads the committed
+checkpoint again.
 
 ## Invariants
 
@@ -122,6 +141,7 @@ data behind a shared handle in its builder.
 | `namespace.rs` | `ArtifactNamespace` and the naming of artifacts |
 | `manifest.rs` | The stored form of a manifest |
 | `runner.rs` | `MaterializerRunner` and its progress reporting |
+| `committed.rs` | `read_committed_checkpoint`, for a process that is not the runner |
 | `sweeper.rs` | `sweep_orphans` and the rule for what is garbage |
 | `layer.rs` | The layer files of the page adapter |
 | `page_store.rs` | `PageMaterializer`, `PageStore`, `PageReader` |
