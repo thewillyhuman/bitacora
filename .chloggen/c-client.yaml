@@ -1,0 +1,4 @@
+change_type: new_component
+component: client
+note: "Add the C client: a C ABI over the Rust client with a generated header, blocking calls, stable status codes that tell fenced, indeterminate and truncated apart, and a static and a shared library to link."
+issues: [6]

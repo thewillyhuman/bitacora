@@ -8,6 +8,7 @@ members = [
     "bitacora",
     "bitacora-artifact",
     "bitacora-artifact-s3",
+    "bitacora-c",
     "bitacora-client",
     "bitacora-clusterkit",
     "bitacora-controller",

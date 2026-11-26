@@ -7,6 +7,10 @@ module(
 
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "platforms", version = "1.1.0")
+
+# Builds the C programs that test the client's C interface. The version is
+# the one rules_rust already brings in.
+bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_rust", version = "0.75.0")
 bazel_dep(name = "rules_shell", version = "0.10.0")
 
@@ -37,6 +41,7 @@ crate.from_cargo(
         "//src/rust/bitacora:Cargo.toml",
         "//src/rust/bitacora-artifact:Cargo.toml",
         "//src/rust/bitacora-artifact-s3:Cargo.toml",
+        "//src/rust/bitacora-c:Cargo.toml",
         "//src/rust/bitacora-client:Cargo.toml",
         "//src/rust/bitacora-clusterkit:Cargo.toml",
         "//src/rust/bitacora-controller:Cargo.toml",

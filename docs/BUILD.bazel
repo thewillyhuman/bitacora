@@ -2,10 +2,12 @@
 
 # These are checked against the code, so that they cannot fall behind it:
 # the metrics reference by the test of every crate that registers metrics,
-# the command reference by the tests of the `bita` tool.
+# the command reference by the tests of the `bita` tool, the C client's
+# example by the test that compiles and runs it.
 exports_files(
     [
         "cli.md",
+        "clients/c.md",
         "operations/metrics.md",
     ],
     visibility = ["//visibility:public"],

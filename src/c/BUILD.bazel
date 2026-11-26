@@ -1,0 +1,116 @@
+"""The C side of the bitacora client: its header, an example and the C tests.
+
+The library itself is Rust: //src/rust/bitacora-c builds it. This package
+holds what a C programmer reads and what proves, with a C compiler, that the
+header and the library fit together.
+"""
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+exports_files(
+    [
+        "examples/quickstart.c",
+        "include/bitacora.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# How every C file here is compiled: as C11, with warnings as errors. The
+# header is on the include path as a project header, not as a system one, so
+# the same strictness applies to it and it stays usable by a strict project.
+_C_OPTIONS = [
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-pedantic",
+]
+
+# The release the library is built with, for the test that asks the library.
+_EXPECTED_RELEASE = "EXPECTED_RELEASE=\\\"%s\\\"" % module_version()
+
+# What the static library needs from the system and cannot say itself: an
+# archive carries no list of what it must be linked with. On macOS it reads
+# the system's root certificates through two frameworks. On Linux everything
+# it needs is in the C library. The shared library records its own needs, so
+# nothing is listed for it. docs/clients/c.md says the same to people who
+# link by hand.
+_STATIC_LINK_OPTIONS = select({
+    "@platforms//os:macos": [
+        "-framework",
+        "CoreFoundation",
+        "-framework",
+        "Security",
+    ],
+    "//conditions:default": [],
+})
+
+# What a C program depends on: the header, and the static library behind it.
+cc_library(
+    name = "bitacora",
+    hdrs = ["include/bitacora.h"],
+    linkopts = _STATIC_LINK_OPTIONS,
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+    deps = ["//src/rust/bitacora-c:bitacora_c_static"],
+)
+
+# The same header in front of the shared library.
+cc_library(
+    name = "bitacora_shared",
+    hdrs = ["include/bitacora.h"],
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+    deps = ["//src/rust/bitacora-c:bitacora_c_shared"],
+)
+
+# Everything a C program can get wrong or ask without a cluster: null
+# arguments, a configuration that cannot work, the version, the messages.
+cc_test(
+    name = "errors_test",
+    size = "small",
+    srcs = [
+        "tests/checks.h",
+        "tests/errors_test.c",
+    ],
+    copts = _C_OPTIONS,
+    local_defines = [_EXPECTED_RELEASE],
+    deps = [":bitacora"],
+)
+
+# The same program against the shared library: it loads and its symbols are
+# exported.
+cc_test(
+    name = "errors_shared_test",
+    size = "small",
+    srcs = [
+        "tests/checks.h",
+        "tests/errors_test.c",
+    ],
+    copts = _C_OPTIONS,
+    local_defines = [_EXPECTED_RELEASE],
+    deps = [":bitacora_shared"],
+)
+
+# The program of docs/clients/c.md. //src/rust/bitacora-c:c_programs_test
+# runs it against a cluster of real processes.
+cc_binary(
+    name = "quickstart",
+    srcs = ["examples/quickstart.c"],
+    copts = _C_OPTIONS,
+    visibility = ["//src/rust/bitacora-c:__pkg__"],
+    deps = [":bitacora"],
+)
+
+# The life of a stream as a database lives it, written in C. The same test
+# runs it.
+cc_binary(
+    name = "end_to_end",
+    srcs = [
+        "tests/checks.h",
+        "tests/end_to_end.c",
+    ],
+    copts = _C_OPTIONS,
+    visibility = ["//src/rust/bitacora-c:__pkg__"],
+    deps = [":bitacora"],
+)

@@ -1,0 +1,112 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_shared_library", "rust_static_library")
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
+
+exports_files([
+    "Cargo.toml",
+    "cbindgen.toml",
+])
+
+# What the crate is built from, three times: as a Rust library for its own
+# tests, and as the static and the shared library that C programs link.
+_SOURCES = glob(
+    ["src/**/*.rs"],
+    exclude = [
+        "src/**/*_test.rs",
+        "src/test_support.rs",
+    ],
+)
+
+_FIRST_PARTY_DEPS = [
+    "//src/rust/bitacora",
+    "//src/rust/bitacora-meta:bitacora_meta",
+    "//src/rust/bitacora-types:bitacora_types",
+]
+
+# The crate as Rust sees it, with its unit tests and the examples in its
+# documentation. Nothing links this into a C program.
+bitacora_library(
+    name = "bitacora_c",
+    test_deps = [
+        "//src/rust/bitacora-segment:bitacora_segment",
+    ],
+    deps = _FIRST_PARTY_DEPS,
+)
+
+# `libbitacora_c.a`: everything a C program needs in one archive.
+rust_static_library(
+    name = "bitacora_c_static",
+    srcs = _SOURCES,
+    aliases = aliases(),
+    crate_name = "bitacora_c",
+    lint_config = ":cargo_lints",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = module_version(),
+    visibility = ["//visibility:public"],
+    deps = _FIRST_PARTY_DEPS + all_crate_deps(normal = True),
+)
+
+# `libbitacora_c.so`, or `.dylib`: the same, to load at run time.
+rust_shared_library(
+    name = "bitacora_c_shared",
+    srcs = _SOURCES,
+    aliases = aliases(),
+    crate_name = "bitacora_c",
+    lint_config = ":cargo_lints",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = module_version(),
+    visibility = ["//visibility:public"],
+    deps = _FIRST_PARTY_DEPS + all_crate_deps(normal = True),
+)
+
+# The C programs of //src/c against etcd, three replica daemons and a
+# controller daemon, and the example of docs/clients/c.md against the file
+# that is compiled. Medium because it starts processes and talks to them over
+# localhost. It finishes in a few seconds; the timeout of a medium test is
+# kept, so that on a machine slow enough to exhaust the test's own allowances
+# it is the test that fails, with what the C program wrote, and not Bazel that
+# kills it without a word.
+bitacora_integration_test(
+    name = "c_programs_test",
+    size = "medium",
+    srcs = ["tests/c_programs_test.rs"],
+    data = [
+        "//docs:clients/c.md",
+        "//src/c:end_to_end",
+        "//src/c:examples/quickstart.c",
+        "//src/c:quickstart",
+        "//src/rust:etcd",
+        "//src/rust/bita-controller",
+        "//src/rust/bita-replica",
+    ],
+    env = {
+        "BITA_CONTROLLER_BINARY": "$(rootpath //src/rust/bita-controller)",
+        "BITA_C_DOCUMENT": "$(rootpath //docs:clients/c.md)",
+        "BITA_C_END_TO_END_BINARY": "$(rootpath //src/c:end_to_end)",
+        "BITA_C_QUICKSTART_BINARY": "$(rootpath //src/c:quickstart)",
+        "BITA_C_QUICKSTART_SOURCE": "$(rootpath //src/c:examples/quickstart.c)",
+        "BITA_ETCD_BINARY": "$(rootpath //src/rust:etcd)",
+        "BITA_REPLICA_BINARY": "$(rootpath //src/rust/bita-replica)",
+    },
+    deps = [
+        "//src/rust/bitacora",
+        "//src/rust/bitacora-clusterkit:bitacora_clusterkit",
+    ],
+)
+
+# The checked-in header against what the Rust source generates. To write the
+# header again after changing a signature or its documentation:
+#
+#   hack/update_c_header.sh
+bitacora_integration_test(
+    name = "header_test",
+    srcs = ["tests/header_test.rs"],
+    data = _SOURCES + [
+        "cbindgen.toml",
+        "//src/c:include/bitacora.h",
+    ],
+    env = {
+        "BITA_C_CRATE_DIRECTORY": package_name(),
+        "BITA_C_HEADER": "$(rootpath //src/c:include/bitacora.h)",
+    },
+)

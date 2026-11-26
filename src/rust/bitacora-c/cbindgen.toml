@@ -1,0 +1,96 @@
+# How src/c/include/bitacora.h is generated from this crate's source.
+#
+# The header is checked in. The test `header_test` generates it again and
+# fails if the result differs; `hack/update_c_header.sh` writes it.
+
+language = "C"
+include_guard = "BITACORA_H"
+no_includes = true
+sys_includes = ["stddef.h", "stdint.h"]
+cpp_compat = true
+documentation = true
+documentation_style = "c99"
+line_length = 100
+tab_width = 4
+usize_is_size_t = true
+
+header = """/*
+ * bitacora.h - the C interface of the bitacora client.
+ *
+ * This file is generated from src/rust/bitacora-c. Do not edit it: change the
+ * Rust source and run hack/update_c_header.sh. docs/clients/c.md explains how
+ * to build against the library and has a complete example.
+ *
+ * The rules that hold for every function:
+ *
+ * Blocking. Every call blocks the calling thread until it has an answer. The
+ * work is done on threads the client owns, and the library never calls back
+ * into the caller's code.
+ *
+ * Status. Every call that can fail returns a bitacora_status. Anything other
+ * than BITACORA_STATUS_OK leaves a message for people in
+ * bitacora_last_error_message(), per thread. Decide on the status, log the
+ * message.
+ *
+ * Ownership. A handle the library returns belongs to the caller until the
+ * caller passes it to the matching _free function, exactly once. Text and
+ * bytes the caller passes in are copied before the call returns and need not
+ * outlive it. Pointers the library returns into its own memory say for how
+ * long they are valid.
+ *
+ * Threads. A client and a reader may be used by any number of threads at
+ * once. A writer may be appended to by any number of threads at once; close
+ * and free need it to themselves. A follower serves one call at a time.
+ * Records may be read by any number of threads at once. Freeing a handle
+ * needs that handle to itself.
+ *
+ * Processes. A client must not be used in a child process after fork(): the
+ * child has the handles and none of the threads behind them. Make no call on
+ * an inherited handle, not even to free it, and connect again in the child.
+ *
+ * Signals. The library installs no signal handlers and changes no signal
+ * masks. Every thread it starts descends from the thread that connects and
+ * starts with the signal mask that thread has while it connects: block
+ * signals around the connect if handlers must not run on those threads. A
+ * signal does not interrupt a call; give calls a timeout instead. No function
+ * here may be called from a signal handler.
+ *
+ * Arguments. A required pointer that is null, and text that is not valid
+ * UTF-8, are reported as BITACORA_STATUS_INVALID_ARGUMENT; nothing is
+ * dereferenced. A pointer that is not null must point to what the function
+ * says, for the whole call: that cannot be checked.
+ *
+ * Structures that have a struct_size field: set it to sizeof() of the
+ * structure before passing it, and zero the fields that are not needed. The
+ * size is what lets a later version add fields without breaking programs
+ * compiled against this header.
+ *
+ * In the description of a function, "Safety" lists what the caller must
+ * guarantee and the library cannot check.
+ */"""
+
+[export]
+# Constants and structures that no function names in its signature.
+include = ["Payload", "ClientOptions", "StreamOptions", "StreamDescription"]
+
+[export.rename]
+"BitacoraStatus" = "bitacora_status"
+"ClientHandle" = "bitacora_client"
+"ClientOptions" = "bitacora_client_options"
+"WriterHandle" = "bitacora_writer"
+"Payload" = "bitacora_payload"
+"ReaderHandle" = "bitacora_reader"
+"FollowerHandle" = "bitacora_follower"
+"RecordsHandle" = "bitacora_records"
+"StreamOptions" = "bitacora_stream_options"
+"StreamDescription" = "bitacora_stream_description"
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
+prefix_with_name = true
+
+[fn]
+sort_by = "None"
+
+[parse]
+parse_deps = false

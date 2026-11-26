@@ -24,6 +24,7 @@ implementing it are recorded in [docs/decisions](docs/decisions).
 | `docs/` | The design, the wire and disk formats, decision records, guides |
 | `src/proto/` | The wire protocol, as language-neutral Protocol Buffers definitions |
 | `src/rust/` | The Cargo workspace: one crate per component |
+| `src/c/` | The C client: its header, an example and the C tests; see [docs/clients/c.md](docs/clients/c.md) |
 | `development/` | Scripts and files for working on bitacora locally |
 | `hack/` | Scripts that manage the repository: checks, changelog, releases |
 | `.chloggen/` | Pending changelog entries, one small file per change |

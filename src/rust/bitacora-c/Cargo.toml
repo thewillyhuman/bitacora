@@ -1,0 +1,42 @@
+[package]
+name = "bitacora-c"
+description = "The C interface of the bitacora client: blocking functions over opaque handles, for programs that are not written in Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "bitacora_c"
+# A static and a shared library for C programs to link, and a Rust library
+# for this crate's own tests.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+bitacora.workspace = true
+# Named for types the client's interface uses and does not export itself: the
+# error of the metadata store, every case of which has to become a status,
+# and the retention and replication of a new stream.
+bitacora-meta.workspace = true
+bitacora-types.workspace = true
+bytes.workspace = true
+# Calls block the caller, so the client's own work needs threads of its own,
+# a clock for the waits that have a limit, and a lock a task can wait for.
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+toml.workspace = true
+
+[dev-dependencies]
+bitacora-clusterkit.workspace = true
+# Named for one error value: a test of the status mapping needs a record
+# that was refused.
+bitacora-segment.workspace = true
+# Generates the C header from the Rust source, in the test that keeps the
+# checked-in header equal to it. Without its command line.
+cbindgen = { version = "0.29", default-features = false }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true
