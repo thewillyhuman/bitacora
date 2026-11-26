@@ -59,6 +59,9 @@
 //!
 //! - Planning is pure: the same inventory gives the same plan, and nothing is asked or written.
 //! - Nothing is written without `--apply`, and nothing with problems without `--force`.
+//! - A missing object store is a problem unless the operator says the cluster has none (`--no-object-store`):
+//!   nothing configured and a configuration that was forgotten look the same, and the second would leave the
+//!   segments in the object store out of the rebuilt records.
 //! - A stream recorded as deleted is never rebuilt: its records are being removed on purpose.
 //! - No replica is told to change anything. Rebuilding only writes to the metadata store.
 //! - [`rebuild`] asks in a fixed order: the registered replicas, each replica's copies, the object store,
@@ -908,6 +911,18 @@ fn render_list(rendered: &mut String, title: &str, sentences: &[String]) {
     }
 }
 
+/// What the operator asked of a rebuild besides planning it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RebuildMode {
+    /// Write the planned records. Without it, the plan is only returned.
+    pub(crate) is_applied: bool,
+    /// Write what could be planned although the plan has problems.
+    pub(crate) is_forced: bool,
+    /// The operator says that the cluster has no object store, so that finding none configured is not a
+    /// problem of the plan.
+    pub(crate) has_no_object_store: bool,
+}
+
 /// Rebuilds stream records from what the replicas and the object store hold.
 ///
 /// See the file header. The replicas are only asked what they hold; nothing is changed on them.
@@ -918,8 +933,8 @@ fn render_list(rendered: &mut String, title: &str, sentences: &[String]) {
 /// * `names` - The names of streams the metadata store does not know, as (stream identifier, name).
 /// * `extra_replicas` - Replicas to ask that are not registered, as (identifier, address). An entry for a
 ///   registered replica replaces its address.
-/// * `is_applied` - Write the planned records. Without it, the plan is only returned.
-/// * `is_forced` - Write what could be planned although the plan has problems.
+/// * `mode` - Whether to write the plan, whether to write it although it has problems, and whether the
+///   operator says the cluster has no object store.
 ///
 /// # Returns
 ///
@@ -928,20 +943,26 @@ fn render_list(rendered: &mut String, title: &str, sentences: &[String]) {
 /// # Errors
 ///
 /// * [`CommandError::NothingToDo`] if no replica is registered and none was named.
-/// * [`CommandError::Refused`] if the plan has problems and is to be applied without force. Nothing is
-///   written then.
+/// * [`CommandError::Refused`] if the plan has problems and is to be applied without force, or if the
+///   operator says there is no object store while the configuration names one. Nothing is written then.
 /// * [`CommandError::Metadata`] if the metadata store is unavailable or refuses a record.
 pub(crate) async fn rebuild(
     cluster: &Cluster,
     names: &[(u64, String)],
     extra_replicas: &[(ReplicaId, String)],
-    is_applied: bool,
-    is_forced: bool,
+    mode: RebuildMode,
 ) -> Result<RebuildReport, CommandError> {
+    if mode.has_no_object_store && cluster.artifact_store.is_some() {
+        return Err(CommandError::Refused {
+            reason: "--no-object-store was given, but the configuration names an object store; drop one of \
+                     the two"
+                .to_owned(),
+        });
+    }
     let addresses_by_replica = replicas_to_ask(cluster, extra_replicas).await?;
     let mut report = RebuildReport::empty();
     let inventories = gather_inventories(cluster, &addresses_by_replica, &mut report).await;
-    let tiered_objects = find_tiered_objects(cluster, &mut report.problems).await;
+    let tiered_objects = find_tiered_objects(cluster, mode.has_no_object_store, &mut report.problems).await;
     report.tiered_objects = tiered_objects.len();
 
     let inputs = gather_what_is_known(cluster, names, inventories, tiered_objects).await?;
@@ -949,8 +970,8 @@ pub(crate) async fn rebuild(
     for planned in &planned_streams {
         report.streams.push(rebuilt_stream(planned));
     }
-    if is_applied {
-        apply_plan(cluster, &planned_streams, is_forced, &mut report).await?;
+    if mode.is_applied {
+        apply_plan(cluster, &planned_streams, mode.is_forced, &mut report).await?;
     }
     Ok(report)
 }
@@ -1124,15 +1145,23 @@ fn rebuilt_stream(planned: &PlannedStream) -> RebuiltStream {
 
 /// Lists the tiered segment objects and reads the footer of each.
 ///
-/// If the configuration names no object store, or the store cannot be listed, that is added to `problems`
-/// and nothing is found: the segments that were left to the object store are then missing from the plan.
-async fn find_tiered_objects(cluster: &Cluster, problems: &mut Vec<String>) -> Vec<TieredObject> {
+/// If the store cannot be listed, that is added to `problems` and nothing is found: the segments that were
+/// left to the object store are then missing from the plan. The same goes for a configuration that names
+/// no object store, unless the operator said that the cluster has none: nothing configured and a
+/// configuration that was forgotten look the same from here, and only one of them is harmless.
+async fn find_tiered_objects(
+    cluster: &Cluster,
+    has_no_object_store: bool,
+    problems: &mut Vec<String>,
+) -> Vec<TieredObject> {
     let Some(artifact_store) = &cluster.artifact_store else {
-        problems.push(
-            "the configuration names no object store: segments that were left to the object \
-             store cannot be found"
-                .to_owned(),
-        );
+        if !has_no_object_store {
+            problems.push(
+                "the configuration names no object store: segments that were left to the object \
+                 store cannot be found; if the cluster has none, say so with --no-object-store"
+                    .to_owned(),
+            );
+        }
         return Vec::new();
     };
     let listing = timeout(

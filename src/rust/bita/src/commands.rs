@@ -288,9 +288,17 @@ async fn run_metadata_command(command: &MetadataCommand, cluster: &Cluster) -> R
             replicas,
             apply,
             force,
-        } => Ok(CommandOutput::RebuildReport(
-            rebuild::rebuild(cluster, names, replicas, *apply, *force).await?,
-        )),
+            no_object_store,
+        } => {
+            let mode = rebuild::RebuildMode {
+                is_applied: *apply,
+                is_forced: *force,
+                has_no_object_store: *no_object_store,
+            };
+            Ok(CommandOutput::RebuildReport(
+                rebuild::rebuild(cluster, names, replicas, mode).await?,
+            ))
+        }
     }
 }
 

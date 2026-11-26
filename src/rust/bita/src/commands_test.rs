@@ -505,6 +505,7 @@ async fn metadata_rebuild_command_plans_without_applying_by_default() {
         replicas: Vec::new(),
         apply: false,
         force: false,
+        no_object_store: false,
     });
 
     let output = run_command(&started, command).await.expect("runs");

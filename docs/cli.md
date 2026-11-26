@@ -311,7 +311,9 @@ still on the replicas and in the object store, and these commands put the metada
 5. If the plan is right, write it: `bita metadata rebuild --apply`.
 6. Start the controllers, then the writers.
 
-Without an object store there are no snapshots, and the procedure starts at step 4.
+Without an object store there are no snapshots, and the procedure starts at step 4. Say so in steps 4
+and 5 with `--no-object-store`: the tool cannot tell a cluster that has no object store from a
+configuration that leaves it out, and treats a missing one as a problem of the plan.
 
 ### `bita metadata snapshot list`
 
@@ -397,6 +399,11 @@ What the plan does with what it finds:
   controller rebuild it elsewhere.
 - A segment with an object and no file on any replica is recorded as left to the object store.
 - The epoch is set above every epoch found, so that the next writer fences everything.
+
+A plan can have problems: a replica that did not answer, a stream without a name, an object store that
+cannot be listed or is not configured. A plan with problems is not written; `--force` writes what could
+be rebuilt all the same. `--no-object-store` says that the cluster has no object store, which removes
+that one problem without forcing the others.
 
 What cannot be recovered, because replicas do not store it:
 

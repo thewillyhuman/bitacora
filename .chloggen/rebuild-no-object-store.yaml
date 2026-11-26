@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: cli
+note: "bita metadata rebuild takes --no-object-store for a cluster that has none. Without it, such a cluster could only be rebuilt with --force, although the documented procedure said --apply: the tool counts a missing object store as a problem of the plan, because it cannot tell it from a forgotten configuration."
+issues: [3]

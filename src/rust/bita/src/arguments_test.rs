@@ -260,6 +260,21 @@ fn metadata_rebuild_only_plans_by_default() {
             replicas: Vec::new(),
             apply: false,
             force: false,
+            no_object_store: false,
+        })
+    );
+}
+
+#[test]
+fn metadata_rebuild_can_be_told_that_the_cluster_has_no_object_store() {
+    assert_eq!(
+        command_of("bita metadata rebuild --no-object-store --apply"),
+        Command::Metadata(MetadataCommand::Rebuild {
+            names: Vec::new(),
+            replicas: Vec::new(),
+            apply: true,
+            force: false,
+            no_object_store: true,
         })
     );
 }
@@ -279,6 +294,7 @@ fn metadata_rebuild_takes_names_and_replicas() {
             )],
             apply: true,
             force: false,
+            no_object_store: false,
         })
     );
 }

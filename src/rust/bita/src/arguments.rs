@@ -308,6 +308,11 @@ pub(crate) enum MetadataCommand {
         /// Write what could be rebuilt although the plan has problems.
         #[arg(long)]
         force: bool,
+        /// Say that the cluster has no object store. Finding none configured is then not a problem
+        /// of the plan; without this option it is, because a configuration that was forgotten looks
+        /// the same and would leave the segments in the object store out of the rebuilt records.
+        #[arg(long)]
+        no_object_store: bool,
     },
 }
 

@@ -624,7 +624,7 @@ async fn dry_run_shows_the_plan_and_writes_nothing() {
     let started = cluster_that_lost_its_metadata_store().await;
     let keys_before = started.metadata_key_count().await;
 
-    let report = rebuild(&started.cluster, &names(), &[], false, false)
+    let report = rebuild(&started.cluster, &names(), &[], RebuildMode::default())
         .await
         .expect("the plan is made");
 
@@ -637,7 +637,7 @@ async fn dry_run_shows_the_plan_and_writes_nothing() {
 async fn plan_lists_every_segment_that_still_holds_records() {
     let started = cluster_that_lost_its_metadata_store().await;
 
-    let report = rebuild(&started.cluster, &names(), &[], false, false)
+    let report = rebuild(&started.cluster, &names(), &[], RebuildMode::default())
         .await
         .expect("the plan is made");
 
@@ -661,9 +661,17 @@ async fn plan_lists_every_segment_that_still_holds_records() {
 async fn rebuilt_stream_serves_every_committed_record_and_takes_new_ones() {
     let started = cluster_that_lost_its_metadata_store().await;
 
-    let report = rebuild(&started.cluster, &names(), &[], true, false)
-        .await
-        .expect("the plan is applied");
+    let report = rebuild(
+        &started.cluster,
+        &names(),
+        &[],
+        RebuildMode {
+            is_applied: true,
+            ..RebuildMode::default()
+        },
+    )
+    .await
+    .expect("the plan is applied");
     started.run_controller_pass().await;
     stream::append(
         &started.cluster,
@@ -685,9 +693,17 @@ async fn rebuilt_stream_serves_every_committed_record_and_takes_new_ones() {
 #[tokio::test(start_paused = true)]
 async fn controller_rebuilds_the_copy_that_was_lost_once_the_stream_is_rebuilt() {
     let started = cluster_that_lost_its_metadata_store().await;
-    rebuild(&started.cluster, &names(), &[], true, false)
-        .await
-        .expect("the plan is applied");
+    rebuild(
+        &started.cluster,
+        &names(),
+        &[],
+        RebuildMode {
+            is_applied: true,
+            ..RebuildMode::default()
+        },
+    )
+    .await
+    .expect("the plan is applied");
 
     // The controller verifies the copies that were found and rebuilds the one that was not.
     let first_pass = started.run_controller_pass().await;
@@ -700,9 +716,17 @@ async fn controller_rebuilds_the_copy_that_was_lost_once_the_stream_is_rebuilt()
 #[tokio::test(start_paused = true)]
 async fn stream_created_after_a_rebuild_does_not_reuse_an_identifier() {
     let started = cluster_that_lost_its_metadata_store().await;
-    rebuild(&started.cluster, &names(), &[], true, false)
-        .await
-        .expect("the plan is applied");
+    rebuild(
+        &started.cluster,
+        &names(),
+        &[],
+        RebuildMode {
+            is_applied: true,
+            ..RebuildMode::default()
+        },
+    )
+    .await
+    .expect("the plan is applied");
 
     let created = stream::create(&started.cluster, "audit", 3, 2, None)
         .await
@@ -715,7 +739,16 @@ async fn stream_created_after_a_rebuild_does_not_reuse_an_identifier() {
 async fn rebuild_without_a_name_for_the_stream_is_not_applied() {
     let started = cluster_that_lost_its_metadata_store().await;
 
-    let refused = rebuild(&started.cluster, &[], &[], true, false).await;
+    let refused = rebuild(
+        &started.cluster,
+        &[],
+        &[],
+        RebuildMode {
+            is_applied: true,
+            ..RebuildMode::default()
+        },
+    )
+    .await;
 
     assert!(matches!(refused, Err(CommandError::Refused { .. })));
     assert!(stream::describe(&started.cluster, STREAM).await.is_err());
@@ -733,7 +766,7 @@ async fn replica_that_does_not_answer_is_a_problem_of_the_plan() {
     let started = cluster_that_lost_its_metadata_store().await;
     let cut_off_replica = cut_off_one_replica(&started);
 
-    let report = rebuild(&started.cluster, &names(), &[], false, false)
+    let report = rebuild(&started.cluster, &names(), &[], RebuildMode::default())
         .await
         .expect("the plan is made");
 
@@ -751,9 +784,28 @@ async fn replica_that_does_not_answer_is_a_problem_of_the_plan() {
 async fn plan_with_problems_is_applied_only_when_forced() {
     let started = cluster_that_lost_its_metadata_store().await;
     cut_off_one_replica(&started);
-    let refused = rebuild(&started.cluster, &names(), &[], true, false).await;
+    let refused = rebuild(
+        &started.cluster,
+        &names(),
+        &[],
+        RebuildMode {
+            is_applied: true,
+            ..RebuildMode::default()
+        },
+    )
+    .await;
 
-    let forced = rebuild(&started.cluster, &names(), &[], true, true).await;
+    let forced = rebuild(
+        &started.cluster,
+        &names(),
+        &[],
+        RebuildMode {
+            is_applied: true,
+            is_forced: true,
+            ..RebuildMode::default()
+        },
+    )
+    .await;
 
     assert!(matches!(refused, Err(CommandError::Refused { .. })));
     assert!(forced.is_ok_and(|report| report.is_applied));
@@ -775,8 +827,7 @@ async fn replica_named_on_the_command_line_is_asked_although_it_is_not_registere
         &started.cluster,
         &names(),
         &[(unregistered.clone(), address)],
-        false,
-        false,
+        RebuildMode::default(),
     )
     .await
     .expect("the plan is made");
@@ -793,7 +844,7 @@ async fn rebuild_with_no_replica_to_ask_does_nothing() {
     let started = TestCluster::start(3).await;
     started.lose_the_metadata_store().await;
 
-    let refused = rebuild(&started.cluster, &names(), &[], false, false).await;
+    let refused = rebuild(&started.cluster, &names(), &[], RebuildMode::default()).await;
 
     assert!(matches!(refused, Err(CommandError::NothingToDo { .. })));
 }
@@ -803,10 +854,75 @@ async fn rebuild_without_an_object_store_says_what_it_cannot_find() {
     let mut started = cluster_that_lost_its_metadata_store().await;
     started.cluster.artifact_store = None;
 
-    let report = rebuild(&started.cluster, &names(), &[], false, false)
+    let report = rebuild(&started.cluster, &names(), &[], RebuildMode::default())
         .await
         .expect("the plan is made");
 
     assert_eq!(report.tiered_objects, 0);
     assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+}
+
+/// A cluster may have no object store at all. The tool cannot know: nothing configured looks the same as
+/// a configuration that was forgotten, and a forgotten one would leave the segments in the object store out
+/// of the rebuilt records. So the operator says it.
+#[tokio::test(start_paused = true)]
+async fn rebuild_of_a_cluster_said_to_have_no_object_store_has_no_problem() {
+    let mut started = cluster_that_lost_its_metadata_store().await;
+    started.cluster.artifact_store = None;
+    let no_object_store = RebuildMode {
+        has_no_object_store: true,
+        ..RebuildMode::default()
+    };
+
+    let report = rebuild(&started.cluster, &names(), &[], no_object_store)
+        .await
+        .expect("the plan is made");
+
+    assert_eq!(report.problems, Vec::<String>::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn rebuild_of_a_cluster_said_to_have_no_object_store_is_applied_without_force() {
+    let mut started = cluster_that_lost_its_metadata_store().await;
+    started.cluster.artifact_store = None;
+    let apply_without_an_object_store = RebuildMode {
+        is_applied: true,
+        has_no_object_store: true,
+        ..RebuildMode::default()
+    };
+
+    let applied = rebuild(&started.cluster, &names(), &[], apply_without_an_object_store).await;
+
+    assert!(applied.is_ok_and(|report| report.is_applied));
+}
+
+#[tokio::test(start_paused = true)]
+async fn problem_of_a_missing_object_store_says_how_to_state_that_there_is_none() {
+    let mut started = cluster_that_lost_its_metadata_store().await;
+    started.cluster.artifact_store = None;
+
+    let report = rebuild(&started.cluster, &names(), &[], RebuildMode::default())
+        .await
+        .expect("the plan is made");
+
+    assert!(
+        report.problems[0].contains("--no-object-store"),
+        "{:?}",
+        report.problems
+    );
+}
+
+/// Saying that there is none while the configuration names one is a contradiction, not a preference: the
+/// objects would be left out of the plan although they can be read.
+#[tokio::test(start_paused = true)]
+async fn saying_there_is_no_object_store_while_one_is_configured_is_refused() {
+    let started = cluster_that_lost_its_metadata_store().await;
+    let no_object_store = RebuildMode {
+        has_no_object_store: true,
+        ..RebuildMode::default()
+    };
+
+    let refused = rebuild(&started.cluster, &names(), &[], no_object_store).await;
+
+    assert!(matches!(refused, Err(CommandError::Refused { .. })), "{refused:?}");
 }
