@@ -56,7 +56,6 @@ use bitacora_materializer::{
 use bitacora_meta::{MetaError, MetadataStore};
 use bitacora_types::SequenceNumber;
 use thiserror::Error;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -224,8 +223,6 @@ pub struct MetricsStore<P: BlockPolicy = StandardBlocks> {
     progress: RunnerProgress,
     /// The task that runs the materializer. Aborted when the store is dropped.
     runner_task: JoinHandle<()>,
-    /// Why the materializer stopped, once it has.
-    stop_reason: watch::Receiver<Option<RunnerError>>,
     /// How long a query waits for the record it asked to see.
     query_wait: Duration,
     /// The policy is a type; nothing of it is stored.
@@ -311,12 +308,9 @@ impl<P: BlockPolicy> MetricsStore<P> {
         let head = runner.materializer().builder().head();
         let catalog = runner.materializer().view();
         let progress = runner.progress();
-        let (stop_reason_sender, stop_reason) = watch::channel(None);
         let runner_task = tokio::spawn(async move {
             let reason = runner.run().await;
             tracing::warn!(%reason, "the metrics store's materializer stopped");
-            // Nobody listens once the store is dropped, and then nobody needs the reason.
-            drop(stop_reason_sender.send(Some(reason)));
         });
         Ok(Self {
             writer,
@@ -326,7 +320,6 @@ impl<P: BlockPolicy> MetricsStore<P> {
             block_indexes: BlockIndexCache::default(),
             progress,
             runner_task,
-            stop_reason,
             query_wait: settings.query_wait,
             policy: PhantomData,
         })
@@ -427,17 +420,12 @@ impl<P: BlockPolicy> MetricsStore<P> {
         match timeout(self.query_wait, progress.wait_until_applied(sequence)).await {
             Ok(Ok(_progress)) => Ok(()),
             Err(_timed_out) => Err(not_applied),
-            Ok(Err(_runner_stopped)) => {
-                // A materializer that has stopped will never get there. Its task reports why right
-                // after the runner returns; the wait ends without a reason only if the task died.
-                let mut stop_reason = self.stop_reason.clone();
-                match stop_reason.wait_for(Option::is_some).await {
-                    Ok(reason) => Err(MetricsError::Materializer(
-                        reason.clone().expect("the wait ends on a reason"),
-                    )),
-                    Err(_task_died) => Err(not_applied),
-                }
-            }
+            // A materializer that has stopped will never get there. It says why, unless its task was
+            // stopped from outside.
+            Ok(Err(runner_stopped)) => match runner_stopped.reason {
+                Some(reason) => Err(MetricsError::Materializer(reason)),
+                None => Err(not_applied),
+            },
         }
     }
 }
