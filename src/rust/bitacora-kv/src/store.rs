@@ -68,7 +68,7 @@
 //! - `pages.rs`: the pages read here.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
@@ -207,8 +207,6 @@ pub struct KvStore {
     progress: RunnerProgress,
     /// The task that runs the materializer. Aborted when the store is dropped.
     runner_task: JoinHandle<()>,
-    /// Why the materializer stopped, once it has.
-    stopped: Arc<OnceLock<RunnerError>>,
     /// How long reads wait.
     read_wait: Duration,
 }
@@ -271,20 +269,15 @@ impl KvStore {
             MaterializerRunner::<PageStore<KvPages>>::start(runner_dependencies, stream_name, runner_settings).await?;
         let pages = runner.materializer().reader();
         let progress = runner.progress();
-        let stopped = Arc::new(OnceLock::new());
-        let stopped_by_the_task = Arc::clone(&stopped);
         let runner_task = tokio::spawn(async move {
             let reason = runner.run().await;
             tracing::warn!(%reason, "the key-value store's materializer stopped");
-            // The task is the only one that sets it, so it cannot be set already.
-            drop(stopped_by_the_task.set(reason));
         });
         Ok(Self {
             writer,
             pages,
             progress,
             runner_task,
-            stopped,
             read_wait: settings.read_wait,
         })
     }
@@ -461,8 +454,8 @@ impl KvStore {
             Ok(page) => Ok(page),
             Err(not_reached @ PageReadError::NotReached { .. }) => {
                 // A materializer that has stopped will never get there; say that instead.
-                match self.stopped.get() {
-                    Some(reason) => Err(KvError::Materializer(reason.clone())),
+                match self.progress.stop_reason() {
+                    Some(reason) => Err(KvError::Materializer(reason)),
                     None => Err(KvError::Read(not_reached)),
                 }
             }
