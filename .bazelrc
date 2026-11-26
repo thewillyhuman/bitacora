@@ -10,6 +10,11 @@ build --incompatible_strict_action_env
 # integration saves and restores the same directory.
 build --@rules_rust//rust/settings:pipelined_compilation=True
 build --disk_cache=~/.cache/bitacora/bazel-disk
+# The disk cache is shared by every checkout and worktree of the repository
+# and only ever grew. When Bazel has been idle for a few minutes it now
+# removes the entries used longest ago until the cache is back under this
+# size, which is a few full builds in both configurations.
+build --experimental_disk_cache_gc_max_size=8G
 common --repository_cache=~/.cache/bitacora/bazel-repository
 
 # One configuration file per tool, shared with cargo.
