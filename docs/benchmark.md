@@ -15,6 +15,10 @@ question; nothing in this page is a measurement of bitacora.
 directly and replace what the file says. The tool reads no environment variables: the command line of a
 benchmark should say everything about the run.
 
+In a container, the tool is the image `bita-bench`: a Kubernetes Job next to a cluster runs it with the
+same arguments, for example `--etcd-endpoint http://etcd:2379 append bench --create`. Put the Job on a
+node that runs no replica: the tool is part of what is measured.
+
 ## Output and exit codes
 
 The report is printed to standard output, one value per line, or as JSON with `--output json`. The JSON

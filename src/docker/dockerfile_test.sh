@@ -13,14 +13,15 @@
 #   BAZELRC                 the .bazelrc of the repository
 #   REPLICA_CONFIG          the example configuration of bita-replica
 #   CONTROLLER_CONFIG       the example configuration of bita-controller
-#   BITA_REPLICA_BINARY     the three programs, as Bazel builds them
+#   BITA_REPLICA_BINARY     the four programs, as Bazel builds them
 #   BITA_CONTROLLER_BINARY
 #   BITA_BINARY
+#   BITA_BENCH_BINARY
 set -euo pipefail
 
 : "${DOCKERFILE:?}" "${DOCKERIGNORE:?}" "${BUILD_IMAGES:?}" "${BAZELRC:?}"
 : "${REPLICA_CONFIG:?}" "${CONTROLLER_CONFIG:?}"
-: "${BITA_REPLICA_BINARY:?}" "${BITA_CONTROLLER_BINARY:?}" "${BITA_BINARY:?}"
+: "${BITA_REPLICA_BINARY:?}" "${BITA_CONTROLLER_BINARY:?}" "${BITA_BINARY:?}" "${BITA_BENCH_BINARY:?}"
 
 failures=0
 
@@ -86,7 +87,7 @@ sorted() {
     tr ' ' '\n' <<<"$*" | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' '
 }
 
-# Checks what the three images have in common: the program is the one the
+# Checks what the four images have in common: the program is the one the
 # build stage builds, it is what the image starts, and the image does not
 # run as root.
 check_image() {
@@ -200,6 +201,7 @@ check_build_stage
 check_image bita-replica "${BITA_REPLICA_BINARY}"
 check_image bita-controller "${BITA_CONTROLLER_BINARY}"
 check_image bita "${BITA_BINARY}"
+check_image bita-bench "${BITA_BENCH_BINARY}"
 check_daemon bita-replica "${BITA_REPLICA_BINARY}" "${REPLICA_CONFIG}" listen_address metrics_listen_address
 check_daemon bita-controller "${BITA_CONTROLLER_BINARY}" "${CONTROLLER_CONFIG}" metrics_listen_address
 check_replica_volume

@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "A fourth container image, bita-bench, runs the benchmark tool next to a cluster. hack/build_images.sh also takes the version of a release candidate, X.Y.Z-rc.N."
+issues: [5]

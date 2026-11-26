@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests hack/build_images.sh without a container runtime: a stand-in for
-# `docker` writes down how it was called, and the test checks that the three
+# `docker` writes down how it was called, and the test checks that the four
 # images are built from the right file, stage, version and tag.
 #
 # Usage: build_images_test.sh <build_images.sh>
@@ -47,17 +47,19 @@ expect_call() {
 echo "--- without a version, the version of MODULE.bazel is used"
 : >"${calls}"
 output="$("${repository}/hack/build_images.sh" 2>/dev/null)"
-[[ "$(wc -l <"${calls}" | tr -d ' ')" == 3 ]] || fail "expected three builds, got: $(cat "${calls}")"
+[[ "$(wc -l <"${calls}" | tr -d ' ')" == 4 ]] || fail "expected four builds, got: $(cat "${calls}")"
 expect_call 1 "build" "--file ${repository}/src/docker/Dockerfile" "--target bita-replica" \
     "--build-arg VERSION=1.2.3" "--tag bitacora/bita-replica:1.2.3"
 expect_call 2 "--target bita-controller" "--tag bitacora/bita-controller:1.2.3"
 expect_call 3 "--target bita " "--tag bitacora/bita:1.2.3"
+expect_call 4 "--target bita-bench" "--tag bitacora/bita-bench:1.2.3"
 # The build context is the root of the repository, and comes last.
 [[ "$(sed -n 1p "${calls}")" == *" ${repository}" ]] || fail "the build context is not the repository"
 [[ "$(sed -n 1p "${calls}")" != *"--platform"* ]] || fail "a platform was given without being asked for"
 expected_tags="bitacora/bita-replica:1.2.3
 bitacora/bita-controller:1.2.3
-bitacora/bita:1.2.3"
+bitacora/bita:1.2.3
+bitacora/bita-bench:1.2.3"
 [[ "${output}" == "${expected_tags}" ]] || fail "the tags printed are not the tags built: ${output}"
 
 echo "--- a version, a repository and a platform are honoured"

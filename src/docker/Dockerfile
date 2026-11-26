@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 #
-# The container images of bitacora: one for each daemon and one for the bita
-# tool, all three from one Bazel release build.
+# The container images of bitacora: one for each daemon, one for the bita
+# tool and one for the benchmark tool, all four from one Bazel release build.
 #
 #   docker build --file src/docker/Dockerfile --target bita-replica \
 #       --tag bitacora/bita-replica:0.1.0 .
 #
 # The build context is the root of the repository. hack/build_images.sh
-# builds and tags all three; README.md in this directory says how to run
+# builds and tags all four; README.md in this directory says how to run
 # them.
 
 # The Debian release of the image that builds and of the images that run.
@@ -16,7 +16,7 @@
 ARG DEBIAN_RELEASE=13
 
 # ---------------------------------------------------------------------------
-# build: compiles the three programs.
+# build: compiles the four programs.
 # ---------------------------------------------------------------------------
 FROM debian:${DEBIAN_RELEASE}-slim AS build
 
@@ -60,15 +60,17 @@ COPY --chown=1000:1000 . .
 # it to stop with `bazel shutdown` fails here, because nothing in a build
 # container collects the process once it has exited.
 RUN --mount=type=cache,target=/home/builder/.cache,uid=1000,gid=1000,sharing=locked \
-    bazel build --config=release //src/rust/bita-replica //src/rust/bita-controller //src/rust/bita \
+    bazel build --config=release \
+        //src/rust/bita-replica //src/rust/bita-controller //src/rust/bita //src/rust/bita-bench \
     && mkdir -p /home/builder/out/state \
     && cp bazel-bin/src/rust/bita-replica/bita-replica \
         bazel-bin/src/rust/bita-controller/bita-controller \
         bazel-bin/src/rust/bita/bita \
+        bazel-bin/src/rust/bita-bench/bita-bench \
         /home/builder/out/
 
 # ---------------------------------------------------------------------------
-# runtime: what the three images share. It has the C library and the
+# runtime: what the four images share. It has the C library and the
 # certificate authorities and nothing else: no shell, no package manager.
 # ---------------------------------------------------------------------------
 FROM gcr.io/distroless/cc-debian${DEBIAN_RELEASE}:nonroot AS runtime
@@ -132,4 +134,18 @@ LABEL org.opencontainers.image.title="bita" \
 COPY --from=build /home/builder/out/bita /usr/bin/bita
 
 ENTRYPOINT ["/usr/bin/bita"]
+CMD ["--help"]
+
+# ---------------------------------------------------------------------------
+# bita-bench: the benchmark tool, for a job next to a cluster. It measures
+# from where it runs, so give it a machine the daemons do not share.
+# ---------------------------------------------------------------------------
+FROM runtime AS bita-bench
+
+LABEL org.opencontainers.image.title="bita-bench" \
+      org.opencontainers.image.description="bitacora benchmark tool"
+
+COPY --from=build /home/builder/out/bita-bench /usr/bin/bita-bench
+
+ENTRYPOINT ["/usr/bin/bita-bench"]
 CMD ["--help"]
