@@ -21,6 +21,7 @@ go_library(
         "//src/go/internal/replica",
         "//src/go/internal/tiered",
         "@io_etcd_go_etcd_client_v3//:client",
+        "@org_uber_go_zap//:zap",
     ],
 )
 

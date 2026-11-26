@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -19,7 +20,9 @@ func TestConnectNeedsAnEtcdEndpoint(t *testing.T) {
 	}
 }
 
-func TestAnEtcdThatIsDownShowsOnTheFirstOperation(t *testing.T) {
+// connectToNothing returns a client for an etcd endpoint nobody listens on.
+func connectToNothing(t *testing.T) *Client {
+	t.Helper()
 	// A port nobody listens on: take one and give it back.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -33,12 +36,44 @@ func TestAnEtcdThatIsDownShowsOnTheFirstOperation(t *testing.T) {
 		t.Fatalf("Connect sends nothing and must not fail: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+func TestAnEtcdThatIsDownShowsOnTheFirstOperation(t *testing.T) {
+	client := connectToNothing(t)
 
 	if _, err := client.OpenReader("orders").ReadRange(t.Context(), 1, 10); !errors.Is(err, ErrUnavailable) {
 		t.Errorf("ReadRange without etcd = %v, want ErrUnavailable", err)
 	}
 	if _, err := client.OpenReader("orders").LowWaterMark(t.Context()); !errors.Is(err, ErrUnavailable) {
 		t.Errorf("LowWaterMark without etcd = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestTheClientPrintsNothingOfItsOwn(t *testing.T) {
+	// The etcd client logs to standard error unless told otherwise, and it
+	// has something to say when its endpoint is down.
+	captured, err := os.CreateTemp(t.TempDir(), "standard-error")
+	if err != nil {
+		t.Fatalf("create a file to capture standard error: %v", err)
+	}
+	standardError := os.Stderr
+	os.Stderr = captured
+	t.Cleanup(func() { os.Stderr = standardError })
+
+	client := connectToNothing(t)
+	if _, err := client.OpenReader("orders").LowWaterMark(t.Context()); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("LowWaterMark without etcd = %v, want ErrUnavailable", err)
+	}
+	_ = client.Close()
+
+	os.Stderr = standardError
+	printed, err := os.ReadFile(captured.Name())
+	if err != nil {
+		t.Fatalf("read what was captured: %v", err)
+	}
+	if len(printed) != 0 {
+		t.Errorf("the client printed to standard error; it must return its errors and print nothing:\n%s", printed)
 	}
 }
 

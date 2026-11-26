@@ -7,6 +7,7 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 
 	"github.com/thewillyhuman/bitacora/src/go/internal/metadata"
 	"github.com/thewillyhuman/bitacora/src/go/internal/replica"
@@ -70,6 +71,9 @@ func Connect(config Config) (*Client, error) {
 	etcd, err := clientv3.New(clientv3.Config{
 		Endpoints:   config.EtcdEndpoints,
 		DialTimeout: requestTimeout,
+		// Left alone, the etcd client writes warnings to standard error.
+		// A library returns its errors and prints nothing.
+		Logger: zap.NewNop(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: cannot use the etcd endpoints: %w", ErrInvalidArgument, err)
