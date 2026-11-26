@@ -140,15 +140,22 @@ checkpoint again.
 | `contract.rs` | `Materializer`, `CheckpointManifest`, `MaterializerError` |
 | `namespace.rs` | `ArtifactNamespace` and the naming of artifacts |
 | `manifest.rs` | The stored form of a manifest |
-| `runner.rs` | `MaterializerRunner` and its progress reporting |
+| `runner.rs` | `MaterializerRunner`: taking over, the loop, checkpoints and commits; `RunnerError` |
+| `runner/settings.rs` | `RunnerDependencies` and `RunnerSettings`, with the default pacing |
+| `runner/progress.rs` | `RunnerProgress`, `Progress`, `RunnerStopped`, and the runner's end of them |
 | `committed.rs` | `read_committed_checkpoint`, for a process that is not the runner |
 | `sweeper.rs` | `sweep_orphans` and the rule for what is garbage |
 | `layer.rs` | The layer files of the page adapter |
-| `page_store.rs` | `PageMaterializer`, `PageStore`, `PageReader` |
+| `page_store.rs` | `PageMaterializer`, `PageStore`, `PageReader`, `LayeringPolicy` |
+| `page_store/state.rs` | The layer list, the read plan, the layering rules and the stored details |
+| `page_store/shared.rs` | What the store and its readers share: the lock and every read of a layer |
 | `artifact_catalog.rs` | `ArtifactBuilder`, `ArtifactCatalog`, `CatalogView` |
+| `artifact_catalog/compaction.rs` | `CompactionPolicy` and the rule that picks what is merged |
+| `artifact_catalog/stored.rs` | `StoredCatalog`, `decode_catalog`: the catalog as a manifest holds it |
 | `test_harness.rs` | The in-process cluster the tests of this crate share |
 
-Tests sit next to the file they test, in `<file>_test.rs`.
+Tests sit next to the file they test, in `<file>_test.rs`. `page_store/shared.rs` has none of its own: it is all
+fetching and locking, and is tested through the store in `page_store_test.rs`.
 
 ## Dependencies
 

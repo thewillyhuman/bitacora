@@ -11,11 +11,11 @@
 //! # What it contains
 //!
 //! - [`MaterializerRunner`]: takes a materializer over, restores it and runs it.
-//! - [`RunnerDependencies`] and [`RunnerSettings`]: what a runner is built from.
-//! - [`RunnerProgress`] and [`Progress`]: where a runner is, readable from any task without waiting.
-//! - [`RunnerError`] and [`RunnerStopped`]: why a runner stopped. A progress handle gives the reason
-//!   to whoever waits on the runner ([`RunnerProgress::stop_reason`]), so that a front end does not have
-//!   to carry it out of the runner's task by itself.
+//! - [`RunnerError`]: why a runner could not start, or stopped.
+//!
+//! What a runner is built from and what it gives back are in files of their own, and are part of this module:
+//! `runner/settings.rs` holds [`RunnerDependencies`] and [`RunnerSettings`], `runner/progress.rs` holds
+//! [`RunnerProgress`], [`Progress`] and [`RunnerStopped`].
 //!
 //! # How it works
 //!
@@ -48,6 +48,13 @@
 //!   so there is nothing left to commit with.
 //! - Records are applied exactly once per run, in order, without gaps. A gap the log cannot fill is an
 //!   error, never skipped.
+//! - Applying a batch and deciding whether a checkpoint is due run for every batch of the log. They are a
+//!   few comparisons and one pass over the batch to count its bytes; nothing is allocated and nothing is
+//!   awaited between two batches unless a checkpoint is due. Their cost was not measured.
+//! - The asynchronous helpers take the runner exclusively even where they change nothing: a shared borrow
+//!   held across an await would require every materializer to be `Sync`.
+//! - [`MaterializerRunner::start`] is longer than the functions around it on purpose: the steps of taking
+//!   a materializer over await each other's results, and the order is the protocol. It stays in one place.
 //!
 //! # See also
 //!
@@ -55,18 +62,20 @@
 //! - `manifest.rs`: the stored form of a manifest.
 //! - `sweeper.rs`: the deletion of artifacts no manifest names.
 
-use std::collections::BTreeSet;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+mod progress;
+mod settings;
 
-use bitacora_artifact::ArtifactStore;
-use bitacora_client::{BitacoraClient, ReadError, RecordStream};
-use bitacora_meta::{MetaError, MetadataStore};
+use std::collections::BTreeSet;
+
+use bitacora_client::{ReadError, RecordStream};
+use bitacora_meta::{CheckpointRecord, MetaError, MetadataStore};
 use bitacora_types::{LogRecord, SequenceNumber, StreamId};
 use thiserror::Error;
-use tokio::sync::watch;
 use tokio::time::{Instant, timeout_at};
 
+use self::progress::ProgressPublisher;
+pub use self::progress::{Progress, RunnerProgress, RunnerStopped};
+pub use self::settings::{RunnerDependencies, RunnerSettings};
 use crate::contract::{CheckpointManifest, Materializer, MaterializerError};
 use crate::manifest::{decode_manifest, encode_manifest};
 use crate::namespace::ArtifactNamespace;
@@ -74,56 +83,6 @@ use crate::sweeper::delete_unreferenced;
 
 /// The label of the artifact a manifest is stored as.
 const MANIFEST_LABEL: &str = "manifest";
-
-/// What a runner needs to reach the cluster.
-#[derive(Clone)]
-pub struct RunnerDependencies {
-    /// The client the runner follows the stream with.
-    pub client: BitacoraClient,
-    /// The metadata store, for the materializer's checkpoint and fencing token.
-    pub metadata: MetadataStore,
-    /// Where the materializer's artifacts and manifests are stored.
-    pub artifact_store: Arc<dyn ArtifactStore>,
-}
-
-/// How a runner paces its checkpoints.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunnerSettings {
-    /// The materializer's name, as registered on the stream. Two runners with the same name on the same
-    /// stream are two instances of one materializer: the later one takes over.
-    pub materializer: String,
-    /// A checkpoint is written once this many bytes of record payloads were applied since the last one.
-    pub checkpoint_after_bytes: u64,
-    /// A checkpoint is written once this much time has passed since the last one, if anything was applied.
-    pub checkpoint_after: Duration,
-    /// How long the runner waits before it tries a checkpoint again after a store could not be reached.
-    pub retry_interval: Duration,
-}
-
-impl RunnerSettings {
-    /// The default pacing for the materializer `materializer`: a checkpoint every 64 MiB or 60 seconds
-    /// (design, section 11), and one second between attempts while a store is unreachable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::Duration;
-    ///
-    /// use bitacora_materializer::RunnerSettings;
-    ///
-    /// let settings = RunnerSettings::for_materializer("bitacora-kv");
-    /// assert_eq!(settings.checkpoint_after, Duration::from_secs(60));
-    /// ```
-    #[must_use]
-    pub fn for_materializer(materializer: &str) -> Self {
-        Self {
-            materializer: materializer.to_owned(),
-            checkpoint_after_bytes: 64 * 1024 * 1024,
-            checkpoint_after: Duration::from_secs(60),
-            retry_interval: Duration::from_secs(1),
-        }
-    }
-}
 
 /// Why a runner could not start, or stopped.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -162,155 +121,78 @@ pub enum RunnerError {
     StreamEnded,
 }
 
-/// The runner whose progress was being watched has stopped.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunnerStopped {
-    /// Why the runner stopped: what [`MaterializerRunner::run`] returned. `None` if the runner did not
-    /// stop by itself: its task was cancelled, or it was dropped before it ran.
-    pub reason: Option<RunnerError>,
-}
-
-impl std::fmt::Display for RunnerStopped {
-    /// Says that the runner stopped and, if it is known, why.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.reason {
-            Some(reason) => write!(formatter, "the materializer runner has stopped: {reason}"),
-            None => write!(formatter, "the materializer runner was stopped from outside"),
-        }
-    }
-}
-
-impl std::error::Error for RunnerStopped {}
-
-/// Where a runner is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Progress {
-    /// The last record the materializer has applied.
-    pub applied_sequence: SequenceNumber,
-    /// The last record covered by a committed checkpoint. The log may be truncated up to here.
-    pub committed_checkpoint: SequenceNumber,
-    /// The highest sequence number the runner knows to be committed in the log. It is a lower bound: a
-    /// runner far behind the tail only knows about the segments it has read about.
-    pub durable_sequence: SequenceNumber,
-}
-
-impl Progress {
-    /// How many committed records the runner knows of and has not applied yet.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bitacora_materializer::Progress;
-    /// use bitacora_types::SequenceNumber;
-    ///
-    /// let progress = Progress {
-    ///     applied_sequence: SequenceNumber::new(90),
-    ///     committed_checkpoint: SequenceNumber::new(50),
-    ///     durable_sequence: SequenceNumber::new(100),
-    /// };
-    /// assert_eq!(progress.lag_records(), 10);
-    /// ```
-    #[must_use]
-    pub const fn lag_records(&self) -> u64 {
-        self.durable_sequence.records_since(self.applied_sequence)
-    }
-}
-
-/// A cheap, cloneable way to see where a runner is, from any task.
-#[derive(Clone, Debug)]
-pub struct RunnerProgress {
-    /// The receiving end of the channel the runner publishes its progress on.
-    receiver: watch::Receiver<Progress>,
-    /// Why the runner stopped, once it has. The runner writes it before it lets go of the channel.
-    stop_reason: Arc<OnceLock<RunnerError>>,
-}
-
-impl RunnerProgress {
-    /// Where the runner is right now. Never waits.
-    #[must_use]
-    pub fn latest(&self) -> Progress {
-        *self.receiver.borrow()
-    }
-
-    /// Why the runner stopped.
-    ///
-    /// # Returns
-    ///
-    /// What [`MaterializerRunner::run`] returned, from the moment it returns. `None` while the runner
-    /// runs, and for a runner that did not stop by itself: one whose task was cancelled, or that was
-    /// dropped before it ran.
-    #[must_use]
-    pub fn stop_reason(&self) -> Option<RunnerError> {
-        self.stop_reason.get().cloned()
-    }
-
-    /// The error for a waiter whose runner let go of the progress channel.
-    fn stopped(&self) -> RunnerStopped {
-        RunnerStopped {
-            reason: self.stop_reason(),
-        }
-    }
-
-    /// Waits until the runner has applied the record at `sequence`.
-    ///
-    /// # Returns
-    ///
-    /// The runner's progress at that moment.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RunnerStopped`], with the reason, if the runner stopped before it got there. The caller
-    /// bounds the wait with a timeout if the record may never be committed.
-    pub async fn wait_until_applied(&mut self, sequence: SequenceNumber) -> Result<Progress, RunnerStopped> {
-        let reached = self
-            .receiver
-            .wait_for(|progress| progress.applied_sequence >= sequence)
-            .await
-            .map(|progress| *progress);
-        reached.map_err(|_sender_dropped| self.stopped())
-    }
-
-    /// Waits until a checkpoint at or above `sequence` is committed.
-    ///
-    /// # Returns
-    ///
-    /// The runner's progress at that moment.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RunnerStopped`], with the reason, if the runner stopped before it got there.
-    pub async fn wait_until_committed(&mut self, sequence: SequenceNumber) -> Result<Progress, RunnerStopped> {
-        let reached = self
-            .receiver
-            .wait_for(|progress| progress.committed_checkpoint >= sequence)
-            .await
-            .map(|progress| *progress);
-        reached.map_err(|_sender_dropped| self.stopped())
-    }
-}
-
 /// Runs one instance of a materializer: restores it, feeds it the log, and commits its checkpoints.
 ///
 /// # Examples
 ///
-/// ```no_run
-/// # use bitacora_materializer::{Materializer, MaterializerRunner, RunnerDependencies, RunnerSettings};
-/// # async fn example<M: Materializer>(dependencies: RunnerDependencies) {
-/// let settings = RunnerSettings::for_materializer("word-count");
-/// let runner = MaterializerRunner::<M>::start(dependencies, "orders", settings)
-///     .await
-///     .expect("the materializer is registered and its checkpoint is readable");
-/// let progress = runner.progress();
+/// A materializer that counts records, run against a cluster inside this process until it has applied the
+/// record that was just appended. `contract.rs` shows what a materializer that keeps its count across
+/// restarts looks like.
+///
+/// ```
+/// # use async_trait::async_trait;
+/// # use bitacora_materializer::{ArtifactNamespace, CheckpointManifest, Materializer, MaterializerError};
+/// # use bitacora_types::LogRecord;
+/// # struct RecordCounter;
+/// # #[async_trait]
+/// # impl Materializer for RecordCounter {
+/// #     fn apply_records(&mut self, _committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
+/// #         Ok(())
+/// #     }
+/// #     async fn write_checkpoint(
+/// #         &mut self,
+/// #         _artifacts: &ArtifactNamespace,
+/// #     ) -> Result<CheckpointManifest, MaterializerError> {
+/// #         Ok(CheckpointManifest::default())
+/// #     }
+/// #     async fn restore_from_checkpoint(
+/// #         _last_checkpoint: Option<CheckpointManifest>,
+/// #         _artifacts: &ArtifactNamespace,
+/// #     ) -> Result<Self, MaterializerError> {
+/// #         Ok(Self)
+/// #     }
+/// # }
+/// use std::sync::Arc;
+///
+/// use bitacora_artifact::MemoryArtifactStore;
+/// use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions, TakeoverPolicy};
+/// use bitacora_materializer::{MaterializerRunner, RunnerDependencies, RunnerSettings};
+///
+/// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let cluster = bitacora_testkit::Cluster::start(3).await;
+/// # let client = BitacoraClient::new(
+/// #     cluster.metadata().clone(),
+/// #     cluster.connector(),
+/// #     cluster.clock(),
+/// #     ClientSettings::default(),
+/// # );
+/// client.admin().create_stream("orders", StreamOptions::default()).await?;
+/// client.admin().register_materializer("orders", "record-counter").await?;
+/// let dependencies = RunnerDependencies {
+///     client: client.clone(),
+///     metadata: cluster.metadata().clone(),
+///     artifact_store: Arc::new(MemoryArtifactStore::new()),
+/// };
+///
+/// let settings = RunnerSettings::for_materializer("record-counter");
+/// let runner = MaterializerRunner::<RecordCounter>::start(dependencies, "orders", settings).await?;
+/// let mut progress = runner.progress();
 /// let running = tokio::spawn(runner.run());
 ///
-/// println!("applied through {}", progress.latest().applied_sequence);
-/// let why_it_stopped = running.await.expect("the runner does not panic");
-/// println!("runner stopped: {why_it_stopped}");
+/// let writer = client.open_writer("orders", TakeoverPolicy::Force).await?;
+/// let appended_sequence = writer.append("order 1 placed".into()).await?;
+/// let reached = progress.wait_until_applied(appended_sequence).await?;
+/// assert_eq!(reached.applied_sequence, appended_sequence);
+///
+/// // Dropping the runner's task stops it like a crash would; the next runner resumes from its checkpoint.
+/// running.abort();
+/// # Ok(())
 /// # }
 /// ```
-pub struct MaterializerRunner<M: Materializer> {
+pub struct MaterializerRunner<Workload: Materializer> {
     /// The instance being run.
-    materializer: M,
+    materializer: Workload,
     /// The committed records of the stream, from the record after the restored checkpoint.
     following: RecordStream,
     /// The metadata store, to commit checkpoints.
@@ -333,13 +215,11 @@ pub struct MaterializerRunner<M: Materializer> {
     checkpoint_due_at: Instant,
     /// The earliest moment the next checkpoint attempt may start, after one failed.
     retry_not_before: Instant,
-    /// Where progress is published.
-    progress: watch::Sender<Progress>,
-    /// Where the reason for stopping is left for the progress handles, before the channel closes.
-    stop_reason: Arc<OnceLock<RunnerError>>,
+    /// Where progress and the reason for stopping are published.
+    progress: ProgressPublisher,
 }
 
-impl<M: Materializer> MaterializerRunner<M> {
+impl<Workload: Materializer> MaterializerRunner<Workload> {
     /// Takes the materializer over and restores it from its last committed checkpoint.
     ///
     /// Raises the fencing token in the metadata store, so that any other runner of the same materializer
@@ -364,6 +244,24 @@ impl<M: Materializer> MaterializerRunner<M> {
     /// a materializer that registers itself late silently starts without the records already truncated),
     /// or the metadata store cannot be reached. Returns [`RunnerError::Materializer`] if the committed
     /// manifest or an artifact cannot be read.
+    ///
+    /// # Examples
+    ///
+    /// The example of [`MaterializerRunner`] starts and runs a materializer; here only the call is shown.
+    ///
+    /// ```
+    /// use bitacora_materializer::{
+    ///     Materializer, MaterializerRunner, RunnerDependencies, RunnerError, RunnerSettings,
+    /// };
+    ///
+    /// /// Takes the word count of the stream `orders` over from whoever ran it before.
+    /// async fn take_the_word_count_over<Workload: Materializer>(
+    ///     dependencies: RunnerDependencies,
+    /// ) -> Result<MaterializerRunner<Workload>, RunnerError> {
+    ///     let settings = RunnerSettings::for_materializer("word-count");
+    ///     MaterializerRunner::start(dependencies, "orders", settings).await
+    /// }
+    /// ```
     pub async fn start(
         dependencies: RunnerDependencies,
         stream_name: &str,
@@ -380,23 +278,12 @@ impl<M: Materializer> MaterializerRunner<M> {
             &settings.materializer,
             checkpoint.fencing_token,
         );
-        let last_checkpoint = match &checkpoint.manifest {
-            Some(manifest_key) => Some(load_manifest(&artifacts, manifest_key, checkpoint.checkpoint).await?),
-            None => None,
-        };
-        let materializer = M::restore_from_checkpoint(last_checkpoint, &artifacts).await?;
+        let materializer = restore_materializer(&artifacts, &checkpoint).await?;
         let following = dependencies
             .client
             .open_reader(stream_name)
             .follow_from(checkpoint.checkpoint.next())
             .await?;
-
-        let (progress, _first_receiver) = watch::channel(Progress {
-            applied_sequence: checkpoint.checkpoint,
-            committed_checkpoint: checkpoint.checkpoint,
-            durable_sequence: checkpoint.checkpoint,
-        });
-        let now = Instant::now();
         tracing::info!(
             stream = stream_name,
             materializer = %settings.materializer,
@@ -404,11 +291,33 @@ impl<M: Materializer> MaterializerRunner<M> {
             checkpoint = %checkpoint.checkpoint,
             "materializer restored"
         );
-        Ok(Self {
+        Ok(Self::restored_at(
+            &checkpoint,
+            stream.stream_id,
             materializer,
             following,
             metadata,
-            stream_id: stream.stream_id,
+            artifacts,
+            settings,
+        ))
+    }
+
+    /// Builds the runner of an instance that was just restored from `checkpoint` and has applied nothing since.
+    fn restored_at(
+        checkpoint: &CheckpointRecord,
+        stream_id: StreamId,
+        materializer: Workload,
+        following: RecordStream,
+        metadata: MetadataStore,
+        artifacts: ArtifactNamespace,
+        settings: RunnerSettings,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            materializer,
+            following,
+            metadata,
+            stream_id,
             artifacts,
             fencing_token: checkpoint.fencing_token,
             checkpoint_due_at: now + settings.checkpoint_after,
@@ -417,28 +326,79 @@ impl<M: Materializer> MaterializerRunner<M> {
             applied_sequence: checkpoint.checkpoint,
             committed_checkpoint: checkpoint.checkpoint,
             bytes_since_checkpoint: 0,
-            progress,
-            stop_reason: Arc::new(OnceLock::new()),
-        })
-    }
-
-    /// The instance being run, as restored. Use it before [`MaterializerRunner::run`] to take whatever
-    /// handles the materializer offers for reading its state.
-    #[must_use]
-    pub const fn materializer(&self) -> &M {
-        &self.materializer
-    }
-
-    /// A handle that shows where the runner is. It stays valid after `run` has taken the runner.
-    #[must_use]
-    pub fn progress(&self) -> RunnerProgress {
-        RunnerProgress {
-            receiver: self.progress.subscribe(),
-            stop_reason: Arc::clone(&self.stop_reason),
+            progress: ProgressPublisher::starting_at(checkpoint.checkpoint),
         }
     }
 
+    /// The instance being run, as restored.
+    ///
+    /// Use it before [`MaterializerRunner::run`] to take whatever handles the materializer offers for reading its
+    /// state: `run` takes the runner, and the instance with it.
+    ///
+    /// # Returns
+    ///
+    /// The restored instance. Nothing was applied to it yet.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_materializer::{MaterializerRunner, PageMaterializer, PageReader, PageStore};
+    ///
+    /// /// Takes the handle that reads pages, before the runner is sent off to run.
+    /// fn page_reader_of<Engine: PageMaterializer>(
+    ///     runner: &MaterializerRunner<PageStore<Engine>>,
+    /// ) -> PageReader<Engine> {
+    ///     runner.materializer().reader()
+    /// }
+    /// ```
+    #[must_use]
+    pub const fn materializer(&self) -> &Workload {
+        &self.materializer
+    }
+
+    /// Gives a handle that shows where the runner is.
+    ///
+    /// # Returns
+    ///
+    /// A handle that can be cloned and sent to other tasks. It stays valid after `run` has taken the runner, and
+    /// after the runner has stopped.
+    ///
+    /// # Examples
+    ///
+    /// The example of [`MaterializerRunner`] waits on such a handle.
+    ///
+    /// ```
+    /// use bitacora_materializer::{Materializer, MaterializerRunner, RunnerProgress};
+    ///
+    /// /// Starts the runner in a task of its own and keeps the handle to watch it by.
+    /// fn run_in_the_background<Workload: Materializer>(runner: MaterializerRunner<Workload>) -> RunnerProgress {
+    ///     let progress = runner.progress();
+    ///     tokio::spawn(runner.run());
+    ///     progress
+    /// }
+    /// ```
+    #[must_use]
+    pub fn progress(&self) -> RunnerProgress {
+        self.progress.handle()
+    }
+
     /// The fencing token this runner took the materializer over with.
+    ///
+    /// # Returns
+    ///
+    /// The token, which is higher than that of every runner of this materializer before it. Every artifact this
+    /// runner writes carries it in its key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_materializer::{Materializer, MaterializerRunner};
+    ///
+    /// /// Whether `runner` took over after the runner that held `earlier_token`.
+    /// fn is_successor_of<Workload: Materializer>(runner: &MaterializerRunner<Workload>, earlier_token: u64) -> bool {
+    ///     runner.fencing_token() > earlier_token
+    /// }
+    /// ```
     #[must_use]
     pub const fn fencing_token(&self) -> u64 {
         self.fencing_token
@@ -457,11 +417,25 @@ impl<M: Materializer> MaterializerRunner<M> {
     /// - [`RunnerError::LogTruncated`]: the log no longer holds the next record.
     /// - [`RunnerError::Materializer`]: a record could not be applied, or a checkpoint failed for good.
     /// - [`RunnerError::Read`] or [`RunnerError::StreamEnded`]: the stream was deleted.
+    ///
+    /// # Examples
+    ///
+    /// The example of [`MaterializerRunner`] runs a materializer in a task of its own.
+    ///
+    /// ```
+    /// use bitacora_materializer::{Materializer, MaterializerRunner, RunnerError};
+    ///
+    /// /// Runs to the end and says whether a new runner may take this one's place.
+    /// async fn run_and_say_whether_to_restart<Workload: Materializer>(runner: MaterializerRunner<Workload>) -> bool {
+    ///     let why_it_stopped = runner.run().await;
+    ///     !matches!(why_it_stopped, RunnerError::Fenced { .. })
+    /// }
+    /// ```
     pub async fn run(mut self) -> RunnerError {
         let reason = self.run_until_stopped().await;
         // Left for the progress handles before the runner, and with it the progress channel, is dropped:
         // whoever is woken by the channel closing finds the reason there.
-        drop(self.stop_reason.set(reason.clone()));
+        self.progress.leave_stop_reason(reason.clone());
         reason
     }
 
@@ -569,30 +543,7 @@ impl<M: Materializer> MaterializerRunner<M> {
         let manifest = self.materializer.write_checkpoint(&self.artifacts).await?;
         let stored_manifest = encode_manifest(checkpoint, &manifest);
         let manifest_key = self.artifacts.put_artifact(MANIFEST_LABEL, stored_manifest).await?;
-
-        let committed = self
-            .metadata
-            .commit_checkpoint(
-                self.stream_id,
-                &self.settings.materializer,
-                self.fencing_token,
-                checkpoint,
-                Some(manifest_key.clone()),
-            )
-            .await;
-        match committed {
-            Ok(()) => {}
-            Err(MetaError::MaterializerFenced {
-                held_token,
-                current_token,
-            }) => {
-                return Err(RunnerError::Fenced {
-                    held_token,
-                    current_token,
-                });
-            }
-            Err(meta_error) => return Err(RunnerError::Metadata(meta_error)),
-        }
+        self.commit(checkpoint, &manifest_key).await?;
 
         self.committed_checkpoint = checkpoint;
         self.bytes_since_checkpoint = 0;
@@ -608,13 +559,41 @@ impl<M: Materializer> MaterializerRunner<M> {
         Ok(())
     }
 
+    /// Step 5 alone: points the checkpoint record at the manifest that was just stored. The write is valid
+    /// only while the fencing token is still this runner's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunnerError::Fenced`] if another runner took the materializer over, and
+    /// [`RunnerError::Metadata`] for anything else the metadata store refuses or cannot do.
+    async fn commit(&mut self, checkpoint: SequenceNumber, manifest_key: &str) -> Result<(), RunnerError> {
+        let committed = self
+            .metadata
+            .commit_checkpoint(
+                self.stream_id,
+                &self.settings.materializer,
+                self.fencing_token,
+                checkpoint,
+                Some(manifest_key.to_owned()),
+            )
+            .await;
+        match committed {
+            Ok(()) => Ok(()),
+            Err(MetaError::MaterializerFenced {
+                held_token,
+                current_token,
+            }) => Err(RunnerError::Fenced {
+                held_token,
+                current_token,
+            }),
+            Err(meta_error) => Err(RunnerError::Metadata(meta_error)),
+        }
+    }
+
     /// Deletes every artifact of this runner and of the runners before it that the manifest just
     /// committed does not name. Nothing of this runner is in flight right after its own commit, so its
     /// own unnamed artifacts are garbage too. Failing to delete is not an error: the next sweep tries
     /// again.
-    ///
-    /// It takes the runner exclusively, although it changes nothing, because a shared borrow held
-    /// across an await would require every materializer to be `Sync`.
     async fn delete_what_the_manifest_dropped(&mut self, manifest_key: String, manifest: CheckpointManifest) {
         let mut referenced: BTreeSet<String> = manifest.artifact_keys.into_iter().collect();
         referenced.insert(manifest_key);
@@ -631,9 +610,6 @@ impl<M: Materializer> MaterializerRunner<M> {
     /// Says why the runner stops when the log no longer holds its next record: because another runner
     /// took over and the log moved on with it, or, for the runner that still holds the token, because the
     /// log was truncated above its checkpoint.
-    ///
-    /// It takes the runner exclusively for the same reason as
-    /// [`MaterializerRunner::delete_what_the_manifest_dropped`].
     async fn stopped_by_truncation(&mut self, low_water_mark: SequenceNumber) -> RunnerError {
         let current = self
             .metadata
@@ -656,12 +632,25 @@ impl<M: Materializer> MaterializerRunner<M> {
     /// Publishes where the runner is now.
     fn publish_progress(&self) {
         let durable_sequence = self.following.durable_sequence().max(self.applied_sequence);
-        self.progress.send_replace(Progress {
+        self.progress.publish(Progress {
             applied_sequence: self.applied_sequence,
             committed_checkpoint: self.committed_checkpoint,
             durable_sequence,
         });
     }
+}
+
+/// Step 2 of the start: reads the manifest the checkpoint record points at, if it points at one, and
+/// restores the materializer from it.
+async fn restore_materializer<Workload: Materializer>(
+    artifacts: &ArtifactNamespace,
+    checkpoint: &CheckpointRecord,
+) -> Result<Workload, MaterializerError> {
+    let last_checkpoint = match &checkpoint.manifest {
+        Some(manifest_key) => Some(load_manifest(artifacts, manifest_key, checkpoint.checkpoint).await?),
+        None => None,
+    };
+    Workload::restore_from_checkpoint(last_checkpoint, artifacts).await
 }
 
 /// Reads the manifest a checkpoint record points at and checks that it belongs to that checkpoint.

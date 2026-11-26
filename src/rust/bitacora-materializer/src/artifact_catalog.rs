@@ -15,9 +15,11 @@
 //! - [`ArtifactCatalog`]: the adapter; a [`Materializer`] the runner can run.
 //! - [`CatalogView`]: a cloneable handle that shows the catalog while the runner works.
 //! - [`CatalogEntry`] and [`ArtifactDescriptor`]: one artifact and the range it covers.
-//! - [`CompactionPolicy`]: when small artifacts are merged.
-//! - [`decode_catalog`] and [`StoredCatalog`]: the catalog out of a committed manifest, for a process
-//!   that only queries.
+//!
+//! Two parts of the adapter are in files of their own, and are part of this module:
+//! `artifact_catalog/compaction.rs` holds [`CompactionPolicy`] and the rule that picks what is merged,
+//! `artifact_catalog/stored.rs` holds [`decode_catalog`] and [`StoredCatalog`]: the catalog out of a committed
+//! manifest, for the next instance and for a process that only queries.
 //!
 //! # How it works
 //!
@@ -73,24 +75,44 @@
 //!
 //! # See also
 //!
+//! - `artifact_catalog/compaction.rs`: which artifacts are merged, and when.
+//! - `artifact_catalog/stored.rs`: the catalog as a manifest holds it.
 //! - `docs/protocol/checkpoint-manifest.md`: the layout of the stored catalog, for readers in other
-//!   languages. Change it together with `encode_catalog`.
+//!   languages.
 //! - `contract.rs`: the contract this adapter implements.
 //! - `page_store.rs`: the other adapter, for workloads that update pages.
+
+mod compaction;
+mod stored;
 
 use std::sync::{Arc, PoisonError, RwLock};
 
 use async_trait::async_trait;
 use bitacora_types::{LogRecord, SequenceNumber, SequenceRange};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 
+pub use self::compaction::CompactionPolicy;
+use self::compaction::oldest_run_to_merge;
+use self::stored::encode_catalog;
+pub use self::stored::{StoredCatalog, decode_catalog};
 use crate::contract::{CheckpointManifest, Materializer, MaterializerError};
 use crate::namespace::ArtifactNamespace;
 
-/// The format of the details an artifact catalog puts in its checkpoint manifest.
-const DETAILS_FORMAT_VERSION: u32 = 3;
-
 /// Where one immutable artifact is, how large it is, and what its builder says about it.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_materializer::ArtifactDescriptor;
+/// use bytes::Bytes;
+///
+/// let artifact = ArtifactDescriptor {
+///     artifact_key: "00000000000000000003/0000000000-lines".to_owned(),
+///     size_bytes: 4_096,
+///     summary: Bytes::new(),
+/// };
+/// assert!(artifact.summary.is_empty());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactDescriptor {
     /// The artifact's key, as returned by [`ArtifactNamespace::put_artifact`].
@@ -106,50 +128,33 @@ pub struct ArtifactDescriptor {
 }
 
 /// One artifact of the catalog and the records it covers.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_materializer::{ArtifactDescriptor, CatalogEntry};
+/// use bitacora_types::{SequenceNumber, SequenceRange};
+/// use bytes::Bytes;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let entry = CatalogEntry {
+///     covered_range: SequenceRange::new(SequenceNumber::new(1), SequenceNumber::new(500))?,
+///     artifact: ArtifactDescriptor {
+///         artifact_key: "00000000000000000003/0000000000-lines".to_owned(),
+///         size_bytes: 4_096,
+///         summary: Bytes::new(),
+///     },
+/// };
+/// assert_eq!(entry.covered_range.last(), SequenceNumber::new(500));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogEntry {
     /// The records the artifact was built from, both ends included.
     pub covered_range: SequenceRange,
     /// The artifact.
     pub artifact: ArtifactDescriptor,
-}
-
-/// When small artifacts are merged into larger ones.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompactionPolicy {
-    /// How many neighbouring artifacts of one size tier are merged into one. At least two.
-    pub merge_fan_in: usize,
-    /// Artifacts smaller than this are in the lowest tier. Each tier above holds artifacts up to
-    /// `merge_fan_in` times larger than the one below.
-    pub smallest_tier_bytes: u64,
-}
-
-impl Default for CompactionPolicy {
-    /// Four neighbours are merged; the lowest tier ends at 1 MiB.
-    fn default() -> Self {
-        Self {
-            merge_fan_in: 4,
-            smallest_tier_bytes: 1024 * 1024,
-        }
-    }
-}
-
-impl CompactionPolicy {
-    /// The size tier of an artifact: 0 below [`CompactionPolicy::smallest_tier_bytes`], and one more for
-    /// every factor of [`CompactionPolicy::merge_fan_in`] above it.
-    fn tier_of(&self, size_bytes: u64) -> u32 {
-        let fan_in = u64::try_from(self.merge_fan_in.max(2)).unwrap_or(u64::MAX);
-        let mut tier = 0;
-        let mut tier_end = self.smallest_tier_bytes.max(1);
-        while size_bytes >= tier_end {
-            tier += 1;
-            tier_end = tier_end.saturating_mul(fan_in);
-            if tier_end == u64::MAX {
-                break;
-            }
-        }
-        tier
-    }
 }
 
 /// What a workload with append-only data implements, instead of the whole [`Materializer`] contract.
@@ -363,6 +368,8 @@ impl SharedCatalog {
 }
 
 /// Shows the catalog of an [`ArtifactCatalog`], from any task, while the runner works.
+///
+/// Take one with [`ArtifactCatalog::view`]; the example there reads a catalog through its view.
 #[derive(Clone, Debug)]
 pub struct CatalogView {
     /// Shared with the adapter.
@@ -370,18 +377,54 @@ pub struct CatalogView {
 }
 
 impl CatalogView {
-    /// Every sealed artifact of the catalog, in log order: gapless and without overlap. The records
-    /// the builder holds beyond them are not listed, saved or not.
+    /// Lists every sealed artifact of the catalog.
+    ///
+    /// # Returns
+    ///
+    /// The entries as they are now, in log order: gapless and without overlap. The records the builder holds
+    /// beyond them are not listed, saved or not. The list is a copy; the catalog may change right after.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_materializer::CatalogView;
+    ///
+    /// /// How many bytes the artifacts of a catalog take in the object store.
+    /// fn stored_bytes(catalog: &CatalogView) -> u64 {
+    ///     let mut stored_bytes = 0;
+    ///     for entry in catalog.entries() {
+    ///         stored_bytes += entry.artifact.size_bytes;
+    ///     }
+    ///     stored_bytes
+    /// }
+    /// ```
     #[must_use]
     pub fn entries(&self) -> Vec<CatalogEntry> {
         self.shared.snapshot()
     }
 
-    /// The artifact that covers the record at `sequence`.
+    /// Finds the artifact that covers the record at `sequence`.
+    ///
+    /// # Arguments
+    ///
+    /// * `sequence` - The record to look up.
     ///
     /// # Returns
     ///
-    /// `None` if the record is below the first artifact or was not sealed into one yet.
+    /// The entry whose range holds the record. `None` if the record is below the first artifact or was not
+    /// sealed into one yet.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_materializer::CatalogView;
+    /// use bitacora_types::SequenceNumber;
+    ///
+    /// /// Whether the record at `sequence` is in a sealed artifact already.
+    /// fn is_sealed(catalog: &CatalogView, sequence: SequenceNumber) -> bool {
+    ///     catalog.entry_covering(sequence).is_some()
+    /// }
+    /// ```
     #[must_use]
     pub fn entry_covering(&self, sequence: SequenceNumber) -> Option<CatalogEntry> {
         let covers_the_record =
@@ -396,9 +439,9 @@ impl CatalogView {
 /// whatever the builder shares of itself through [`ArtifactCatalog::builder`], before the runner starts
 /// to run; `MaterializerRunner::materializer` gives the adapter. See [`ArtifactBuilder`] for an example
 /// of a builder.
-pub struct ArtifactCatalog<B: ArtifactBuilder> {
+pub struct ArtifactCatalog<Builder: ArtifactBuilder> {
     /// The workload's builder.
-    builder: B,
+    builder: Builder,
     /// The catalog, shared with the views.
     shared: Arc<SharedCatalog>,
     /// The first record added to the builder since the last seal, or `None` if the builder is empty.
@@ -410,8 +453,62 @@ pub struct ArtifactCatalog<B: ArtifactBuilder> {
     saved_pending: Option<CatalogEntry>,
 }
 
-impl<B: ArtifactBuilder> ArtifactCatalog<B> {
-    /// A handle that shows this adapter's catalog, from any task.
+impl<Builder: ArtifactBuilder> ArtifactCatalog<Builder> {
+    /// Gives a handle that shows this adapter's catalog, from any task.
+    ///
+    /// # Returns
+    ///
+    /// A view that can be cloned. It stays usable after the runner that owns the adapter has stopped; the
+    /// catalog then simply no longer changes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use async_trait::async_trait;
+    /// # use bitacora_materializer::{ArtifactBuilder, ArtifactDescriptor, CatalogEntry, MaterializerError};
+    /// # use bitacora_types::{LogRecord, SequenceRange};
+    /// # #[derive(Default)]
+    /// # struct LineFiles;
+    /// # #[async_trait]
+    /// # impl ArtifactBuilder for LineFiles {
+    /// #     fn add_records(&mut self, _committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
+    /// #         Ok(())
+    /// #     }
+    /// #     fn should_seal(&self) -> bool {
+    /// #         false
+    /// #     }
+    /// #     async fn seal_artifact(
+    /// #         &mut self,
+    /// #         _covered_range: SequenceRange,
+    /// #         _artifacts: &ArtifactNamespace,
+    /// #     ) -> Result<ArtifactDescriptor, MaterializerError> {
+    /// #         unimplemented!("not sealed in this example")
+    /// #     }
+    /// #     async fn merge_artifacts(
+    /// #         &mut self,
+    /// #         _inputs: &[CatalogEntry],
+    /// #         _artifacts: &ArtifactNamespace,
+    /// #     ) -> Result<ArtifactDescriptor, MaterializerError> {
+    /// #         unimplemented!("not merged in this example")
+    /// #     }
+    /// # }
+    /// use std::sync::Arc;
+    ///
+    /// use bitacora_artifact::MemoryArtifactStore;
+    /// use bitacora_materializer::{ArtifactCatalog, ArtifactNamespace, Materializer};
+    /// use bitacora_types::StreamId;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), MaterializerError> {
+    /// let store = Arc::new(MemoryArtifactStore::new());
+    /// let artifacts = ArtifactNamespace::for_runner(store, StreamId::new(7), "line-files", 1);
+    /// let catalog = ArtifactCatalog::<LineFiles>::restore_from_checkpoint(None, &artifacts).await?;
+    ///
+    /// let view = catalog.view();
+    /// assert!(view.entries().is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn view(&self) -> CatalogView {
         CatalogView {
@@ -425,6 +522,10 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
     /// change through this reference. A builder whose unsealed records must be readable from other
     /// tasks holds them behind a shared handle and has a method that clones the handle; this is where a
     /// front end calls that method. See the file documentation for what such a reader must mind.
+    ///
+    /// # Returns
+    ///
+    /// The builder the adapter was restored with.
     ///
     /// # Examples
     ///
@@ -482,7 +583,7 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
     /// # }
     /// ```
     #[must_use]
-    pub const fn builder(&self) -> &B {
+    pub const fn builder(&self) -> &Builder {
         &self.builder
     }
 
@@ -568,10 +669,10 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
     async fn compact_once(&mut self, artifacts: &ArtifactNamespace) -> Result<(), MaterializerError> {
         let mut entries = self.shared.snapshot();
         let policy = self.builder.compaction_policy();
-        let Some((run_start, run_end)) = oldest_run_to_merge(&entries, policy) else {
+        let Some(run) = oldest_run_to_merge(&entries, policy) else {
             return Ok(());
         };
-        let inputs = &entries[run_start..run_end];
+        let inputs = &entries[run.clone()];
         let covered_range = SequenceRange::new(
             inputs[0].covered_range.first(),
             inputs[inputs.len() - 1].covered_range.last(),
@@ -583,182 +684,14 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
             artifact,
         };
         // Dropping what `splice` returns is what removes the inputs.
-        drop(entries.splice(run_start..run_end, [merged_entry]));
+        drop(entries.splice(run, [merged_entry]));
         self.shared.replace(entries);
         Ok(())
     }
 }
 
-/// The positions, start included and end excluded, of the oldest `merge_fan_in` neighbouring entries
-/// that are all in the same size tier.
-fn oldest_run_to_merge(entries: &[CatalogEntry], policy: CompactionPolicy) -> Option<(usize, usize)> {
-    let merge_fan_in = policy.merge_fan_in.max(2);
-    let mut run_start = 0;
-    for position in 1..=entries.len() {
-        let run_goes_on = position < entries.len()
-            && policy.tier_of(entries[position].artifact.size_bytes)
-                == policy.tier_of(entries[run_start].artifact.size_bytes);
-        if position - run_start == merge_fan_in {
-            return Some((run_start, position));
-        }
-        if !run_goes_on {
-            run_start = position;
-        }
-    }
-    None
-}
-
-/// Whether every entry starts right after the previous one ends.
-fn is_gapless(entries: &[CatalogEntry]) -> bool {
-    for pair in entries.windows(2) {
-        if pair[1].covered_range.first() != pair[0].covered_range.last().next() {
-            return false;
-        }
-    }
-    true
-}
-
-/// A catalog as a checkpoint stored it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StoredCatalog {
-    /// The sealed artifacts, in log order: gapless and without overlap.
-    pub entries: Vec<CatalogEntry>,
-    /// The artifact that holds the records the builder had not sealed at the checkpoint, and those
-    /// records, if the builder saves its pending records and held any. They follow the last sealed
-    /// artifact and end at the checkpoint. Only the builder's own readers understand the artifact.
-    pub pending: Option<CatalogEntry>,
-}
-
-/// Appends one entry to the stored form of a catalog.
-fn put_entry(details: &mut BytesMut, entry: &CatalogEntry) {
-    details.put_u64_le(entry.covered_range.first().get());
-    details.put_u64_le(entry.covered_range.last().get());
-    details.put_u64_le(entry.artifact.size_bytes);
-    details.put_u32_le(u32::try_from(entry.artifact.artifact_key.len()).expect("an artifact key is short"));
-    details.put_slice(entry.artifact.artifact_key.as_bytes());
-    details.put_u32_le(u32::try_from(entry.artifact.summary.len()).expect("a summary is small"));
-    details.put_slice(&entry.artifact.summary);
-}
-
-/// Reads one entry of a stored catalog and moves `unread` past it.
-fn take_entry(unread: &mut Bytes) -> Result<CatalogEntry, &'static str> {
-    /// What is wrong with a catalog that ends inside an entry.
-    const CUT_SHORT: &str = "it is cut short";
-    // The two ends of the range, the size and the length of the key.
-    if unread.remaining() < 8 + 8 + 8 + 4 {
-        return Err(CUT_SHORT);
-    }
-    let first = SequenceNumber::new(unread.get_u64_le());
-    let last = SequenceNumber::new(unread.get_u64_le());
-    let size_bytes = unread.get_u64_le();
-    let key_bytes = unread.get_u32_le() as usize;
-    if unread.remaining() < key_bytes {
-        return Err(CUT_SHORT);
-    }
-    let Ok(artifact_key) = String::from_utf8(unread.split_to(key_bytes).to_vec()) else {
-        return Err("an artifact key is not text");
-    };
-    let Ok(summary_bytes) = unread.try_get_u32_le() else {
-        return Err(CUT_SHORT);
-    };
-    if unread.remaining() < summary_bytes as usize {
-        return Err(CUT_SHORT);
-    }
-    let summary = unread.split_to(summary_bytes as usize);
-    let Ok(covered_range) = SequenceRange::new(first, last) else {
-        return Err("an artifact covers no record");
-    };
-    Ok(CatalogEntry {
-        covered_range,
-        artifact: ArtifactDescriptor {
-            artifact_key,
-            size_bytes,
-            summary,
-        },
-    })
-}
-
-/// Serializes a catalog, and the saved pending records if there are any, as the details of a checkpoint
-/// manifest.
-fn encode_catalog(entries: &[CatalogEntry], pending: Option<&CatalogEntry>) -> Bytes {
-    let mut details = BytesMut::new();
-    details.put_u32_le(DETAILS_FORMAT_VERSION);
-    details.put_u32_le(u32::try_from(entries.len()).expect("far fewer than 2^32 artifacts"));
-    for entry in entries {
-        put_entry(&mut details, entry);
-    }
-    match pending {
-        Some(pending) => {
-            details.put_u8(1);
-            put_entry(&mut details, pending);
-        }
-        None => details.put_u8(0),
-    }
-    details.freeze()
-}
-
-/// Reads the catalog out of the details of a checkpoint manifest written by an [`ArtifactCatalog`].
-///
-/// A process that only queries the artifacts does not run the materializer. It reads the committed
-/// manifest (see [`decode_manifest`](crate::decode_manifest)) and passes its details here.
-///
-/// # Arguments
-///
-/// * `details` - [`CheckpointManifest::details`] of a manifest an artifact catalog wrote.
-///
-/// # Returns
-///
-/// The catalog as of that checkpoint, and the builder's saved pending records if it saved any.
-///
-/// # Errors
-///
-/// Returns [`MaterializerError::InvalidManifest`] if the bytes were not written by this version of the
-/// catalog, or describe artifacts that leave a gap or overlap.
-///
-/// # Examples
-///
-/// ```
-/// use bitacora_materializer::decode_catalog;
-/// use bytes::Bytes;
-///
-/// let not_a_catalog = Bytes::from_static(b"something else");
-/// assert!(decode_catalog(&not_a_catalog).is_err());
-/// ```
-pub fn decode_catalog(details: &Bytes) -> Result<StoredCatalog, MaterializerError> {
-    let invalid = |reason: &str| MaterializerError::InvalidManifest {
-        reason: format!("the artifact catalog is not valid: {reason}"),
-    };
-    let cut_short = |_cut_short| invalid("it is cut short");
-    let mut unread = details.clone();
-    if unread.try_get_u32_le().map_err(cut_short)? != DETAILS_FORMAT_VERSION {
-        return Err(invalid("it was written by another format"));
-    }
-    let entry_count = unread.try_get_u32_le().map_err(cut_short)?;
-    let mut entries = Vec::new();
-    for _entry in 0..entry_count {
-        entries.push(take_entry(&mut unread).map_err(invalid)?);
-    }
-    let pending = match unread.try_get_u8().map_err(cut_short)? {
-        0 => None,
-        1 => Some(take_entry(&mut unread).map_err(invalid)?),
-        _other => return Err(invalid("it does not say whether pending records were saved")),
-    };
-    if unread.has_remaining() {
-        return Err(invalid("it holds more than its lengths say"));
-    }
-    if !is_gapless(&entries) {
-        return Err(invalid("its artifacts leave a gap or overlap"));
-    }
-    if let (Some(last_entry), Some(pending)) = (entries.last(), &pending)
-        && pending.covered_range.first() != last_entry.covered_range.last().next()
-    {
-        return Err(invalid("its saved records do not follow its last artifact"));
-    }
-    Ok(StoredCatalog { entries, pending })
-}
-
 #[async_trait]
-impl<B: ArtifactBuilder> Materializer for ArtifactCatalog<B> {
+impl<Builder: ArtifactBuilder> Materializer for ArtifactCatalog<Builder> {
     /// Hands the records to the builder and remembers where the unsealed ones start.
     fn apply_records(&mut self, committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
         let (Some(first_record), Some(last_record)) = (committed_records.first(), committed_records.last()) else {
@@ -812,7 +745,7 @@ impl<B: ArtifactBuilder> Materializer for ArtifactCatalog<B> {
             Some(manifest) => decode_catalog(&manifest.details)?,
             None => StoredCatalog::default(),
         };
-        let mut builder = B::default();
+        let mut builder = Builder::default();
         let mut first_pending_sequence = None;
         let mut applied_sequence = stored
             .entries

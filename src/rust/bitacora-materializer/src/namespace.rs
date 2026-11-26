@@ -64,6 +64,11 @@ const MAX_LABEL_BYTES: usize = 64;
 ///   is a prefix.
 /// * `materializer` - The materializer's name, as registered on the stream.
 ///
+/// # Returns
+///
+/// The prefix, ending in `/`. The controller deletes everything under `materializers/<stream id>/` when the
+/// stream is deleted.
+///
 /// # Examples
 ///
 /// ```
@@ -79,10 +84,14 @@ pub fn namespace_prefix(stream_id: StreamId, materializer: &str) -> String {
 
 /// The fencing token of the runner that wrote an artifact, read from the artifact's key.
 ///
+/// # Arguments
+///
+/// * `artifact_key` - A key relative to the namespace, as [`ArtifactNamespace::put_artifact`] returns it.
+///
 /// # Returns
 ///
-/// `None` if the key was not produced by [`ArtifactNamespace::put_artifact`]. Callers leave such objects
-/// alone.
+/// The token the key starts with. `None` if the key was not produced by
+/// [`ArtifactNamespace::put_artifact`]. Callers leave such objects alone.
 ///
 /// # Examples
 ///
@@ -156,6 +165,25 @@ impl ArtifactNamespace {
     /// * `materializer` - The materializer's name, as registered on the stream.
     /// * `fencing_token` - The token the runner was given when it took the materializer over. The caller
     ///   guarantees that nobody else writes with the same token.
+    ///
+    /// # Returns
+    ///
+    /// A view that numbers its artifacts from zero under `fencing_token`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use bitacora_artifact::MemoryArtifactStore;
+    /// use bitacora_materializer::ArtifactNamespace;
+    /// use bitacora_types::StreamId;
+    ///
+    /// let store = Arc::new(MemoryArtifactStore::new());
+    /// let artifacts = ArtifactNamespace::for_runner(store, StreamId::new(7), "word-count", 3);
+    ///
+    /// assert_eq!(artifacts.fencing_token(), Some(3));
+    /// ```
     #[must_use]
     pub fn for_runner(
         store: Arc<dyn ArtifactStore>,
@@ -181,6 +209,30 @@ impl ArtifactNamespace {
     /// * `store` - The artifact store.
     /// * `stream_id` - The stream the materializer follows.
     /// * `materializer` - The materializer's name, as registered on the stream.
+    ///
+    /// # Returns
+    ///
+    /// A view that reads every artifact of the materializer, whoever wrote it, and refuses to add one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use bitacora_artifact::MemoryArtifactStore;
+    /// use bitacora_materializer::{ArtifactNamespace, MaterializerError};
+    /// use bitacora_types::StreamId;
+    /// use bytes::Bytes;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let store = Arc::new(MemoryArtifactStore::new());
+    /// let artifacts = ArtifactNamespace::read_only(store, StreamId::new(7), "word-count");
+    ///
+    /// let refused = artifacts.put_artifact("snapshot", Bytes::from_static(b"state")).await;
+    /// assert_eq!(refused, Err(MaterializerError::ReadOnly));
+    /// # }
+    /// ```
     #[must_use]
     pub fn read_only(store: Arc<dyn ArtifactStore>, stream_id: StreamId, materializer: &str) -> Self {
         Self {
@@ -209,6 +261,30 @@ impl ArtifactNamespace {
     /// for a label that cannot be part of a key, or [`MaterializerError::ArtifactStore`] if the store
     /// failed. After a failure the artifact may or may not exist; it is an orphan either way, because its
     /// key was never returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use bitacora_artifact::MemoryArtifactStore;
+    /// use bitacora_materializer::ArtifactNamespace;
+    /// use bitacora_types::StreamId;
+    /// use bytes::Bytes;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), bitacora_materializer::MaterializerError> {
+    /// let store = Arc::new(MemoryArtifactStore::new());
+    /// let artifacts = ArtifactNamespace::for_runner(store, StreamId::new(7), "word-count", 3);
+    ///
+    /// let first_key = artifacts.put_artifact("snapshot", Bytes::from_static(b"one")).await?;
+    /// let second_key = artifacts.put_artifact("snapshot", Bytes::from_static(b"two")).await?;
+    ///
+    /// assert_eq!(first_key, "00000000000000000003/0000000000-snapshot");
+    /// assert_eq!(second_key, "00000000000000000003/0000000001-snapshot");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn put_artifact(&self, label: &str, contents: Bytes) -> Result<String, MaterializerError> {
         let Some(writer) = &self.writer else {
             return Err(MaterializerError::ReadOnly);
@@ -231,9 +307,35 @@ impl ArtifactNamespace {
     /// * `artifact_key` - A key returned by [`ArtifactNamespace::put_artifact`], by this view or by an
     ///   earlier instance of the same materializer.
     ///
+    /// # Returns
+    ///
+    /// The artifact's contents, as they were stored.
+    ///
     /// # Errors
     ///
     /// Returns [`MaterializerError::ArtifactStore`] if the artifact does not exist or the store failed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use bitacora_artifact::MemoryArtifactStore;
+    /// use bitacora_materializer::ArtifactNamespace;
+    /// use bitacora_types::StreamId;
+    /// use bytes::Bytes;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), bitacora_materializer::MaterializerError> {
+    /// let store = Arc::new(MemoryArtifactStore::new());
+    /// let artifacts = ArtifactNamespace::for_runner(store, StreamId::new(7), "word-count", 3);
+    /// let artifact_key = artifacts.put_artifact("snapshot", Bytes::from_static(b"state")).await?;
+    ///
+    /// assert_eq!(artifacts.get_artifact(&artifact_key).await?, Bytes::from_static(b"state"));
+    /// assert!(artifacts.get_artifact("00000000000000000003/0000000009-missing").await.is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_artifact(&self, artifact_key: &str) -> Result<Bytes, MaterializerError> {
         let contents = self.store.get_object(&self.object_key(artifact_key)).await?;
         Ok(contents)
@@ -246,10 +348,36 @@ impl ArtifactNamespace {
     /// * `artifact_key` - A key returned by [`ArtifactNamespace::put_artifact`].
     /// * `byte_range` - The bytes to read. The range must lie inside the artifact.
     ///
+    /// # Returns
+    ///
+    /// The bytes of `byte_range`.
+    ///
     /// # Errors
     ///
     /// Returns [`MaterializerError::ArtifactStore`] if the artifact does not exist, the range lies outside
     /// it, or the store failed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use bitacora_artifact::MemoryArtifactStore;
+    /// use bitacora_materializer::ArtifactNamespace;
+    /// use bitacora_types::StreamId;
+    /// use bytes::Bytes;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), bitacora_materializer::MaterializerError> {
+    /// let store = Arc::new(MemoryArtifactStore::new());
+    /// let artifacts = ArtifactNamespace::for_runner(store, StreamId::new(7), "word-count", 3);
+    /// let artifact_key = artifacts.put_artifact("words", Bytes::from_static(b"alpha beta")).await?;
+    ///
+    /// let second_word = artifacts.get_artifact_range(&artifact_key, 6..10).await?;
+    /// assert_eq!(second_word, Bytes::from_static(b"beta"));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_artifact_range(
         &self,
         artifact_key: &str,
@@ -259,18 +387,46 @@ impl ArtifactNamespace {
         Ok(contents)
     }
 
-    /// The fencing token this view writes with, or `None` for a read-only view.
+    /// The fencing token this view writes with.
+    ///
+    /// # Returns
+    ///
+    /// The token of the runner the view was opened for, or `None` for a read-only view.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use bitacora_artifact::MemoryArtifactStore;
+    /// use bitacora_materializer::ArtifactNamespace;
+    /// use bitacora_types::StreamId;
+    ///
+    /// let store = Arc::new(MemoryArtifactStore::new());
+    /// let for_reading = ArtifactNamespace::read_only(store, StreamId::new(7), "word-count");
+    ///
+    /// assert_eq!(for_reading.fencing_token(), None);
+    /// ```
     #[must_use]
     pub fn fencing_token(&self) -> Option<u64> {
-        self.writer.as_ref().map(|writer| writer.fencing_token)
+        let writer = self.writer.as_ref()?;
+        Some(writer.fencing_token)
     }
 
-    /// The object key prefix of the namespace, ending in `/`. The sweeper lists it.
+    /// The object key prefix of the namespace. The sweeper lists it.
+    ///
+    /// # Returns
+    ///
+    /// The prefix every object of this materializer has in the artifact store, ending in `/`.
     pub(crate) fn prefix(&self) -> &str {
         &self.prefix
     }
 
     /// The store the namespace lives in, for the sweeper, which is the only code that lists and deletes.
+    ///
+    /// # Returns
+    ///
+    /// The whole artifact store, not only this namespace: the caller adds the prefix itself.
     pub(crate) fn store(&self) -> &dyn ArtifactStore {
         self.store.as_ref()
     }
@@ -282,6 +438,7 @@ impl ArtifactNamespace {
 }
 
 impl std::fmt::Debug for ArtifactNamespace {
+    /// Shows the prefix and the token; the store behind the view has no useful text form.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ArtifactNamespace")

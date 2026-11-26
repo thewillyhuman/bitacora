@@ -108,6 +108,30 @@ pub fn encode_manifest(checkpoint: SequenceNumber, manifest: &CheckpointManifest
 ///
 /// Returns [`MaterializerError::InvalidManifest`] if the bytes are not a manifest, come from a newer
 /// format, fail their checksum, or do not end where their lengths say.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_materializer::{CheckpointManifest, decode_manifest, encode_manifest};
+/// use bitacora_types::SequenceNumber;
+/// use bytes::Bytes;
+///
+/// # fn main() -> Result<(), bitacora_materializer::MaterializerError> {
+/// let manifest = CheckpointManifest {
+///     artifact_keys: vec!["00000000000000000003/0000000000-snapshot".to_owned()],
+///     details: Bytes::from_static(b"one snapshot"),
+/// };
+/// let stored = encode_manifest(SequenceNumber::new(42), &manifest);
+///
+/// let (checkpoint, decoded) = decode_manifest(&stored)?;
+/// assert_eq!(checkpoint, SequenceNumber::new(42));
+/// assert_eq!(decoded, manifest);
+///
+/// let damaged = stored.slice(..stored.len() - 1);
+/// assert!(decode_manifest(&damaged).is_err());
+/// # Ok(())
+/// # }
+/// ```
 pub fn decode_manifest(stored: &Bytes) -> Result<(SequenceNumber, CheckpointManifest), MaterializerError> {
     let Some(checksummed_bytes) = stored.len().checked_sub(CHECKSUM_BYTES) else {
         return Err(invalid("it is shorter than its checksum"));

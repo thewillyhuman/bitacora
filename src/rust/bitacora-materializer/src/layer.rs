@@ -59,14 +59,28 @@ const LAYER_MAGIC: [u8; 8] = *b"BITALAYR";
 /// The layer format this code reads and writes.
 const LAYER_FORMAT_VERSION: u32 = 1;
 
-/// The size of the header at the start of every layer.
-pub(crate) const LAYER_HEADER_BYTES: usize = 45;
+/// The size of a checksum.
+const CHECKSUM_BYTES: usize = 4;
+
+/// The size of the header at the start of every layer: the magic, the version, the kind, the two sequence numbers,
+/// the page count, the index length and the two checksums.
+pub(crate) const LAYER_HEADER_BYTES: usize = 8 + 4 + 1 + 8 + 8 + 4 + 4 + CHECKSUM_BYTES + CHECKSUM_BYTES;
 
 /// Where the header's own checksum starts: it is the last field and covers everything before it.
-const HEADER_CHECKSUM_OFFSET: usize = LAYER_HEADER_BYTES - 4;
+const HEADER_CHECKSUM_OFFSET: usize = LAYER_HEADER_BYTES - CHECKSUM_BYTES;
+
+/// The fixed part of an index entry: the length of the page identifier, the offset and the length of the blob, and
+/// the blob's checksum. The page identifier comes on top.
+const INDEX_ENTRY_FIXED_BYTES: usize = 4 + 8 + 4 + CHECKSUM_BYTES;
 
 /// The fixed part of a delta record: its sequence number and the length of its payload.
-const RECORD_HEADER_BYTES: usize = 12;
+const RECORD_HEADER_BYTES: usize = 8 + 4;
+
+/// The byte an image layer's kind is stored as, in a layer and in the details of a manifest.
+const IMAGE_KIND_CODE: u8 = 1;
+
+/// The byte a delta layer's kind is stored as, in a layer and in the details of a manifest.
+const DELTA_KIND_CODE: u8 = 2;
 
 /// What the blobs of a layer hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,18 +93,31 @@ pub(crate) enum LayerKind {
 
 impl LayerKind {
     /// The byte the kind is stored as.
-    const fn code(self) -> u8 {
+    ///
+    /// # Returns
+    ///
+    /// The code, which [`LayerKind::from_code`] turns back. It never changes for a kind: stored layers and
+    /// manifests hold it.
+    pub(crate) const fn code(self) -> u8 {
         match self {
-            Self::Image => 1,
-            Self::Delta => 2,
+            Self::Image => IMAGE_KIND_CODE,
+            Self::Delta => DELTA_KIND_CODE,
         }
     }
 
-    /// The kind a stored byte stands for, if any.
-    const fn from_code(code: u8) -> Option<Self> {
+    /// The kind a stored byte stands for.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - A byte read from a layer header or from the details of a manifest.
+    ///
+    /// # Returns
+    ///
+    /// The kind, or `None` if no kind is stored as that byte.
+    pub(crate) const fn from_code(code: u8) -> Option<Self> {
         match code {
-            1 => Some(Self::Image),
-            2 => Some(Self::Delta),
+            IMAGE_KIND_CODE => Some(Self::Image),
+            DELTA_KIND_CODE => Some(Self::Delta),
             _ => None,
         }
     }
@@ -127,6 +154,10 @@ pub(crate) struct LayerHeader {
 
 impl LayerHeader {
     /// Where the index lies in the layer.
+    ///
+    /// # Returns
+    ///
+    /// The byte range of the index, counted from the start of the layer: it follows the header.
     pub(crate) const fn index_range(&self) -> Range<u64> {
         let index_start = LAYER_HEADER_BYTES as u64;
         index_start..index_start + self.index_bytes as u64
@@ -146,6 +177,10 @@ pub(crate) struct LayerEntry {
 
 impl LayerEntry {
     /// Where the blob lies in the layer.
+    ///
+    /// # Returns
+    ///
+    /// The byte range of the blob, counted from the start of the layer.
     pub(crate) const fn blob_range(&self) -> Range<u64> {
         self.blob_offset..self.blob_offset + self.blob_bytes as u64
     }
@@ -172,23 +207,13 @@ pub(crate) fn encode_layer(
     last_sequence: SequenceNumber,
     blobs_by_page: &BTreeMap<Bytes, Bytes>,
 ) -> Bytes {
-    let mut index_bytes = 0;
-    for encoded_page_id in blobs_by_page.keys() {
-        index_bytes += 4 + encoded_page_id.len() + 8 + 4 + 4;
-    }
-    let mut index = BytesMut::with_capacity(index_bytes);
-    let mut blob_offset = (LAYER_HEADER_BYTES + index_bytes) as u64;
-    for (encoded_page_id, blob) in blobs_by_page {
-        index.put_u32_le(length_as_u32(encoded_page_id.len()));
-        index.put_slice(encoded_page_id);
-        index.put_u64_le(blob_offset);
-        index.put_u32_le(length_as_u32(blob.len()));
-        index.put_u32_le(crc32c::crc32c(blob));
-        blob_offset += blob.len() as u64;
+    let index = encode_index(blobs_by_page);
+    let mut blobs_bytes = 0;
+    for blob in blobs_by_page.values() {
+        blobs_bytes += blob.len();
     }
 
-    let mut layer =
-        BytesMut::with_capacity(usize::try_from(blob_offset).expect("a layer that was just built fits in memory"));
+    let mut layer = BytesMut::with_capacity(LAYER_HEADER_BYTES + index.len() + blobs_bytes);
     layer.put_slice(&LAYER_MAGIC);
     layer.put_u32_le(LAYER_FORMAT_VERSION);
     layer.put_u8(kind.code());
@@ -206,11 +231,35 @@ pub(crate) fn encode_layer(
     layer.freeze()
 }
 
+/// Builds the index of a layer: for each page, in the order of the map, where its blob will lie and what it hashes
+/// to. The first blob follows the header and the index; each next one follows the blob before it.
+fn encode_index(blobs_by_page: &BTreeMap<Bytes, Bytes>) -> BytesMut {
+    let mut index_bytes = 0;
+    for encoded_page_id in blobs_by_page.keys() {
+        index_bytes += INDEX_ENTRY_FIXED_BYTES + encoded_page_id.len();
+    }
+    let mut index = BytesMut::with_capacity(index_bytes);
+    let mut blob_offset = (LAYER_HEADER_BYTES + index_bytes) as u64;
+    for (encoded_page_id, blob) in blobs_by_page {
+        index.put_u32_le(length_as_u32(encoded_page_id.len()));
+        index.put_slice(encoded_page_id);
+        index.put_u64_le(blob_offset);
+        index.put_u32_le(length_as_u32(blob.len()));
+        index.put_u32_le(crc32c::crc32c(blob));
+        blob_offset += blob.len() as u64;
+    }
+    index
+}
+
 /// Parses and verifies the header at the start of a layer.
 ///
 /// # Arguments
 ///
 /// * `layer_start` - The first [`LAYER_HEADER_BYTES`] bytes of the layer, or more.
+///
+/// # Returns
+///
+/// What the header says: the kind, the sequence numbers covered, and where the index is.
 ///
 /// # Errors
 ///
@@ -291,6 +340,11 @@ pub(crate) fn decode_index(header: &LayerHeader, index: &Bytes) -> Result<BTreeM
 
 /// Checks that `blob` is the blob `entry` describes.
 ///
+/// # Arguments
+///
+/// * `entry` - The page's entry in the layer's index.
+/// * `blob` - The bytes fetched from [`LayerEntry::blob_range`].
+///
 /// # Errors
 ///
 /// Returns [`LayerDamage`] if the length or the checksum differs.
@@ -309,6 +363,14 @@ pub(crate) fn verify_blob(entry: &LayerEntry, blob: &[u8]) -> Result<(), LayerDa
 /// # Arguments
 ///
 /// * `records` - The records, in sequence order.
+///
+/// # Returns
+///
+/// The blob: for each record its sequence number, the length of its payload, and the payload.
+///
+/// # Panics
+///
+/// Panics if a payload is 4 GiB or larger.
 pub(crate) fn encode_records(records: &[LogRecord]) -> Bytes {
     let mut blob_bytes = 0;
     for record in records {
@@ -324,6 +386,10 @@ pub(crate) fn encode_records(records: &[LogRecord]) -> Bytes {
 }
 
 /// Parses the blob of one page of a delta layer, already verified with [`verify_blob`].
+///
+/// # Arguments
+///
+/// * `blob` - The page's blob, as [`encode_records`] wrote it.
 ///
 /// # Returns
 ///

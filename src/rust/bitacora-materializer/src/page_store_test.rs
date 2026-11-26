@@ -23,6 +23,7 @@ use bitacora_types::StreamId;
 use tokio::time::sleep;
 
 use super::*;
+use crate::layer::LAYER_HEADER_BYTES;
 use crate::namespace::namespace_prefix;
 
 /// The value [`Journal`] refuses to append.
@@ -733,14 +734,27 @@ async fn record_that_cannot_be_applied_fails_the_reads_of_its_page() {
 }
 
 #[tokio::test]
-async fn record_that_cannot_be_applied_leaves_other_pages_and_earlier_sequences_readable() {
+async fn record_that_cannot_be_applied_leaves_other_pages_readable() {
     let mut fixture = Fixture::new().await;
     fixture.apply(10, &[1]);
     fixture.apply(20, &[2]);
     fixture.apply(POISON_VALUE, &[1]);
 
-    assert_eq!(fixture.page(2, 3).await, Ok(page_of(&[20])));
-    assert_eq!(fixture.page(1, 2).await, Ok(page_of(&[10])));
+    let another_page = fixture.page(2, 3).await;
+
+    assert_eq!(another_page, Ok(page_of(&[20])));
+}
+
+#[tokio::test]
+async fn record_that_cannot_be_applied_leaves_earlier_sequences_of_its_page_readable() {
+    let mut fixture = Fixture::new().await;
+    fixture.apply(10, &[1]);
+    fixture.apply(20, &[2]);
+    fixture.apply(POISON_VALUE, &[1]);
+
+    let page_before_the_poison = fixture.page(1, 2).await;
+
+    assert_eq!(page_before_the_poison, Ok(page_of(&[10])));
 }
 
 /// A record of [`Journal`] that appends `value` to `page_ids`, or one it cannot read if `payload` is empty.

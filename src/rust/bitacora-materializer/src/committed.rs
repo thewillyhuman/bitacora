@@ -49,6 +49,19 @@ use crate::namespace::ArtifactNamespace;
 const MAX_ATTEMPTS: usize = 4;
 
 /// What a materializer last committed.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_materializer::CommittedCheckpoint;
+/// use bitacora_types::SequenceNumber;
+///
+/// let never_checkpointed = CommittedCheckpoint {
+///     checkpoint: SequenceNumber::ZERO,
+///     manifest: None,
+/// };
+/// assert_eq!(never_checkpointed.manifest, None);
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommittedCheckpoint {
     /// The last record the checkpoint covers. The log may be truncated up to here.
@@ -104,21 +117,36 @@ pub enum CommittedCheckpointError {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// # async fn example(
-/// #     metadata: bitacora_meta::MetadataStore,
-/// #     artifact_store: std::sync::Arc<dyn bitacora_artifact::ArtifactStore>,
-/// # ) -> Result<(), Box<dyn std::error::Error>> {
-/// use bitacora_materializer::{ArtifactNamespace, decode_catalog, read_committed_checkpoint};
+/// A query node looks at a materializer that is registered and has not committed a checkpoint yet:
 ///
+/// ```
+/// # use std::sync::Arc;
+/// # use bitacora_artifact::MemoryArtifactStore;
+/// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+/// # use bitacora_types::ReplicationSettings;
+/// use bitacora_materializer::{ArtifactNamespace, decode_catalog, read_committed_checkpoint};
+/// use bitacora_types::SequenceNumber;
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+/// # metadata
+/// #     .create_stream("metrics", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+/// #     .await?;
+/// # metadata.register_materializer("metrics", "bitacora-metrics").await?;
+/// # let artifact_store = Arc::new(MemoryArtifactStore::new());
 /// let stream = metadata.get_stream("metrics").await?;
 /// let artifacts = ArtifactNamespace::read_only(artifact_store, stream.stream_id, "bitacora-metrics");
 ///
 /// let committed = read_committed_checkpoint(&metadata, &artifacts, stream.stream_id, "bitacora-metrics").await?;
 ///
-/// if let Some(manifest) = committed.manifest {
-///     let catalog = decode_catalog(&manifest.details)?;
-///     println!("{} artifacts as of record {}", catalog.entries.len(), committed.checkpoint);
+/// assert_eq!(committed.checkpoint, SequenceNumber::ZERO);
+/// match committed.manifest {
+///     Some(manifest) => {
+///         let catalog = decode_catalog(&manifest.details)?;
+///         println!("{} artifacts as of record {}", catalog.entries.len(), committed.checkpoint);
+///     }
+///     None => println!("nothing was checkpointed yet"),
 /// }
 /// # Ok(())
 /// # }

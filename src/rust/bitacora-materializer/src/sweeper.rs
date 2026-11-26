@@ -59,6 +59,15 @@ use crate::manifest::decode_manifest;
 use crate::namespace::{ArtifactNamespace, token_of_artifact};
 
 /// What a sweep did.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_materializer::SweepReport;
+///
+/// let nothing_to_do = SweepReport::default();
+/// assert_eq!(nothing_to_do.artifacts_deleted, 0);
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
     /// How many artifacts were deleted.
@@ -104,16 +113,39 @@ pub enum SweepError {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// # use std::sync::Arc;
-/// # use bitacora_artifact::MemoryArtifactStore;
-/// # use bitacora_materializer::sweep_orphans;
-/// # use bitacora_meta::MetadataStore;
-/// # use bitacora_types::StreamId;
-/// # async fn example(metadata: MetadataStore) -> Result<(), bitacora_materializer::SweepError> {
+/// A runner crashed after it wrote an artifact and before it committed. The runner that took over holds the
+/// next token, so the artifact can never be named by a manifest, and a sweep deletes it:
+///
+/// ```
+/// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+/// # use bitacora_types::ReplicationSettings;
+/// use std::sync::Arc;
+///
+/// use bitacora_artifact::MemoryArtifactStore;
+/// use bitacora_materializer::{ArtifactNamespace, SweepReport, sweep_orphans};
+/// use bytes::Bytes;
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+/// # let stream = metadata
+/// #     .create_stream("orders", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+/// #     .await?;
+/// # metadata.register_materializer("orders", "bitacora-kv").await?;
 /// let artifact_store = Arc::new(MemoryArtifactStore::new());
-/// let report = sweep_orphans(&metadata, artifact_store, StreamId::new(7), "bitacora-kv").await?;
-/// println!("deleted {} orphan artifacts", report.artifacts_deleted);
+/// let crashed_runner = metadata.acquire_checkpoint(stream.stream_id, "bitacora-kv").await?;
+/// let artifacts_of_the_crashed_runner = ArtifactNamespace::for_runner(
+///     artifact_store.clone(),
+///     stream.stream_id,
+///     "bitacora-kv",
+///     crashed_runner.fencing_token,
+/// );
+/// artifacts_of_the_crashed_runner.put_artifact("never-committed", Bytes::from_static(b"orphan")).await?;
+/// let _successor = metadata.acquire_checkpoint(stream.stream_id, "bitacora-kv").await?;
+///
+/// let report = sweep_orphans(&metadata, artifact_store, stream.stream_id, "bitacora-kv").await?;
+///
+/// assert_eq!(report, SweepReport { artifacts_deleted: 1, artifacts_kept: 0 });
 /// # Ok(())
 /// # }
 /// ```
@@ -137,6 +169,10 @@ pub async fn sweep_orphans(
 /// * `namespace` - The materializer's artifacts.
 /// * `manifest_key` - The pointer in the checkpoint record, or `None` if no checkpoint was ever committed
 ///   with a manifest.
+///
+/// # Returns
+///
+/// The keys, relative to the namespace, of the manifest and of every artifact it names. Empty without a manifest.
 ///
 /// # Errors
 ///
@@ -166,6 +202,10 @@ pub(crate) async fn referenced_artifacts(
 /// * `tokens_below` - Artifacts written with this token or a higher one are kept whether referenced or
 ///   not. An outside sweep passes the current token; the runner that holds token C and has nothing in
 ///   flight passes C + 1.
+///
+/// # Returns
+///
+/// How many artifacts were deleted and how many objects of the namespace were left in place.
 ///
 /// # Errors
 ///

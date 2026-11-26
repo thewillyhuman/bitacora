@@ -19,9 +19,17 @@
 //! background: a test calls [`Harness::run_controller_pass`] when it wants placement or truncation to
 //! happen, which keeps every test's sequence of events exact.
 //!
+//! # Invariants
+//!
+//! - A harness shares nothing with another test: each one starts its own cluster and its own artifact store.
+//! - Nothing happens in the background but what the cluster's replicas do. Placement, truncation and time only
+//!   move when the test says so.
+//! - The helpers panic, with a message that names the step, when a step of the setup fails: a harness that cannot
+//!   be built is a broken test, not a case to handle.
+//!
 //! # See also
 //!
-//! - `runner_test.rs`, `page_store_test.rs`, `artifact_catalog_test.rs`: the tests that use it.
+//! - `runner_test.rs`, `artifact_catalog_test.rs`, `committed_test.rs`: the tests that use it.
 
 use std::sync::Arc;
 use std::time::Duration;

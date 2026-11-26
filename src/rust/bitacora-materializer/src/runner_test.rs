@@ -11,6 +11,9 @@
 //! - Outages of the artifact store and of the metadata store: the checkpoint is late, nothing is lost.
 //! - Orphans: a crash between writing and committing leaves artifacts that the sweeper removes.
 //!
+//! The progress handle is tested by itself, without a cluster, in `runner/progress_test.rs`, and the default
+//! pacing in `runner/settings_test.rs`.
+//!
 //! # How the fixtures work
 //!
 //! [`Recorder`] is the materializer under test. Its state is a count and a checksum of the payloads it
@@ -21,6 +24,7 @@
 
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bitacora_meta::MemoryKeyValueStore;
@@ -47,6 +51,15 @@ const CHECKPOINT_AFTER: Duration = Duration::from_secs(10);
 struct Probe {
     /// Shared between the instance and the test.
     shared: Arc<Mutex<ProbeState>>,
+}
+
+/// The state of a [`Recorder`]: enough to tell whether two instances saw the same records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RecorderState {
+    /// How many records the state covers.
+    record_count: u64,
+    /// The CRC-32C of the payloads the state covers, in order.
+    payload_checksum: u32,
 }
 
 /// The state behind a [`Probe`].
@@ -77,10 +90,13 @@ impl Probe {
         self.lock().applied_sequences.clone()
     }
 
-    /// The instance's state: how many records it covers and the checksum of their payloads.
-    fn state(&self) -> (u64, u32) {
+    /// The instance's state.
+    fn state(&self) -> RecorderState {
         let probe = self.lock();
-        (probe.record_count, probe.payload_checksum)
+        RecorderState {
+            record_count: probe.record_count,
+            payload_checksum: probe.payload_checksum,
+        }
     }
 
     /// How many checkpoints the instance has written.
@@ -186,14 +202,13 @@ impl Materializer for Recorder {
 }
 
 /// The state a [`Recorder`] has after applying the records whose numbers are in `record_numbers`.
-fn state_after(record_numbers: RangeInclusive<u64>) -> (u64, u32) {
-    let mut record_count = 0;
-    let mut payload_checksum = 0;
+fn state_after(record_numbers: RangeInclusive<u64>) -> RecorderState {
+    let mut state = RecorderState::default();
     for record_number in record_numbers {
-        record_count += 1;
-        payload_checksum = crc32c::crc32c_append(payload_checksum, &numbered_payload(record_number));
+        state.record_count += 1;
+        state.payload_checksum = crc32c::crc32c_append(state.payload_checksum, &numbered_payload(record_number));
     }
-    (record_count, payload_checksum)
+    state
 }
 
 /// Settings under which only time makes a checkpoint due: every [`CHECKPOINT_AFTER`].
@@ -291,7 +306,7 @@ async fn materializer_never_checkpointed_is_restored_empty() {
 
     let runner = start(&harness, checkpoint_by_time()).await;
 
-    assert_eq!(runner.materializer().probe().state(), (0, 0));
+    assert_eq!(runner.materializer().probe().state(), RecorderState::default());
 }
 
 #[tokio::test(start_paused = true)]
@@ -431,25 +446,6 @@ async fn waiter_is_told_why_the_runner_stopped() {
         current_token: 2,
     };
     assert_eq!(waited, Err(RunnerStopped { reason: Some(fenced) }));
-}
-
-#[test]
-fn stopped_runner_with_a_reason_says_the_reason() {
-    let stopped = RunnerStopped {
-        reason: Some(RunnerError::StreamEnded),
-    };
-
-    assert_eq!(
-        stopped.to_string(),
-        "the materializer runner has stopped: the stream ended"
-    );
-}
-
-#[test]
-fn runner_stopped_from_outside_says_so() {
-    let stopped = RunnerStopped { reason: None };
-
-    assert_eq!(stopped.to_string(), "the materializer runner was stopped from outside");
 }
 
 // ---- checkpointing ----
@@ -828,24 +824,35 @@ async fn checkpoint_put_off_by_an_artifact_store_outage_covers_everything_applie
     assert_eq!(harness.committed_checkpoint().await.checkpoint, SequenceNumber::new(8));
 }
 
-#[tokio::test(start_paused = true)]
-async fn metadata_outage_commits_nothing_and_stops_nothing() {
-    let harness = Harness::start().await;
+/// Runs a runner that has applied records 1 to 5 into a metadata store outage that lasts longer than the time
+/// limit for a checkpoint, and returns it while the outage goes on.
+async fn runner_in_a_metadata_outage(harness: &Harness) -> Running {
     let writer = harness.open_writer().await;
-    let mut running = start_and_spawn(&harness, checkpoint_by_time()).await;
+    let mut running = start_and_spawn(harness, checkpoint_by_time()).await;
     append_numbered(&writer, 5).await;
     running.applied(5).await;
 
     harness.cluster.key_value_store().set_unavailable(true);
     sleep(CHECKPOINT_AFTER * 2).await;
+    running
+}
 
-    assert_eq!(
-        (
-            running.progress.latest().committed_checkpoint,
-            running.task.is_finished()
-        ),
-        (SequenceNumber::ZERO, false)
-    );
+#[tokio::test(start_paused = true)]
+async fn metadata_outage_commits_nothing() {
+    let harness = Harness::start().await;
+
+    let running = runner_in_a_metadata_outage(&harness).await;
+
+    assert_eq!(running.progress.latest().committed_checkpoint, SequenceNumber::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn metadata_outage_does_not_stop_the_runner() {
+    let harness = Harness::start().await;
+
+    let running = runner_in_a_metadata_outage(&harness).await;
+
+    assert!(!running.task.is_finished());
 }
 
 #[tokio::test(start_paused = true)]
@@ -886,14 +893,24 @@ async fn crash_between_writing_and_committing(harness: &Harness) -> usize {
 }
 
 #[tokio::test(start_paused = true)]
-async fn crash_before_the_commit_leaves_artifacts_and_no_checkpoint() {
+async fn crash_before_the_commit_leaves_its_artifacts_behind() {
     let harness = Harness::start().await;
 
     let orphan_count = crash_between_writing_and_committing(&harness).await;
 
-    let committed = harness.committed_checkpoint().await;
+    // The snapshot and its manifest, at least.
     assert!(orphan_count >= 2, "only {orphan_count} objects were left");
-    assert_eq!((committed.checkpoint, committed.manifest), (SequenceNumber::ZERO, None));
+}
+
+#[tokio::test(start_paused = true)]
+async fn crash_before_the_commit_leaves_no_checkpoint() {
+    let harness = Harness::start().await;
+
+    crash_between_writing_and_committing(&harness).await;
+
+    let committed = harness.committed_checkpoint().await;
+    assert_eq!(committed.checkpoint, SequenceNumber::ZERO);
+    assert_eq!(committed.manifest, None);
 }
 
 #[tokio::test(start_paused = true)]

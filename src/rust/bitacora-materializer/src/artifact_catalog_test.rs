@@ -7,18 +7,20 @@
 //!   replay that follows, and the artifacts hold exactly the records their ranges say.
 //! - Compaction: runs of small neighbours are merged, tiers are respected, one merge per checkpoint.
 //! - Restoring, the view, and the catalog as a process that only queries reads it, with what the
-//!   builder says about each artifact.
+//!   builder says about each artifact. The stored form by itself is tested in `artifact_catalog/stored_test.rs`,
+//!   and the rule that picks what is merged in `artifact_catalog/compaction_test.rs`.
 //! - A builder that cuts at boundaries of its own and saves the records beyond them: what is sealed, what
 //!   is saved, that the artifacts do not depend on when checkpoints happen, and restarts.
 //! - Failures: a seal or a save that fails keeps the records; a catalog with a gap is refused.
 //!
 //! # How the fixtures work
 //!
-//! [`Sequencer`] is the builder under test. It summarizes an artifact as the number of records in it.
-//! Its artifacts list the sequence number and payload of every record they were built from, so a test can read all artifacts in catalog order and see which records
-//! are really there, not just which ranges are claimed. [`FixedCuts`] is a second builder, which cuts an
-//! artifact after every fourth record and saves the rest. [`CatalogFixture`] plays the runner by hand: it applies
-//! records, writes checkpoints, and restarts from a chosen manifest, which is how a crash is staged.
+//! [`Sequencer`] is the builder under test. It summarizes an artifact as the number of records in it. Its artifacts
+//! list the sequence number and payload of every record they were built from, so a test can read all artifacts in
+//! catalog order and see which records are really there, not just which ranges are claimed. [`FixedCuts`] is a
+//! second builder, which cuts an artifact after every fourth record and saves the rest. [`CatalogFixture`] plays the
+//! runner by hand: it applies records, writes checkpoints, and restarts from a chosen manifest, which is how a crash
+//! is staged; [`Committed`] is the checkpoint such a restart resumes from.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,9 +28,11 @@ use std::time::Duration;
 
 use bitacora_artifact::MemoryArtifactStore;
 use bitacora_types::StreamId;
+use bytes::{Buf, BufMut, BytesMut};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
+use super::stored::is_gapless;
 use super::*;
 use crate::runner::{MaterializerRunner, RunnerError, RunnerProgress, RunnerSettings};
 use crate::test_harness::{Harness, MATERIALIZER, STREAM as STREAM_NAME, append_numbered};
@@ -136,6 +140,35 @@ fn summarized_record_count(artifact: &ArtifactDescriptor) -> u64 {
     u64::from_le_bytes(stated)
 }
 
+/// The records one artifact covers, as numbers a test can write down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoveredRecords {
+    /// The first record covered.
+    first: u64,
+    /// The last record covered.
+    last: u64,
+}
+
+impl CoveredRecords {
+    /// The records `entry` says its artifact covers.
+    fn of(entry: &CatalogEntry) -> Self {
+        records(entry.covered_range.first().get(), entry.covered_range.last().get())
+    }
+}
+
+/// The records from `first` to `last`, both included.
+const fn records(first: u64, last: u64) -> CoveredRecords {
+    CoveredRecords { first, last }
+}
+
+/// A checkpoint that was committed before a crash: what the next instance restores from.
+struct Committed {
+    /// The manifest of the checkpoint.
+    manifest: CheckpointManifest,
+    /// The last record the checkpoint covers.
+    checkpoint: u64,
+}
+
 /// A catalog of [`Sequencer`] artifacts with someone playing the runner.
 type Fixture = CatalogFixture<Sequencer>;
 
@@ -143,7 +176,7 @@ type Fixture = CatalogFixture<Sequencer>;
 type CutFixture = CatalogFixture<FixedCuts>;
 
 /// An artifact catalog with someone playing the runner.
-struct CatalogFixture<B: ArtifactBuilder> {
+struct CatalogFixture<Builder: ArtifactBuilder> {
     /// The artifact store, also switched off by the tests.
     artifact_store: MemoryArtifactStore,
     /// The view the current instance writes through.
@@ -151,14 +184,14 @@ struct CatalogFixture<B: ArtifactBuilder> {
     /// The fencing token of the current instance.
     fencing_token: u64,
     /// The adapter under test.
-    catalog: ArtifactCatalog<B>,
+    catalog: ArtifactCatalog<Builder>,
     /// A view of the adapter under test.
     view: CatalogView,
     /// The sequence number the next record gets.
     next_sequence: u64,
 }
 
-impl<B: ArtifactBuilder> CatalogFixture<B> {
+impl<Builder: ArtifactBuilder> CatalogFixture<Builder> {
     /// A catalog that has never been checkpointed.
     async fn new() -> Self {
         Self::restored(MemoryArtifactStore::new(), 1, None, 1).await
@@ -219,25 +252,21 @@ impl<B: ArtifactBuilder> CatalogFixture<B> {
 
     /// Starts over as the next instance would after a crash: from the last committed checkpoint, with
     /// the next fencing token, and with the records after that checkpoint still to come.
-    async fn restart_from(self, committed: Option<(CheckpointManifest, u64)>) -> Self {
-        let (last_checkpoint, next_sequence) = match committed {
-            Some((manifest, checkpoint)) => (Some(manifest), checkpoint + 1),
-            None => (None, 1),
-        };
-        Self::restored(
-            self.artifact_store,
-            self.fencing_token + 1,
-            last_checkpoint,
-            next_sequence,
-        )
-        .await
+    async fn restart_from(self, committed: Option<Committed>) -> Self {
+        let next_fencing_token = self.fencing_token + 1;
+        match committed {
+            Some(Committed { manifest, checkpoint }) => {
+                Self::restored(self.artifact_store, next_fencing_token, Some(manifest), checkpoint + 1).await
+            }
+            None => Self::restored(self.artifact_store, next_fencing_token, None, 1).await,
+        }
     }
 
-    /// The ranges of the catalog, in order, as pairs of first and last sequence.
-    fn ranges(&self) -> Vec<(u64, u64)> {
+    /// The records each artifact of the catalog covers, in catalog order.
+    fn ranges(&self) -> Vec<CoveredRecords> {
         let mut ranges = Vec::new();
         for entry in self.view.entries() {
-            ranges.push((entry.covered_range.first().get(), entry.covered_range.last().get()));
+            ranges.push(CoveredRecords::of(&entry));
         }
         ranges
     }
@@ -388,12 +417,11 @@ impl ArtifactBuilder for FixedCuts {
     }
 }
 
-/// The records the saved pending artifact of `manifest` covers, as first and last sequence.
-fn saved_pending_records(manifest: &CheckpointManifest) -> Option<(u64, u64)> {
+/// The records the saved pending artifact of `manifest` covers, if the manifest names one.
+fn saved_pending_records(manifest: &CheckpointManifest) -> Option<CoveredRecords> {
     let stored = decode_catalog(&manifest.details).expect("a valid catalog");
-    stored
-        .pending
-        .map(|pending| (pending.covered_range.first().get(), pending.covered_range.last().get()))
+    let pending = stored.pending?;
+    Some(CoveredRecords::of(&pending))
 }
 
 /// The sequence numbers from 1 to `last`.
@@ -420,7 +448,7 @@ async fn checkpoint_seals_the_records_applied_into_one_artifact() {
 
     fixture.checkpoint().await;
 
-    assert_eq!(fixture.ranges(), [(1, 5)]);
+    assert_eq!(fixture.ranges(), [records(1, 5)]);
 }
 
 #[tokio::test]
@@ -442,7 +470,7 @@ async fn next_artifact_starts_right_after_the_previous_one() {
 
     fixture.checkpoint().await;
 
-    assert_eq!(fixture.ranges(), [(1, 5), (6, 8)]);
+    assert_eq!(fixture.ranges(), [records(1, 5), records(6, 8)]);
 }
 
 #[tokio::test]
@@ -512,7 +540,7 @@ async fn crash_before_the_first_commit_replays_everything_into_a_gapless_catalog
     replayed.apply(6, 0);
     replayed.checkpoint().await;
 
-    assert_eq!(replayed.ranges(), [(1, 6)]);
+    assert_eq!(replayed.ranges(), [records(1, 6)]);
     assert_eq!(replayed.sequences_in_the_artifacts().await, sequences_through(6));
 }
 
@@ -525,11 +553,16 @@ async fn crash_after_an_uncommitted_checkpoint_replays_into_a_gapless_catalog() 
     // This checkpoint is written, and lost: the runner crashes before it commits it.
     fixture.checkpoint().await;
 
-    let mut replayed = fixture.restart_from(Some((committed, 5))).await;
+    let mut replayed = fixture
+        .restart_from(Some(Committed {
+            manifest: committed,
+            checkpoint: 5,
+        }))
+        .await;
     replayed.apply(7, 0);
     replayed.checkpoint().await;
 
-    assert_eq!(replayed.ranges(), [(1, 5), (6, 12)]);
+    assert_eq!(replayed.ranges(), [records(1, 5), records(6, 12)]);
     assert_eq!(replayed.sequences_in_the_artifacts().await, sequences_through(12));
 }
 
@@ -540,7 +573,12 @@ async fn crash_with_records_never_sealed_replays_them() {
     let committed = fixture.checkpoint().await;
     fixture.apply(4, 0);
 
-    let mut replayed = fixture.restart_from(Some((committed, 5))).await;
+    let mut replayed = fixture
+        .restart_from(Some(Committed {
+            manifest: committed,
+            checkpoint: 5,
+        }))
+        .await;
     replayed.apply(4, 0);
     replayed.checkpoint().await;
 
@@ -556,7 +594,12 @@ async fn restored_catalog_is_the_one_that_was_checkpointed() {
     let manifest = fixture.checkpoint().await;
     let entries_before = fixture.view.entries();
 
-    let restored = fixture.restart_from(Some((manifest, 8))).await;
+    let restored = fixture
+        .restart_from(Some(Committed {
+            manifest,
+            checkpoint: 8,
+        }))
+        .await;
 
     assert_eq!(restored.view.entries(), entries_before);
 }
@@ -570,7 +613,7 @@ async fn two_small_neighbours_are_left_alone() {
 
     fixture.seal_one_small_artifact().await;
 
-    assert_eq!(fixture.ranges(), [(1, 1), (2, 2)]);
+    assert_eq!(fixture.ranges(), [records(1, 1), records(2, 2)]);
 }
 
 #[tokio::test]
@@ -581,7 +624,7 @@ async fn enough_small_neighbours_are_merged_into_one_artifact() {
 
     fixture.seal_one_small_artifact().await;
 
-    assert_eq!(fixture.ranges(), [(1, 3)]);
+    assert_eq!(fixture.ranges(), [records(1, 3)]);
 }
 
 #[tokio::test]
@@ -630,7 +673,7 @@ async fn merged_artifact_is_not_merged_with_smaller_neighbours() {
     fixture.seal_one_small_artifact().await;
 
     // One artifact of the second tier, then two of the first: no run of three.
-    assert_eq!(fixture.ranges(), [(1, 3), (4, 4), (5, 5)]);
+    assert_eq!(fixture.ranges(), [records(1, 3), records(4, 4), records(5, 5)]);
 }
 
 #[tokio::test]
@@ -646,8 +689,11 @@ async fn at_most_one_run_is_merged_per_checkpoint() {
 
     // The ninth small artifact completes a run of the first tier, and merging that run completes a run
     // of the second tier. Only the first merge happens now.
-    assert_eq!(ranges_before, [(1, 3), (4, 6), (7, 7), (8, 8)]);
-    assert_eq!(fixture.ranges(), [(1, 3), (4, 6), (7, 9)]);
+    assert_eq!(
+        ranges_before,
+        [records(1, 3), records(4, 6), records(7, 7), records(8, 8)]
+    );
+    assert_eq!(fixture.ranges(), [records(1, 3), records(4, 6), records(7, 9)]);
 }
 
 #[tokio::test]
@@ -659,7 +705,7 @@ async fn merged_artifacts_are_merged_again_once_enough_of_them_exist() {
 
     fixture.checkpoint().await;
 
-    assert_eq!(fixture.ranges(), [(1, 9)]);
+    assert_eq!(fixture.ranges(), [records(1, 9)]);
     assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(9));
 }
 
@@ -747,19 +793,6 @@ async fn stored_catalog_is_read_back_by_a_process_that_only_queries() {
     assert_eq!(read_by_a_query_node, Ok(expected));
 }
 
-/// A catalog entry that covers `first` to `last` with a made-up artifact.
-fn entry(first: u64, last: u64) -> CatalogEntry {
-    CatalogEntry {
-        covered_range: SequenceRange::new(SequenceNumber::new(first), SequenceNumber::new(last))
-            .expect("a valid range"),
-        artifact: ArtifactDescriptor {
-            artifact_key: format!("00000000000000000001/0000000000-{first}-{last}"),
-            size_bytes: 10,
-            summary: Bytes::from(format!("records {first} to {last}")),
-        },
-    }
-}
-
 #[tokio::test]
 async fn catalog_entry_carries_what_the_builder_says_about_its_artifact() {
     let mut fixture = Fixture::new().await;
@@ -793,130 +826,13 @@ async fn merged_artifact_carries_the_summary_its_merge_gave_it() {
 }
 
 #[tokio::test]
-async fn summaries_of_any_length_survive_the_stored_catalog() {
-    let mut without_summary = entry(1, 5);
-    without_summary.artifact.summary = Bytes::new();
-    let entries = [without_summary, entry(6, 9)];
-
-    let stored = encode_catalog(&entries, None);
-
-    let expected = StoredCatalog {
-        entries: entries.to_vec(),
-        pending: None,
-    };
-    assert_eq!(decode_catalog(&stored), Ok(expected));
-}
-
-#[tokio::test]
-async fn stored_catalog_of_an_earlier_format_is_refused() {
-    // Format version 2, which had no place for saved pending records, with no entry.
-    let earlier_format = Bytes::from_static(&[2, 0, 0, 0, 0, 0, 0, 0]);
-
-    let decoded = decode_catalog(&earlier_format);
-
-    let refused = MaterializerError::InvalidManifest {
-        reason: "the artifact catalog is not valid: it was written by another format".to_owned(),
-    };
-    assert_eq!(decoded, Err(refused));
-}
-
-#[tokio::test]
-async fn catalog_with_a_gap_is_refused_at_restore() {
-    let with_a_gap = encode_catalog(&[entry(1, 5), entry(7, 9)], None);
-
-    assert!(matches!(
-        decode_catalog(&with_a_gap),
-        Err(MaterializerError::InvalidManifest { .. })
-    ));
-}
-
-#[tokio::test]
-async fn catalog_with_an_overlap_is_refused_at_restore() {
-    let with_an_overlap = encode_catalog(&[entry(1, 5), entry(5, 9)], None);
-
-    assert!(matches!(
-        decode_catalog(&with_an_overlap),
-        Err(MaterializerError::InvalidManifest { .. })
-    ));
-}
-
-#[tokio::test]
-async fn stored_catalog_that_is_cut_short_is_refused() {
-    let stored = encode_catalog(&[entry(1, 5), entry(6, 9)], Some(&entry(10, 12)));
-
-    for kept_bytes in 0..stored.len() {
-        let decoded = decode_catalog(&stored.slice(..kept_bytes));
-
-        assert!(
-            matches!(decoded, Err(MaterializerError::InvalidManifest { .. })),
-            "a catalog cut to {kept_bytes} bytes gave {decoded:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn saved_pending_records_survive_the_stored_catalog() {
-    let stored = encode_catalog(&[entry(1, 5)], Some(&entry(6, 9)));
-
-    let expected = StoredCatalog {
-        entries: vec![entry(1, 5)],
-        pending: Some(entry(6, 9)),
-    };
-    assert_eq!(decode_catalog(&stored), Ok(expected));
-}
-
-#[tokio::test]
-async fn saved_pending_records_without_any_artifact_survive_the_stored_catalog() {
-    let stored = encode_catalog(&[], Some(&entry(1, 3)));
-
-    let expected = StoredCatalog {
-        entries: Vec::new(),
-        pending: Some(entry(1, 3)),
-    };
-    assert_eq!(decode_catalog(&stored), Ok(expected));
-}
-
-#[tokio::test]
-async fn saved_pending_records_that_do_not_follow_the_last_artifact_are_refused() {
-    let with_a_gap = encode_catalog(&[entry(1, 5)], Some(&entry(7, 9)));
-
-    let refused = MaterializerError::InvalidManifest {
-        reason: "the artifact catalog is not valid: its saved records do not follow its last artifact".to_owned(),
-    };
-    assert_eq!(decode_catalog(&with_a_gap), Err(refused));
-}
-
-#[tokio::test]
-async fn stored_catalog_with_bytes_after_it_is_refused() {
-    let mut longer = encode_catalog(&[entry(1, 5)], None).to_vec();
-    longer.push(0);
-
-    let decoded = decode_catalog(&Bytes::from(longer));
-
-    assert!(matches!(decoded, Err(MaterializerError::InvalidManifest { .. })));
-}
-
-#[tokio::test]
-async fn stored_catalog_that_does_not_say_whether_records_were_saved_is_refused() {
-    let mut unclear = encode_catalog(&[entry(1, 5)], None).to_vec();
-    let last_byte = unclear.len() - 1;
-    unclear[last_byte] = 7;
-
-    let decoded = decode_catalog(&Bytes::from(unclear));
-
-    assert!(matches!(decoded, Err(MaterializerError::InvalidManifest { .. })));
-}
-
-// ---- a builder that cuts at its own boundaries and saves the rest ----
-
-#[tokio::test]
 async fn builder_that_names_a_boundary_has_only_the_records_up_to_it_sealed() {
     let mut fixture = CutFixture::new().await;
     fixture.apply(6, 0);
 
     fixture.checkpoint().await;
 
-    assert_eq!(fixture.ranges(), [(1, 4)]);
+    assert_eq!(fixture.ranges(), [records(1, 4)]);
 }
 
 #[tokio::test]
@@ -936,7 +852,7 @@ async fn records_beyond_the_boundary_are_saved() {
 
     let manifest = fixture.checkpoint().await;
 
-    assert_eq!(saved_pending_records(&manifest), Some((5, 6)));
+    assert_eq!(saved_pending_records(&manifest), Some(records(5, 6)));
 }
 
 #[tokio::test]
@@ -961,8 +877,8 @@ async fn checkpoint_seals_every_artifact_that_is_due() {
 
     let manifest = fixture.checkpoint().await;
 
-    assert_eq!(fixture.ranges(), [(1, 4), (5, 8)]);
-    assert_eq!(saved_pending_records(&manifest), Some((9, 9)));
+    assert_eq!(fixture.ranges(), [records(1, 4), records(5, 8)]);
+    assert_eq!(saved_pending_records(&manifest), Some(records(9, 9)));
 }
 
 #[tokio::test]
@@ -973,7 +889,7 @@ async fn builder_that_is_not_full_is_saved_and_nothing_is_sealed() {
     let manifest = fixture.checkpoint().await;
 
     assert_eq!(fixture.ranges(), []);
-    assert_eq!(saved_pending_records(&manifest), Some((1, 3)));
+    assert_eq!(saved_pending_records(&manifest), Some(records(1, 3)));
 }
 
 #[tokio::test]
@@ -1007,7 +923,7 @@ async fn artifacts_are_cut_at_the_same_records_whenever_checkpoints_happen() {
 
     checkpointed_once.checkpoint().await;
 
-    assert_eq!(checkpointed_often.ranges(), [(1, 4), (5, 8)]);
+    assert_eq!(checkpointed_often.ranges(), [records(1, 4), records(5, 8)]);
     assert_eq!(checkpointed_once.ranges(), checkpointed_often.ranges());
 }
 
@@ -1035,12 +951,17 @@ async fn restored_builder_holds_the_records_that_were_saved() {
     fixture.apply(6, 0);
     let manifest = fixture.checkpoint().await;
     // The next instance is handed records 7 and 8 only: the log may hold nothing older.
-    let mut restarted = fixture.restart_from(Some((manifest, 6))).await;
+    let mut restarted = fixture
+        .restart_from(Some(Committed {
+            manifest,
+            checkpoint: 6,
+        }))
+        .await;
     restarted.apply(2, 0);
 
     restarted.checkpoint().await;
 
-    assert_eq!(restarted.ranges(), [(1, 4), (5, 8)]);
+    assert_eq!(restarted.ranges(), [records(1, 4), records(5, 8)]);
     assert_eq!(restarted.sequences_in_the_artifacts().await, sequences_through(8));
 }
 
@@ -1049,7 +970,12 @@ async fn restart_cuts_the_artifacts_an_uninterrupted_run_cuts() {
     let mut fixture = CutFixture::new().await;
     fixture.apply(6, SMALL_PAYLOAD_BYTES);
     let manifest = fixture.checkpoint().await;
-    let mut restarted = fixture.restart_from(Some((manifest, 6))).await;
+    let mut restarted = fixture
+        .restart_from(Some(Committed {
+            manifest,
+            checkpoint: 6,
+        }))
+        .await;
     restarted.apply(4, SMALL_PAYLOAD_BYTES);
     restarted.checkpoint().await;
     let mut uninterrupted = CutFixture::new().await;
@@ -1073,7 +999,7 @@ async fn crash_before_saved_records_are_committed_replays_them_from_the_log() {
 
     restarted.checkpoint().await;
 
-    assert_eq!(restarted.ranges(), [(1, 4), (5, 8)]);
+    assert_eq!(restarted.ranges(), [records(1, 4), records(5, 8)]);
     assert_eq!(restarted.sequences_in_the_artifacts().await, sequences_through(8));
 }
 
@@ -1097,7 +1023,7 @@ async fn pending_records_are_saved_again_once_there_are_more() {
 
     let second_manifest = fixture.checkpoint().await;
 
-    assert_eq!(saved_pending_records(&second_manifest), Some((5, 6)));
+    assert_eq!(saved_pending_records(&second_manifest), Some(records(5, 6)));
     assert_ne!(second_manifest.artifact_keys, first_manifest.artifact_keys);
 }
 
@@ -1106,7 +1032,12 @@ async fn restored_pending_records_are_not_saved_again_while_they_are_the_same() 
     let mut fixture = CutFixture::new().await;
     fixture.apply(6, 0);
     let manifest = fixture.checkpoint().await;
-    let mut restarted = fixture.restart_from(Some((manifest.clone(), 6))).await;
+    let mut restarted = fixture
+        .restart_from(Some(Committed {
+            manifest: manifest.clone(),
+            checkpoint: 6,
+        }))
+        .await;
 
     let manifest_after_restart = restarted.checkpoint().await;
 
@@ -1163,7 +1094,7 @@ async fn seal_that_fails_keeps_the_records_for_the_next_checkpoint() {
     fixture.checkpoint().await;
 
     assert!(failed.is_err_and(|error| error.is_transient()));
-    assert_eq!(fixture.ranges(), [(1, 7)]);
+    assert_eq!(fixture.ranges(), [records(1, 7)]);
     assert_eq!(fixture.sequences_in_the_artifacts().await, sequences_through(7));
 }
 
@@ -1189,14 +1120,15 @@ impl RunningCatalog {
     }
 
     /// Starts a runner of the artifacts of the builder `B` that checkpoints every ten seconds.
-    async fn start_with<B: ArtifactBuilder>(harness: &Harness) -> Self {
+    async fn start_with<Builder: ArtifactBuilder>(harness: &Harness) -> Self {
         let settings = RunnerSettings {
             checkpoint_after: Duration::from_secs(10),
             ..RunnerSettings::for_materializer(MATERIALIZER)
         };
-        let runner = MaterializerRunner::<ArtifactCatalog<B>>::start(harness.dependencies(), STREAM_NAME, settings)
-            .await
-            .expect("the runner starts");
+        let runner =
+            MaterializerRunner::<ArtifactCatalog<Builder>>::start(harness.dependencies(), STREAM_NAME, settings)
+                .await
+                .expect("the runner starts");
         Self {
             progress: runner.progress(),
             view: runner.materializer().view(),
@@ -1297,30 +1229,4 @@ async fn saved_pending_records_of_an_earlier_checkpoint_are_deleted_after_the_ne
 
     // The records saved at the second checkpoint and the manifest that names them.
     assert_eq!(harness.stored_object_count().await, 2);
-}
-
-// ---- the compaction rule on its own ----
-
-#[test]
-fn artifacts_below_the_first_boundary_are_in_the_lowest_tier() {
-    let policy = CompactionPolicy {
-        merge_fan_in: 3,
-        smallest_tier_bytes: 100,
-    };
-
-    assert_eq!(policy.tier_of(0), 0);
-    assert_eq!(policy.tier_of(99), 0);
-}
-
-#[test]
-fn each_tier_is_as_many_times_wider_as_the_fan_in() {
-    let policy = CompactionPolicy {
-        merge_fan_in: 3,
-        smallest_tier_bytes: 100,
-    };
-
-    assert_eq!(policy.tier_of(100), 1);
-    assert_eq!(policy.tier_of(299), 1);
-    assert_eq!(policy.tier_of(300), 2);
-    assert_eq!(policy.tier_of(u64::MAX), policy.tier_of(u64::MAX - 1));
 }

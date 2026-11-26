@@ -24,7 +24,9 @@
 //! new artifacts and read existing ones, and nothing else. That is how "artifacts are immutable and have
 //! unique names" is enforced instead of hoped for.
 //!
-//! # Rules every materializer must follow
+//! # Invariants
+//!
+//! The framework relies on three rules that it cannot check. Every materializer must keep them:
 //!
 //! - **Determinism.** State at sequence N depends only on records 1 to N. No clocks, no randomness, no
 //!   reads of external systems inside `apply_records`.
@@ -33,6 +35,10 @@
 //! - **Manifests only shrink or grow by what was just written.** A manifest may name artifacts that the
 //!   previous committed manifest named, and artifacts this instance wrote since. An artifact that a
 //!   manifest stops naming is garbage for good; the sweeper deletes it.
+//!
+//! What this file itself guarantees: the trait is the whole interface, the runner calls nothing else on a
+//! materializer, and it calls `apply_records` and `write_checkpoint` on one instance from one task, never at the
+//! same time.
 //!
 //! # See also
 //!
@@ -147,7 +153,8 @@ pub struct CheckpointManifest {
 /// A deterministic function from a prefix of the log to queryable state. Implemented once per workload;
 /// the runner owns the instance.
 ///
-/// See the file documentation for the rules an implementation must follow.
+/// An implementation must be deterministic and safe to replay, and its manifests may only name artifacts that
+/// the previous committed manifest named or that it wrote itself. `contract.rs` says why under "Invariants".
 ///
 /// # Examples
 ///
@@ -212,7 +219,11 @@ pub trait Materializer: Send + 'static {
     /// Whether the materializer would like to checkpoint now, before the runner's own thresholds are
     /// reached: for example because it has buffered as much as it wants to hold in memory.
     ///
-    /// The runner asks after every call to [`Materializer::apply_records`]. The default never asks.
+    /// The runner asks after every call to [`Materializer::apply_records`], unless a checkpoint is due anyway.
+    ///
+    /// # Returns
+    ///
+    /// `true` to be checkpointed as soon as the runner can. The default never asks.
     fn wants_checkpoint(&self) -> bool {
         false
     }
@@ -250,6 +261,11 @@ pub trait Materializer: Send + 'static {
     ///   committed: the state is then empty.
     /// * `artifacts` - Where the checkpoint's artifacts are. It may be cloned and kept, for example to
     ///   serve reads from artifacts later.
+    ///
+    /// # Returns
+    ///
+    /// An instance whose state is the one the checkpoint persisted. The runner applies the records after
+    /// the checkpoint to it.
     ///
     /// # Errors
     ///

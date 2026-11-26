@@ -24,7 +24,7 @@
 //! - What a process that is not the runner reads the committed state with:
 //!   [`read_committed_checkpoint`], with [`CommittedCheckpoint`] and [`CommittedCheckpointError`].
 //!
-//! # How it fits together
+//! # How it works
 //!
 //! ```text
 //! log --follow--> MaterializerRunner --apply_records--> Materializer
@@ -34,13 +34,26 @@
 //!                    +--commit_checkpoint--> metadata store                   artifact store
 //! ```
 //!
+//! The runner owns the instance of the materializer. It follows the stream, hands every committed record to the
+//! instance in order, and from time to time has the instance write its state down as artifacts. It then commits a
+//! pointer to those artifacts in the metadata store, under a fencing token that only one runner holds at a time.
+//!
 //! The committed checkpoint in the metadata store is what lets the controller truncate the log: never
 //! above it (invariant I5).
 //!
+//! # Invariants
+//!
+//! - A checkpoint is committed only after its artifacts and its manifest are stored.
+//! - Only the holder of the current fencing token commits, and an artifact key is never written twice.
+//! - Records are applied exactly once per run, in order, without gaps.
+//! - An artifact that the committed manifest names, or that its writer may still commit, is never deleted.
+//! - The crate depends on `bitacora-types`, `bitacora-artifact`, `bitacora-meta` and `bitacora-client` only.
+//!
 //! # See also
 //!
-//! The `README.md` of this crate for the design across files, and `docs/decisions/` for the choices the
-//! design document leaves open.
+//! - `README.md` in this crate: the design across files, and which file holds what.
+//! - `docs/decisions/0004-materializer-framework.md`: the choices the design document leaves open.
+//! - `docs/protocol/checkpoint-manifest.md`: the stored forms, for readers in other languages.
 
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
