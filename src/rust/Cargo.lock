@@ -398,6 +398,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bitacora-meta",
+ "bitacora-testports",
  "bitacora-types",
  "bytes",
  "etcd-client",

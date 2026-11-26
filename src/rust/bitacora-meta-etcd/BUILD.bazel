@@ -7,9 +7,9 @@ bitacora_library(
     deps = ["//src/rust/bitacora-meta:bitacora_meta"],
 )
 
-# Runs the store against a real etcd, which the test starts on free local
-# ports. Medium because it starts a process and talks to it over localhost;
-# it still finishes in seconds, hence the short timeout.
+# Runs the store against a real etcd, which the test starts on loopback
+# ports of its own. Medium because it starts a process and talks to it over
+# localhost; it still finishes in seconds, hence the short timeout.
 bitacora_integration_test(
     name = "etcd_test",
     size = "medium",
@@ -21,6 +21,7 @@ bitacora_integration_test(
     deps = [
         ":bitacora_meta_etcd",
         "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-testports:bitacora_testports",
         "//src/rust/bitacora-types:bitacora_types",
     ],
 )

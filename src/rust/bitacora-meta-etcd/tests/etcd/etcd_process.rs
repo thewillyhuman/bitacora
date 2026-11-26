@@ -10,14 +10,16 @@
 //! - [`EtcdProcess`]: one running etcd, stopped and wiped when dropped.
 //! - [`shared_etcd`]: the etcd that all tests running at the moment share.
 //! - [`etcd_binary`]: where the etcd program is, or `None` to skip.
-//! - [`loopback_listener`], [`port_of`] and [`free_local_port`]: how tests get ports that nobody else is using.
+//! - [`loopback_listener`] and [`port_of`]: a listener of the test's own, for a server that never answers.
 //!
 //! # How it works
 //!
-//! [`EtcdProcess::start`] asks the operating system for two free ports, starts a single-member etcd on them with its
-//! data in a temporary directory, and reads a key in a loop until etcd answers. The ports are found by binding port
-//! zero and closing the listeners again, so another program could in theory take one before etcd binds it; etcd then
-//! exits and the test fails with a clear message instead of misbehaving.
+//! [`EtcdProcess::start`] takes two ports, starts a single-member etcd on them with its data in a temporary
+//! directory, and reads a key in a loop until etcd answers. The ports come from the block of ports that this test
+//! binary shares (`bitacora_testports::take_shared_port`). No other test on the machine is given a port of that block,
+//! so nothing can take a port between the moment a test learns it and the moment etcd binds it. A port that the
+//! operating system chose and that was closed again has no such protection: tests that run in parallel are handed
+//! each other's.
 //!
 //! Starting etcd takes around a second, so tests share one: [`shared_etcd`] hands out a counted reference and starts a
 //! new process only when none is alive. The process is stopped when the last test holding a reference finishes, which
@@ -30,6 +32,7 @@
 //! - Dropping it kills the process before its data directory is removed, also while a test is panicking.
 //! - Under Bazel a missing etcd program is a failure, never a skip: a test that silently does nothing must not look
 //!   green in continuous integration.
+//! - Every port a test passes to a program, or expects nothing to listen on, comes from the shared block.
 //!
 //! # See also
 //!
@@ -38,7 +41,7 @@
 //! - `unavailability.rs`: the tests that start an etcd of their own, because they decide when it lives.
 
 // Production code must reach the network through the injected interfaces, which is why clippy forbids `TcpListener`.
-// This module only uses it to ask the operating system for port numbers, and there is no interface for that.
+// This module only uses it for a listener that never answers, and there is no interface for that.
 #![allow(clippy::disallowed_types)]
 
 use std::io::Write;
@@ -51,6 +54,7 @@ use std::time::Duration;
 
 use bitacora_meta::KeyValueStore;
 use bitacora_meta_etcd::{EtcdKeyValueStore, EtcdSettings};
+use bitacora_testports::take_shared_port;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -100,7 +104,7 @@ pub(crate) struct EtcdProcess {
 }
 
 impl EtcdProcess {
-    /// Starts etcd on free local ports and waits until it answers.
+    /// Starts etcd on ports of the shared block and waits until it answers.
     ///
     /// # Arguments
     ///
@@ -114,7 +118,7 @@ impl EtcdProcess {
     ///
     /// Panics like [`EtcdProcess::start_on_port`].
     pub(crate) async fn start(binary: &Path) -> Self {
-        Self::start_on_port(binary, free_local_port()).await
+        Self::start_on_port(binary, take_shared_port()).await
     }
 
     /// Starts etcd with its client endpoint on a port the test has chosen, and waits until it answers. For tests that
@@ -123,8 +127,8 @@ impl EtcdProcess {
     /// # Arguments
     ///
     /// * `binary` - Path of the etcd program, as [`etcd_binary`] returns it.
-    /// * `client_port` - The loopback port stores will connect to. It must be free, as a port from [`free_local_port`]
-    ///   is.
+    /// * `client_port` - The loopback port stores will connect to: one from `bitacora_testports::take_shared_port`,
+    ///   which nothing else is given.
     ///
     /// # Returns
     ///
@@ -132,12 +136,11 @@ impl EtcdProcess {
     ///
     /// # Panics
     ///
-    /// Panics when the program cannot be started, when it exits while starting (a port that was taken in the meantime
-    /// shows up this way), or when it does not answer within [`STARTUP_ALLOWANCE`]. In the last two cases the process
-    /// is killed first.
+    /// Panics when the program cannot be started, when it exits while starting, or when it does not answer within
+    /// [`STARTUP_ALLOWANCE`]. In the last two cases the process is killed first.
     pub(crate) async fn start_on_port(binary: &Path, client_port: u16) -> Self {
         let data_directory = new_data_directory();
-        let peer_port = free_local_port_other_than(client_port);
+        let peer_port = take_shared_port();
         let client_endpoint = format!("http://127.0.0.1:{client_port}");
         let peer_endpoint = format!("http://127.0.0.1:{peer_port}");
 
@@ -323,11 +326,12 @@ fn announce_skipped_tests() {
 /// Opens a listener on a loopback port chosen by the operating system, which picks one that nothing else is using.
 ///
 /// Nothing ever accepts on the listener. A test keeps it open to have a server that takes connections and never
-/// answers, or closes it to have a port that refuses them.
+/// answers. The port is the test's as long as the listener is open, which is why it needs no port of the shared
+/// block.
 ///
 /// # Returns
 ///
-/// The listener, bound and listening. Its port is free again once it is dropped.
+/// The listener, bound and listening.
 ///
 /// # Panics
 ///
@@ -348,28 +352,6 @@ pub(crate) fn loopback_listener() -> TcpListener {
 pub(crate) fn port_of(listener: &TcpListener) -> u16 {
     let address = listener.local_addr().expect("a bound listener has an address");
     address.port()
-}
-
-/// Returns a loopback port that nothing is listening on right now: one the operating system just handed out and that
-/// was closed again.
-///
-/// # Returns
-///
-/// The port number. Another program could take the port before the test uses it; an etcd started on it then exits,
-/// and the test fails with a clear message.
-pub(crate) fn free_local_port() -> u16 {
-    port_of(&loopback_listener())
-}
-
-/// Returns a loopback port that nothing is listening on right now and that is not `taken_port`, for the second of two
-/// ports that must differ.
-fn free_local_port_other_than(taken_port: u16) -> u16 {
-    loop {
-        let port = free_local_port();
-        if port != taken_port {
-            return port;
-        }
-    }
 }
 
 /// Creates the empty directory etcd keeps its data in, inside the test's own temporary directory when Bazel provides

@@ -51,8 +51,9 @@ program.
 Bazel downloads the etcd release for the platform (3.6.17 for macOS arm64,
 Linux x86-64 and Linux arm64), pinned by the checksums of the release's
 `SHA256SUMS` file, and passes its path to the test in `BITA_ETCD_BINARY`. The
-test starts etcd on free loopback ports with its data in the test's temporary
-directory, and kills it when the last test using it finishes. Nothing is
+test starts etcd on loopback ports that no other test is given
+(`bitacora-testports`), with its data in the test's temporary directory, and
+kills it when the last test using it finishes. Nothing is
 downloaded while a test runs. The tests share one etcd, each under its own
 key prefix; the three that kill etcd or start it late use one of their own.
 The target runs 48 tests in about two seconds.

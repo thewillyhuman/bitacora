@@ -28,8 +28,9 @@ use std::time::Duration;
 
 use bitacora_meta::KeyValueStore;
 use bitacora_meta_etcd::{EtcdKeyValueStore, EtcdSettings};
+use bitacora_testports::take_shared_port;
 
-use crate::etcd_process::{EtcdProcess, etcd_binary, free_local_port, loopback_listener, port_of};
+use crate::etcd_process::{EtcdProcess, etcd_binary, loopback_listener, port_of};
 use crate::writes::{put, put_mutation};
 
 /// The connect timeout of the stores these tests build.
@@ -68,7 +69,7 @@ async fn fails_in_bounded_time<Response, Failure>(request: impl Future<Output = 
 
 #[tokio::test]
 async fn read_from_an_unreachable_etcd_fails() {
-    let store = store_for_port(free_local_port()).await;
+    let store = store_for_port(take_shared_port()).await;
 
     let failed = fails_in_bounded_time(store.get("streams/orders")).await;
 
@@ -77,7 +78,7 @@ async fn read_from_an_unreachable_etcd_fails() {
 
 #[tokio::test]
 async fn listing_from_an_unreachable_etcd_fails() {
-    let store = store_for_port(free_local_port()).await;
+    let store = store_for_port(take_shared_port()).await;
 
     let failed = fails_in_bounded_time(store.list("streams/")).await;
 
@@ -86,7 +87,7 @@ async fn listing_from_an_unreachable_etcd_fails() {
 
 #[tokio::test]
 async fn write_to_an_unreachable_etcd_fails() {
-    let store = store_for_port(free_local_port()).await;
+    let store = store_for_port(take_shared_port()).await;
 
     let failed = fails_in_bounded_time(put(&store, "streams/orders", b"v1")).await;
 
@@ -159,7 +160,7 @@ async fn store_works_once_an_unreachable_etcd_comes_up() {
     let Some(binary) = etcd_binary() else {
         return;
     };
-    let port = free_local_port();
+    let port = take_shared_port();
     let store = store_for_port(port).await;
     let failed_during_the_outage = fails_in_bounded_time(store.get("streams/orders")).await;
     assert!(failed_during_the_outage);

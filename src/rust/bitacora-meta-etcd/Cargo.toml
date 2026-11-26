@@ -17,6 +17,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+bitacora-testports.workspace = true
 bitacora-types.workspace = true
 tempfile.workspace = true
 

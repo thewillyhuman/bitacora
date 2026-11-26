@@ -70,17 +70,18 @@ etcd, and as a module all of them would compile that stack for nothing. See
 
 ## Tests
 
-The unit tests need nothing. The tests in `tests/etcd/` start a real etcd on free loopback ports, with
-its data in the test's temporary directory, and stop it when the last test using it finishes. Bazel
-fetches a pinned etcd release and passes its path in `BITA_ETCD_BINARY`; nothing is downloaded while a
-test runs. Under Cargo, set the variable to the path of an etcd program; without it those tests pass
-without running and say so once.
+The unit tests need nothing. The tests in `tests/etcd/` start a real etcd on loopback ports that no
+other test is given (`bitacora-testports`), with its data in the test's temporary directory, and stop
+it when the last test using it finishes. Bazel fetches a pinned etcd release and passes its path in
+`BITA_ETCD_BINARY`; nothing is downloaded while a test runs. Under Cargo, set the variable to the path
+of an etcd program; without it those tests pass without running and say so once.
 
 ## Dependencies
 
-It depends on `bitacora-meta` and on third-party crates. One crate depends on it: `bitacora`, which picks
-the real backends for an application and for the daemons and tools of this repository. Nothing else may,
-so that a crate which only needs the interface or the in-memory store never compiles a gRPC client.
+It depends on `bitacora-meta` and on third-party crates; its tests also use `bitacora-testports`. One
+crate depends on it: `bitacora`, which picks the real backends for an application and for the daemons
+and tools of this repository. Nothing else may, so that a crate which only needs the interface or the
+in-memory store never compiles a gRPC client.
 
 ```text
 bitacora-types  <-  bitacora-meta  <-  bitacora-meta-etcd  <-  bitacora  <-  binaries
