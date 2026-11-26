@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "development/kubernetes has what it takes to try a build on a Kubernetes cluster: a test etcd, values for the chart, and run.sh, which runs bita or bita-bench in a pod next to the cluster."
+issues: [5]

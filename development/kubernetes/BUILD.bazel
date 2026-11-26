@@ -1,0 +1,28 @@
+"""What a developer needs to try bitacora on a Kubernetes cluster."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "shellcheck_test")
+
+# Rendered by the test of the chart, so that the values stay ones the chart
+# and the daemons accept.
+exports_files(
+    ["values.yaml"],
+    visibility = ["//src/helm:__pkg__"],
+)
+
+# The script with a stand-in for kubectl: no cluster is needed.
+sh_test(
+    name = "run_test",
+    size = "small",
+    srcs = ["run_test.sh"],
+    args = ["$(rootpath run.sh)"],
+    data = ["run.sh"],
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = [
+        "run.sh",
+        "run_test.sh",
+    ],
+)

@@ -19,6 +19,7 @@ _CHECKED_AGAINST = {
     "HELM": "//hack/tools:helm",
     "MODULE": "//:MODULE.bazel",
     "REPLICA_CONFIG": "//src/rust/bita-replica:example.toml",
+    "TRYOUT_VALUES": "//development/kubernetes:values.yaml",
 }
 
 _CHECK_ENVIRONMENT = {

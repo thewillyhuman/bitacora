@@ -1,0 +1,40 @@
+# Values of the bitacora chart for a cluster that is being tried out, next to
+# the etcd of etcd.yaml in this directory:
+#
+#   helm install bitacora src/helm/bitacora --kube-context <context> \
+#       --namespace bitacora --values development/kubernetes/values.yaml \
+#       --set image.tag=<version>
+#
+# Everything not set here is the chart's default; src/helm/bitacora/values.yaml
+# explains each value.
+
+etcd:
+  # The members by name, so that the daemons reach all three and not
+  # whichever the Service picks.
+  endpoints:
+    - http://etcd-0.etcd-headless:2379
+    - http://etcd-1.etcd-headless:2379
+    - http://etcd-2.etcd-headless:2379
+
+# Segments stay on the replicas: the test needs no object store.
+objectStore:
+  kind: none
+
+replica:
+  # Three is the least a stream with the default replication needs. With
+  # more nodes, run more, but leave one node without a replica: that is
+  # where run.sh puts a benchmark.
+  replicas: 3
+  storage:
+    size: 100Gi
+  # A request, so that the scheduler keeps room for the replica, and no CPU
+  # limit, so that a benchmark measures the disk and the network and not a
+  # throttle.
+  resources:
+    requests: {cpu: "1", memory: 1Gi}
+    limits: {memory: 4Gi}
+
+controller:
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}

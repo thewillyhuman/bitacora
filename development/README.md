@@ -92,6 +92,13 @@ BITA_BINARY=src/rust/target/debug/bita \
 development/cluster.sh start
 ```
 
+## A cluster on Kubernetes
+
+A machine of your own shows that the code works; it does not show how it behaves on real disks, across
+zones, or under a real network. [kubernetes/](kubernetes/README.md) has what it takes to put a build on
+a Kubernetes cluster you have: a test etcd, values for the chart, and a script that runs `bita` and the
+benchmark next to the cluster.
+
 ## How this directory is tested
 
 - `//development:cluster_test` runs `cluster.sh` for real: it starts a cluster in a temporary

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests the Helm chart without a cluster. It lints the chart and renders it
-# with its default values and with every values file of its ci/ directory,
-# then checks what was rendered: the configuration files are accepted by the
+# with its default values, with every values file of its ci/ directory and
+# with the values a developer tries a cluster out with, then checks what was
+# rendered: the configuration files are accepted by the
 # daemons themselves, every variable they refer to is set by the pod, and
 # the manifests have the replicas, probes, spreading, budgets and security
 # settings an operator relies on. It also checks values.yaml against the
@@ -16,6 +17,7 @@
 #   DOCKERFILE              the Dockerfile of the images the chart runs
 #   REPLICA_CONFIG          the example configuration of bita-replica
 #   CONTROLLER_CONFIG       the example configuration of bita-controller
+#   TRYOUT_VALUES           development/kubernetes/values.yaml
 #   BITA_REPLICA_BINARY     the two daemons, as Bazel builds them
 #   BITA_CONTROLLER_BINARY
 #
@@ -25,7 +27,7 @@
 set -euo pipefail
 
 : "${HELM:?}" "${CHART:?}" "${MODULE:?}" "${DOCKERFILE:?}" "${REPLICA_CONFIG:?}" "${CONTROLLER_CONFIG:?}"
-: "${BITA_REPLICA_BINARY:?}" "${BITA_CONTROLLER_BINARY:?}"
+: "${TRYOUT_VALUES:?}" "${BITA_REPLICA_BINARY:?}" "${BITA_CONTROLLER_BINARY:?}"
 
 chart="$(dirname "${CHART}")"
 scratch="${TEST_TMPDIR:?the test needs a temporary directory}"
@@ -394,6 +396,19 @@ values_keys() {
     ' "${chart}/values.yaml"
 }
 
+# The values of development/kubernetes, which a developer installs the chart
+# with next to the etcd of that directory: they must stay values the chart
+# and the daemons accept.
+case_tryout() {
+    render tryout --values "${TRYOUT_VALUES}" --set image.tag=0.1.0-rc.1 || return 0
+    check_always
+    expect replica-statefulset.yaml "replicas: 3" "storage: 100Gi" \
+        'image: "ghcr.io/thewillyhuman/bitacora/bita-replica:0.1.0-rc.1"' 'cpu: "1"'
+    expect replica-configmap.yaml \
+        'etcd_endpoints = ["http://etcd-0.etcd-headless:2379","http://etcd-1.etcd-headless:2379","http://etcd-2.etcd-headless:2379"]'
+    expect_absent replica-configmap.yaml "object_store"
+}
+
 # Checks values.yaml against the templates, both ways: every value is
 # explained and used, and every value a template uses exists. A template that
 # misspells a value renders an empty string without any complaint from helm.
@@ -440,6 +455,7 @@ case_s3_compatible
 case_larger_cluster
 case_service_monitor
 case_single_zone
+case_tryout
 case_refused_values
 
 if ((failures > 0)); then
