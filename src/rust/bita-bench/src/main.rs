@@ -38,6 +38,11 @@
 //! - `workload.rs`: what is measured and how.
 //! - `docs/cli.md`: the tool's options with examples.
 
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
+
 use std::io::Write;
 use std::process::ExitCode;
 

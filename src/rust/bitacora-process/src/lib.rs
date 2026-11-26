@@ -53,7 +53,10 @@
 //! - `docs/decisions/0006-daemons-and-observability.md`: why observability is built this way.
 //! - `bita-replica` and `bita-controller`: the daemons that use this crate.
 
+#![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 mod command_line;
 mod config_environment;

@@ -53,7 +53,10 @@
 //! - `bitacora-testkit`: the in-process cluster, for everything that does not need real processes.
 //! - `tests/real_cluster_test.rs`: the test of a cluster of real processes.
 
+#![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 mod binaries;
 mod cluster;

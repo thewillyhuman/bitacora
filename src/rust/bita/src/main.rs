@@ -39,6 +39,11 @@
 //! - `docs/cli.md`: every command with an example.
 //! - `commands.rs`: where a parsed command is run.
 
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;

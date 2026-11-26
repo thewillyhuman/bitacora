@@ -167,6 +167,11 @@ impl ChildProcess {
     }
 
     /// Whether the child has exited. Remembers its exit status the first time it sees it.
+    ///
+    /// # Panics
+    ///
+    /// If the operating system cannot say whether the child is running. A test cannot go on without
+    /// knowing, so it fails there with the name of the process.
     pub fn has_exited(&mut self) -> bool {
         if self.exit_status.is_some() {
             return true;

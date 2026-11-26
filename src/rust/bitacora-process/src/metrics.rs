@@ -238,6 +238,11 @@ impl MetricsRegistry {
     ///
     /// The exposition: one `# HELP` and one `# TYPE` line per metric, one line per time series, and a
     /// final `# EOF` line.
+    ///
+    /// # Panics
+    ///
+    /// Only if a registered metric fails to encode, which no metric of this crate does: they are plain
+    /// counters, gauges and histograms, and writing to a string cannot fail.
     #[must_use]
     pub fn encode(&self) -> String {
         let mut exposition = String::new();

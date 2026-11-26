@@ -40,6 +40,11 @@
 //! - `store.rs`: the store and how each call maps to the service.
 //! - `tests/s3/`: the tests that run against a real S3 server.
 
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
+
 mod s3;
 mod settings;
 mod store;

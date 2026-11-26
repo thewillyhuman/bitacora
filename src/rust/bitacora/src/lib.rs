@@ -34,7 +34,10 @@
 //! - `cluster.rs`: the configuration and the connecting.
 //! - `bitacora-client`: the client library itself.
 
+#![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 mod cluster;
 

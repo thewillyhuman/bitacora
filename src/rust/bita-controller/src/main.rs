@@ -52,7 +52,10 @@
 //! - `example.toml`: a complete configuration file.
 //! - `README.md`: how to operate the daemon.
 
+#![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 mod config;
 mod daemon;

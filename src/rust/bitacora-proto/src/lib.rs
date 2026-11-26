@@ -64,7 +64,10 @@
 //! - `client.rs`: [`GrpcReplicaConnector`].
 //! - `server.rs`: [`serve_replica`].
 
+#![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 mod client;
 mod conversions;
