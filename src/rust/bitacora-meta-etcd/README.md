@@ -44,11 +44,13 @@ etcd, and as a module all of them would compile that stack for nothing. See
 
 ## Invariants
 
-- Every request is bounded by the request timeout, whether etcd is slow, unreachable or gone.
+- Every attempt at a request is bounded by the request timeout, whether etcd is slow, unreachable or
+  gone.
 - Every failure of a request is reported as `bitacora_meta::StoreUnavailable`. Nothing panics on what
   etcd answers.
-- Nothing is retried. A transaction that failed may or may not have been applied; only the layer above
-  can read again and decide.
+- A transaction is never repeated. One that failed may or may not have been applied; only the layer
+  above can read again and decide. A read that failed is made once more, because repeating a read is
+  safe and a program's first request often comes before any connection is up.
 - Settings are checked in one place, when a store is built from them, and a store is never built from
   settings that were refused.
 - The crate holds no bitacora logic.

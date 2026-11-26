@@ -39,8 +39,11 @@ How a call maps to etcd:
 - Every key gets a configured prefix on the way in and loses it on the way
   out, so several clusters can share one etcd.
 - Every request has a timeout, and every failure is `StoreUnavailable`. The
-  store retries nothing: a transaction that failed may have been applied, and
-  only the layer above can read again and decide.
+  store never repeats a transaction: one that failed may have been applied,
+  and only the layer above can read again and decide. A read changes
+  nothing, so one that failed is made once more. That was added after the
+  first deployment on a real cluster, where about one tool in a hundred
+  that had just started failed on its first read, with etcd in good health.
 
 ## How the tests get a real etcd
 

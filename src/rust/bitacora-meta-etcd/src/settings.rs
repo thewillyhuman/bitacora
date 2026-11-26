@@ -76,8 +76,9 @@ pub struct EtcdSettings {
     /// The longest one attempt to open a connection to an endpoint may take. Must be longer than zero.
     pub connect_timeout: Duration,
 
-    /// The longest a `get`, `list` or `transact` may take, connecting included, before it fails as unavailable. Must be
-    /// longer than zero.
+    /// The longest one attempt at a `get`, `list` or `transact` may take, connecting included, before it fails as
+    /// unavailable. A read that fails is attempted once more, so a `get` or a `list` can take a little over twice as
+    /// long. Must be longer than zero.
     pub request_timeout: Duration,
 }
 

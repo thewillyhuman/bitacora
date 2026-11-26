@@ -7,6 +7,7 @@
 //! - Revisions: which revisions of the interface etcd can have given to a key.
 //! - The bound on every request: an answer is passed on, an error of the client and a call that never answers both
 //!   come back as `StoreUnavailable`.
+//! - Trying a read again: a read that fails is made once more, after a pause, and no more often than that.
 //!
 //! What a request does on a real etcd is tested in `tests/etcd/`.
 //!
@@ -14,7 +15,8 @@
 //!
 //! `store_with` prepares a store for an endpoint on which nobody listens. That is enough here: connecting sends
 //! nothing, and no test of this file sends a request. The tests of the request bound hand the store futures of their
-//! own instead of calls to etcd.
+//! own instead of calls to etcd. The tests of trying again hand `read_again_if_unavailable` a `ScriptedRead`, which
+//! answers from a list and counts how often it was asked; they run on a paused clock, so the pause costs no time.
 
 use std::future;
 
@@ -150,4 +152,80 @@ async fn call_that_never_answers_fails_at_the_request_timeout() {
 
     let failure = outcome.expect_err("the call never answered");
     assert_eq!(failure.reason, "etcd did not answer the read within 20ms");
+}
+
+/// A read that answers from a list, one entry per attempt, and counts the attempts.
+struct ScriptedRead {
+    /// What the attempts still to come answer, the next one last.
+    answers: Vec<Result<&'static str, StoreUnavailable>>,
+    /// How many attempts were made.
+    attempts: u32,
+}
+
+impl ScriptedRead {
+    /// A read whose attempts answer `answers`, in that order.
+    fn answering(mut answers: Vec<Result<&'static str, StoreUnavailable>>) -> Self {
+        answers.reverse();
+        Self { answers, attempts: 0 }
+    }
+
+    /// Makes one attempt.
+    fn attempt(&mut self) -> future::Ready<Result<&'static str, StoreUnavailable>> {
+        self.attempts += 1;
+        future::ready(self.answers.pop().expect("the script has an answer for every attempt"))
+    }
+}
+
+/// The failure of an attempt, with a reason that tells the attempts apart.
+fn failed(reason: &str) -> Result<&'static str, StoreUnavailable> {
+    Err(unavailable(reason.to_owned()))
+}
+
+#[tokio::test(start_paused = true)]
+async fn read_that_succeeds_is_made_once() {
+    let mut read = ScriptedRead::answering(vec![Ok("the answer")]);
+
+    let outcome = read_again_if_unavailable(|| read.attempt()).await;
+
+    assert_eq!(outcome, Ok("the answer"));
+    assert_eq!(read.attempts, 1);
+}
+
+/// What a program that has just started runs into: its first request finds no connection yet.
+#[tokio::test(start_paused = true)]
+async fn read_that_fails_once_is_made_again_and_returns_the_second_answer() {
+    let mut read = ScriptedRead::answering(vec![failed("no connection yet"), Ok("the answer")]);
+
+    let outcome = read_again_if_unavailable(|| read.attempt()).await;
+
+    assert_eq!(outcome, Ok("the answer"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn read_that_keeps_failing_is_given_up_after_the_attempts_allowed() {
+    let mut read = ScriptedRead::answering(vec![failed("first"), failed("second"), Ok("never asked for")]);
+
+    let _outcome = read_again_if_unavailable(|| read.attempt()).await;
+
+    assert_eq!(read.attempts, READ_ATTEMPTS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn read_that_keeps_failing_reports_its_last_failure() {
+    let mut read = ScriptedRead::answering(vec![failed("first"), failed("second")]);
+
+    let outcome = read_again_if_unavailable(|| read.attempt()).await;
+
+    assert_eq!(outcome, failed("second"));
+}
+
+/// A store that refuses at once must not be asked again in a tight loop.
+#[tokio::test(start_paused = true)]
+async fn failed_read_waits_before_it_is_made_again() {
+    let mut read = ScriptedRead::answering(vec![failed("refused at once"), Ok("the answer")]);
+    let started_at = tokio::time::Instant::now();
+
+    let _outcome = read_again_if_unavailable(|| read.attempt()).await;
+
+    assert_eq!(started_at.elapsed(), READ_RETRY_PAUSE);
 }

@@ -36,13 +36,18 @@
 //!
 //! Every key is sent with the configured prefix in front and comes back without it, so callers never see the prefix.
 //!
+//! A read that fails is made once more after a short pause. A read changes nothing, so making it again is safe, and
+//! one more attempt gets a program past the moment it most often fails at: its first request, sent before any
+//! connection is up. On a real cluster, about one tool in a hundred that had just started failed there, with etcd in
+//! good health.
+//!
 //! # Invariants
 //!
-//! - Every request is bounded by the request timeout, whether etcd is slow, unreachable or gone. A caller is never left
-//!   waiting.
+//! - Every attempt is bounded by the request timeout, whether etcd is slow, unreachable or gone, and a read makes at
+//!   most [`READ_ATTEMPTS`] of them. A caller is never left waiting.
 //! - Every failure is reported as [`StoreUnavailable`]. Nothing here panics on what etcd answers.
-//! - Nothing is retried here. A transaction that fails may or may not have been applied; the layer above reads again to
-//!   find out, and that is the only safe way to retry a conditional write.
+//! - A transaction is never made again here. One that fails may or may not have been applied; the layer above reads
+//!   again to find out, and that is the only safe way to retry a conditional write.
 //!
 //! # See also
 //!
@@ -70,6 +75,13 @@ use crate::settings::{EtcdSettings, InvalidEtcdSettings};
 /// much it stores; a second, smaller bound on the reading side would only turn a large cluster into one whose streams
 /// can no longer be listed. etcd's own client lifts the limit for the same reason.
 const LARGEST_RESPONSE_BYTES: usize = usize::MAX;
+
+/// How many times a read is made before it is reported as unavailable: once, and once more if that failed.
+const READ_ATTEMPTS: u32 = 2;
+
+/// How long a read that failed waits before it is made again, so that a store that refuses at once is not asked in a
+/// tight loop.
+const READ_RETRY_PAUSE: Duration = Duration::from_millis(100);
 
 /// The create revision etcd reports for a key that does not exist. Every key that exists has a positive one.
 const CREATE_REVISION_OF_AN_ABSENT_KEY: i64 = 0;
@@ -267,12 +279,9 @@ impl EtcdKeyValueStore {
             Mutation::Delete { key } => TxnOp::delete(self.to_etcd_key(&key), None),
         }
     }
-}
 
-#[async_trait]
-impl KeyValueStore for EtcdKeyValueStore {
-    /// Reads one key with a linearizable range request, which reflects every write completed before the call started.
-    async fn get(&self, key: &str) -> Result<Option<VersionedValue>, StoreUnavailable> {
+    /// Makes one attempt to read `key`: a linearizable range request over the one key.
+    async fn get_once(&self, key: &str) -> Result<Option<VersionedValue>, StoreUnavailable> {
         let mut client = self.new_key_value_client();
         let call = client.get(self.to_etcd_key(key), None);
         let mut response = self.await_within_the_request_timeout("read", call).await?;
@@ -284,8 +293,8 @@ impl KeyValueStore for EtcdKeyValueStore {
         Ok(Some(versioned_value))
     }
 
-    /// Reads every key under a prefix with one linearizable range request, so all entries are from the same revision.
-    async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
+    /// Makes one attempt to list the keys under `key_prefix`: one linearizable range request, sorted by key.
+    async fn list_once(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
         let mut client = self.new_key_value_client();
         let options = GetOptions::new()
             .with_prefix()
@@ -300,8 +309,24 @@ impl KeyValueStore for EtcdKeyValueStore {
         }
         Ok(entries)
     }
+}
 
-    /// Runs one etcd transaction: every put and delete is applied at one revision if every comparison holds.
+#[async_trait]
+impl KeyValueStore for EtcdKeyValueStore {
+    /// Reads one key with a linearizable range request, which reflects every write completed before the call started.
+    /// A read that fails is made once more.
+    async fn get(&self, key: &str) -> Result<Option<VersionedValue>, StoreUnavailable> {
+        read_again_if_unavailable(|| self.get_once(key)).await
+    }
+
+    /// Reads every key under a prefix with one linearizable range request, so all entries are from the same revision.
+    /// A listing that fails is made once more.
+    async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
+        read_again_if_unavailable(|| self.list_once(key_prefix)).await
+    }
+
+    /// Runs one etcd transaction: every put and delete is applied at one revision if every comparison holds. It is
+    /// sent once, whatever happens to it.
     async fn transact(
         &self,
         conditions: Vec<Condition>,
@@ -332,6 +357,34 @@ impl KeyValueStore for EtcdKeyValueStore {
 /// Builds the error every failure of this store is reported as.
 fn unavailable(reason: String) -> StoreUnavailable {
     StoreUnavailable { reason }
+}
+
+/// Makes a read, and makes it again after [`READ_RETRY_PAUSE`] if the store was unavailable, [`READ_ATTEMPTS`] times
+/// in all.
+///
+/// Only a read may go through here: it changes nothing, so making it twice does no harm. See the file header for
+/// what the second attempt is for.
+///
+/// # Errors
+///
+/// Fails with the [`StoreUnavailable`] of the last attempt when none of them succeeded.
+async fn read_again_if_unavailable<Response, Attempt>(
+    mut read: impl FnMut() -> Attempt,
+) -> Result<Response, StoreUnavailable>
+where
+    Attempt: Future<Output = Result<Response, StoreUnavailable>>,
+{
+    let mut attempts_made = 1;
+    loop {
+        match read().await {
+            Ok(response) => return Ok(response),
+            Err(last_failure) if attempts_made == READ_ATTEMPTS => return Err(last_failure),
+            Err(_failure_before_the_last_attempt) => {
+                attempts_made += 1;
+                tokio::time::sleep(READ_RETRY_PAUSE).await;
+            }
+        }
+    }
 }
 
 /// Returns `revision` as etcd counts revisions, or `None` when etcd can never have given it to a key.

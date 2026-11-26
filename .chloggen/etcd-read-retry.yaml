@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: meta
+note: "A read of the metadata store that fails is made once more. On a real cluster, about one tool in a hundred that had just started failed on its first read with 'etcd did not answer the read within 5s', although etcd was in good health. Transactions are still sent exactly once."
+issues: [5]
