@@ -8,7 +8,7 @@ use bitacora_artifact::MemoryArtifactStore;
 use bitacora_meta::{MemoryKeyValueStore, MetaError, MetadataStore, RECORD_SCHEMA_VERSION, ReplicaRecord};
 use bitacora_replica::{Replica, ReplicaSettings};
 use bitacora_segment::format::{Batch, decode_frames};
-use bitacora_segment::{Disk, MemoryDisk};
+use bitacora_segment::{CrashMode, Disk, MemoryDisk};
 use bitacora_types::replica_api::{ReadLimit, ReadRequest, ReplicaApi, ReplicaConnector, UnreachableReplica};
 use bitacora_types::{Clock, ReplicaId, SegmentAddress, SequenceNumber};
 
@@ -177,17 +177,17 @@ impl Node {
 
     /// Kills the replica process and loses everything that was not flushed.
     pub fn crash(&self) {
-        self.crash_keeping(|_path, durable, _visible| durable.to_vec());
+        self.crash_with(CrashMode::LoseUnflushed);
     }
 
-    /// Kills the replica process; `surviving_content` decides, per file,
-    /// what the disk holds afterwards. See [`MemoryDisk::crash_keeping`].
-    pub fn crash_keeping(&self, surviving_content: impl FnMut(&str, &[u8], &[u8]) -> Vec<u8>) {
+    /// Kills the replica process; `mode` decides what the disk holds
+    /// afterwards. See [`MemoryDisk::crash_with`].
+    pub fn crash_with(&self, mode: CrashMode) {
         if let Some(replica) = self.replica() {
             replica.stop();
         }
         self.link.set_replica(None);
-        self.disk().crash_keeping(surviving_content);
+        self.disk().crash_with(mode);
     }
 
     /// Kills the replica process and replaces the node's disk with an empty
@@ -594,7 +594,7 @@ mod tests {
         let node = &cluster.nodes()[0];
         // Keep the segment header and the first bytes of the only batch.
         let surviving_bytes = bitacora_segment::format::SEGMENT_HEADER_BYTES + 16;
-        node.crash_keeping(|_path, durable, _visible| durable[..durable.len().min(surviving_bytes)].to_vec());
+        node.crash_with(CrashMode::KeepFirstBytes(surviving_bytes));
         node.restart().await;
         assert_eq!(node.local_end(SEGMENT).await, Some(SequenceNumber::ZERO));
     }

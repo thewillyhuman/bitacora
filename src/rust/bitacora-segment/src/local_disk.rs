@@ -1,8 +1,52 @@
 //! The [`Disk`] adapter for a directory of the local file system.
 //!
-//! This is the only module of the crate that touches real files, which is
-//! why it alone opts out of the workspace's I/O lints. Blocking system calls
-//! run on Tokio's blocking pool so they never stall request handling.
+//! # Why this file exists
+//!
+//! In production a replica keeps its segment copies in a data directory on a local disk. Everything else
+//! in the workspace reaches a disk through the [`Disk`] interface, so that it can run on an in-memory disk
+//! under test. Something has to implement that interface on real files, and get right the parts a file
+//! system makes easy to get wrong: a file's name is durable only once its directory is flushed, a new file
+//! must not be visible under its name before its content is on disk, and a blocking system call must not
+//! stall the threads that serve requests. This file is that implementation, and the only place in the crate
+//! that touches real files.
+//!
+//! # What it contains
+//!
+//! - [`LocalDisk`]: a data directory, as a [`Disk`].
+//! - `LocalDiskFile`: one open file of it, as a [`DiskFile`].
+//!
+//! # How it works
+//!
+//! A path given to the disk is relative to the data directory, with `/` between its components. It is
+//! refused unless every component is a plain name, so no path can leave the directory.
+//!
+//! Durability follows three rules:
+//!
+//! - **New and replaced files are built under a scratch name** (the final name plus `.tmp`), flushed, and
+//!   renamed into place. A rename is atomic, so the real name only ever points at complete content. A
+//!   scratch file left by a crash is never listed.
+//! - **Every change of a name is followed by a flush of its directory.** Creating, renaming or removing a
+//!   file changes the directory, which has to reach the disk like any other data.
+//! - **Blocks are reserved when a file is created.** A later flush then only persists data, not a change
+//!   of size or a block allocation, which keeps flushes short and avoids running out of space in the
+//!   middle of an append.
+//!
+//! Every system call is blocking, so each operation runs on Tokio's blocking pool and the async threads
+//! stay free.
+//!
+//! # Invariants
+//!
+//! - No operation touches anything outside the data directory.
+//! - A file that exists under its final name starts with the content it was created with.
+//! - This is the only module of the crate that uses `std::fs`. The workspace's lints forbid direct file
+//!   access everywhere else; this module opts out below, because implementing the [`Disk`] interface on
+//!   real files is exactly its job.
+//!
+//! # See also
+//!
+//! - `disk.rs`: the interface and what each operation promises.
+//! - `memory_disk.rs`: the implementation for tests, which models the crashes this one must survive.
+
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::fs::{self, File, OpenOptions};
@@ -17,22 +61,72 @@ use fs4::FileExt as _;
 
 use crate::disk::{Disk, DiskFile, DiskSpace};
 
-/// Suffix of the scratch file a file is built under before it is renamed
-/// into place. A leftover one is an interrupted write and is never listed.
+/// Suffix of the scratch file a file is built under before it is renamed into place. A leftover one is an
+/// interrupted write and is never listed.
 const TEMPORARY_SUFFIX: &str = ".tmp";
 
+/// What separates the components of a path given to a [`Disk`], on every platform.
+const DISK_PATH_SEPARATOR: &str = "/";
+
 /// A data directory on the local file system.
+///
+/// Clones share the directory. The directory belongs to one replica process at a time; nothing here locks
+/// it against a second one.
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// use bitacora_segment::{Disk, LocalDisk};
+/// use bytes::Bytes;
+///
+/// let temporary_directory = tempfile::tempdir()?;
+/// let disk = LocalDisk::open(temporary_directory.path().join("data")).await?;
+///
+/// disk.write_file_atomically("replica.id", Bytes::from_static(b"replica-a"))
+///     .await?;
+///
+/// assert_eq!(disk.read_file("replica.id").await?, Some(Bytes::from_static(b"replica-a")));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug)]
 pub struct LocalDisk {
+    /// The data directory, as an absolute path without symbolic links. Every path the disk is given is
+    /// resolved below it.
     root_directory: Arc<PathBuf>,
 }
 
 impl LocalDisk {
-    /// Opens `root_directory` as a data directory, creating it if needed.
+    /// Opens a directory as a data directory, creating it if needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `root_directory` - The directory to use. Missing directories on the way to it are created.
+    ///
+    /// # Returns
+    ///
+    /// The disk. Opening reads and writes no file.
     ///
     /// # Errors
     ///
-    /// Fails if the directory cannot be created or resolved.
+    /// Fails with the underlying error if the directory cannot be created or resolved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use bitacora_segment::{Disk, LocalDisk};
+    ///
+    /// let temporary_directory = tempfile::tempdir()?;
+    /// let disk = LocalDisk::open(temporary_directory.path().join("data")).await?;
+    ///
+    /// assert!(disk.list_files().await?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn open(root_directory: impl Into<PathBuf>) -> io::Result<Self> {
         let root_directory = root_directory.into();
         run_blocking(move || {
@@ -45,14 +139,19 @@ impl LocalDisk {
         .await
     }
 
-    /// Maps a disk-relative path to a file system path, refusing anything
-    /// that could escape the data directory.
+    /// Maps a disk-relative path to a file system path, refusing anything that could escape the data
+    /// directory.
+    ///
+    /// Fails with [`io::ErrorKind::InvalidInput`] if the path is empty, absolute, or has a component that
+    /// is not a plain name, such as `..`.
     fn resolve(&self, path: &str) -> io::Result<PathBuf> {
         let relative_path = Path::new(path);
-        let stays_inside = !path.is_empty()
-            && relative_path
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)));
+        let mut stays_inside = !path.is_empty();
+        for component in relative_path.components() {
+            if !matches!(component, Component::Normal(_)) {
+                stays_inside = false;
+            }
+        }
         if !stays_inside {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -64,14 +163,19 @@ impl LocalDisk {
 }
 
 /// Runs a blocking file system operation off the async threads.
+///
+/// Fails with the operation's own error, or with an error that wraps the panic if the operation panicked.
 async fn run_blocking<Output: Send + 'static>(
     operation: impl FnOnce() -> io::Result<Output> + Send + 'static,
 ) -> io::Result<Output> {
-    tokio::task::spawn_blocking(operation).await.map_err(io::Error::other)?
+    match tokio::task::spawn_blocking(operation).await {
+        Ok(outcome) => outcome,
+        Err(join_error) => Err(io::Error::other(join_error)),
+    }
 }
 
-/// Makes the entries of `directory` durable. Creating or renaming a file
-/// changes its parent directory, which has to be flushed like any other data.
+/// Makes the entries of `directory` durable. Creating, renaming or removing a file changes its parent
+/// directory, which has to be flushed like any other data.
 fn sync_directory(directory: &Path) -> io::Result<()> {
     File::open(directory)?.sync_all()
 }
@@ -83,13 +187,15 @@ fn temporary_path_for(file_path: &Path) -> PathBuf {
     PathBuf::from(temporary_name)
 }
 
+/// The directory that holds `file_path`. A resolved path always has one: it lies below the data directory.
 fn parent_of(file_path: &Path) -> io::Result<&Path> {
-    file_path
-        .parent()
-        .ok_or_else(|| io::Error::other("a resolved path always has a parent"))
+    match file_path.parent() {
+        Some(parent_directory) => Ok(parent_directory),
+        None => Err(io::Error::other("a resolved path always has a parent")),
+    }
 }
 
-/// Creates the directories above `file_path` and makes them durable.
+/// Creates the directories above `file_path` and makes them durable, up to the data directory.
 fn create_parent_directories(root_directory: &Path, file_path: &Path) -> io::Result<()> {
     let parent_directory = parent_of(file_path)?;
     fs::create_dir_all(parent_directory)?;
@@ -101,6 +207,61 @@ fn create_parent_directories(root_directory: &Path, file_path: &Path) -> io::Res
     Ok(())
 }
 
+/// Wraps an open file in the handle the [`Disk`] interface returns.
+fn handle_to(file: File) -> Box<dyn DiskFile> {
+    Box::new(LocalDiskFile { file: Arc::new(file) })
+}
+
+/// Creates the file at `file_path` with its initial content and preallocated size, durably and atomically.
+///
+/// The file is built under a scratch name and renamed into place once it is durable, so that the real name
+/// only ever points at a file that starts with its initial content.
+fn create_file_durably(
+    root_directory: &Path,
+    file_path: &Path,
+    initial_content: &[u8],
+    preallocated_bytes: u64,
+) -> io::Result<Box<dyn DiskFile>> {
+    create_parent_directories(root_directory, file_path)?;
+    if file_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("file exists: {}", file_path.display()),
+        ));
+    }
+    let temporary_path = temporary_path_for(file_path);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary_path)?;
+    if preallocated_bytes > 0 {
+        // Reserving the blocks now means a later flush only has to persist data, not a size change or a
+        // block allocation.
+        file.allocate(preallocated_bytes)?;
+    }
+    file.write_all_at(initial_content, 0)?;
+    file.sync_all()?;
+    fs::rename(&temporary_path, file_path)?;
+    sync_directory(parent_of(file_path)?)?;
+    Ok(handle_to(file))
+}
+
+/// Replaces the whole content of the file at `file_path`, durably and atomically.
+fn replace_file_durably(root_directory: &Path, file_path: &Path, contents: &[u8]) -> io::Result<()> {
+    create_parent_directories(root_directory, file_path)?;
+    let temporary_path = temporary_path_for(file_path);
+    let temporary_file = File::create(&temporary_path)?;
+    temporary_file.write_all_at(contents, 0)?;
+    // Flush before the rename: a rename is atomic, but it must never expose a name that points at content
+    // not yet on disk.
+    temporary_file.sync_all()?;
+    fs::rename(&temporary_path, file_path)?;
+    sync_directory(parent_of(file_path)?)
+}
+
+/// Adds to `found` the disk-relative path of every file below `directory`, scratch files excepted.
 fn collect_files(directory: &Path, root_directory: &Path, found: &mut Vec<String>) -> io::Result<()> {
     for entry in fs::read_dir(directory)? {
         let entry_path = entry?.path();
@@ -108,12 +269,7 @@ fn collect_files(directory: &Path, root_directory: &Path, found: &mut Vec<String
             collect_files(&entry_path, root_directory, found)?;
             continue;
         }
-        let relative_path = entry_path.strip_prefix(root_directory).map_err(io::Error::other)?;
-        let listed_path = relative_path
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
+        let listed_path = disk_path_of(&entry_path, root_directory)?;
         if !listed_path.ends_with(TEMPORARY_SUFFIX) {
             found.push(listed_path);
         }
@@ -121,8 +277,24 @@ fn collect_files(directory: &Path, root_directory: &Path, found: &mut Vec<String
     Ok(())
 }
 
+/// Turns a file system path below the data directory back into the path the [`Disk`] interface uses:
+/// relative to the data directory, with `/` between components.
+fn disk_path_of(file_path: &Path, root_directory: &Path) -> io::Result<String> {
+    let relative_path = match file_path.strip_prefix(root_directory) {
+        Ok(relative_path) => relative_path,
+        Err(not_below_the_root) => return Err(io::Error::other(not_below_the_root)),
+    };
+    let mut component_names = Vec::new();
+    for component in relative_path.components() {
+        component_names.push(component.as_os_str().to_string_lossy());
+    }
+    Ok(component_names.join(DISK_PATH_SEPARATOR))
+}
+
 #[async_trait]
 impl Disk for LocalDisk {
+    /// Builds the file under a scratch name with its blocks reserved, flushes it, renames it into place
+    /// and flushes the directory.
     async fn create_file(
         &self,
         path: &str,
@@ -131,64 +303,29 @@ impl Disk for LocalDisk {
     ) -> io::Result<Box<dyn DiskFile>> {
         let file_path = self.resolve(path)?;
         let root_directory = Arc::clone(&self.root_directory);
-        run_blocking(move || {
-            create_parent_directories(&root_directory, &file_path)?;
-            if file_path.exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("file exists: {}", file_path.display()),
-                ));
-            }
-            // Build the file under a scratch name and rename it into place
-            // once it is durable, so that the real name only ever points at
-            // a file that starts with its initial content.
-            let temporary_path = temporary_path_for(&file_path);
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&temporary_path)?;
-            if preallocated_bytes > 0 {
-                // Reserving the blocks now means a later flush only has to
-                // persist data, not a size change or a block allocation.
-                file.allocate(preallocated_bytes)?;
-            }
-            file.write_all_at(&initial_content, 0)?;
-            file.sync_all()?;
-            fs::rename(&temporary_path, &file_path)?;
-            sync_directory(parent_of(&file_path)?)?;
-            Ok(Box::new(LocalDiskFile { file: Arc::new(file) }) as Box<dyn DiskFile>)
-        })
-        .await
+        run_blocking(move || create_file_durably(&root_directory, &file_path, &initial_content, preallocated_bytes))
+            .await
     }
 
+    /// Opens the file for reading and writing.
     async fn open_file(&self, path: &str) -> io::Result<Box<dyn DiskFile>> {
         let file_path = self.resolve(path)?;
         run_blocking(move || {
             let file = OpenOptions::new().read(true).write(true).open(&file_path)?;
-            Ok(Box::new(LocalDiskFile { file: Arc::new(file) }) as Box<dyn DiskFile>)
+            Ok(handle_to(file))
         })
         .await
     }
 
+    /// Writes the new content under a scratch name, flushes it, renames it over the file and flushes the
+    /// directory.
     async fn write_file_atomically(&self, path: &str, contents: Bytes) -> io::Result<()> {
         let file_path = self.resolve(path)?;
         let root_directory = Arc::clone(&self.root_directory);
-        run_blocking(move || {
-            create_parent_directories(&root_directory, &file_path)?;
-            let temporary_path = temporary_path_for(&file_path);
-            let temporary_file = File::create(&temporary_path)?;
-            temporary_file.write_all_at(&contents, 0)?;
-            // Flush before the rename: a rename is atomic, but it must never
-            // expose a name that points at content not yet on disk.
-            temporary_file.sync_all()?;
-            fs::rename(&temporary_path, &file_path)?;
-            sync_directory(parent_of(&file_path)?)
-        })
-        .await
+        run_blocking(move || replace_file_durably(&root_directory, &file_path, &contents)).await
     }
 
+    /// Reads the whole file into memory.
     async fn read_file(&self, path: &str) -> io::Result<Option<Bytes>> {
         let file_path = self.resolve(path)?;
         run_blocking(move || match fs::read(&file_path) {
@@ -199,6 +336,7 @@ impl Disk for LocalDisk {
         .await
     }
 
+    /// Removes the file and flushes its directory.
     async fn remove_file(&self, path: &str) -> io::Result<()> {
         let file_path = self.resolve(path)?;
         run_blocking(move || match fs::remove_file(&file_path) {
@@ -209,19 +347,21 @@ impl Disk for LocalDisk {
         .await
     }
 
+    /// Renames the file and flushes the directories of both names.
     async fn rename_file(&self, from_path: &str, to_path: &str) -> io::Result<()> {
         let source_path = self.resolve(from_path)?;
         let target_path = self.resolve(to_path)?;
         run_blocking(move || {
             fs::rename(&source_path, &target_path)?;
-            // The move is two directory changes when the files are in two
-            // directories, and neither is durable until its directory is.
+            // The move is two directory changes when the files are in two directories, and neither is
+            // durable until its directory is.
             sync_directory(parent_of(&target_path)?)?;
             sync_directory(parent_of(&source_path)?)
         })
         .await
     }
 
+    /// Walks the data directory and sorts what it finds, leaving scratch files out.
     async fn list_files(&self) -> io::Result<Vec<String>> {
         let root_directory = Arc::clone(&self.root_directory);
         run_blocking(move || {
@@ -233,6 +373,7 @@ impl Disk for LocalDisk {
         .await
     }
 
+    /// Asks the file system that holds the data directory for its size and its available space.
     async fn space(&self) -> io::Result<DiskSpace> {
         let root_directory = Arc::clone(&self.root_directory);
         run_blocking(move || {
@@ -248,41 +389,51 @@ impl Disk for LocalDisk {
 /// A handle to one file of a [`LocalDisk`].
 #[derive(Debug)]
 struct LocalDiskFile {
+    /// The open file. Shared, so that each operation can take it onto the blocking pool without reopening
+    /// it; positional reads and writes need no shared cursor.
     file: Arc<File>,
+}
+
+/// Reads up to `length_bytes` of `file` starting at `offset_bytes`, retrying interrupted and short reads
+/// until the buffer is full or the file ends.
+fn read_fully_at(file: &File, offset_bytes: u64, length_bytes: usize) -> io::Result<Bytes> {
+    let mut contents = BytesMut::zeroed(length_bytes);
+    let mut filled_bytes = 0;
+    while filled_bytes < length_bytes {
+        let read_offset = offset_bytes + u64::try_from(filled_bytes).expect("lengths fit in 64 bits");
+        match file.read_at(&mut contents[filled_bytes..], read_offset) {
+            // The file ends here.
+            Ok(0) => break,
+            Ok(read_bytes) => filled_bytes += read_bytes,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    contents.truncate(filled_bytes);
+    Ok(contents.freeze())
 }
 
 #[async_trait]
 impl DiskFile for LocalDiskFile {
+    /// Reads with positional reads until the request is filled or the file ends.
     async fn read_at(&self, offset_bytes: u64, length_bytes: usize) -> io::Result<Bytes> {
         let file = Arc::clone(&self.file);
-        run_blocking(move || {
-            let mut contents = BytesMut::zeroed(length_bytes);
-            let mut filled_bytes = 0;
-            while filled_bytes < length_bytes {
-                let read_offset = offset_bytes + u64::try_from(filled_bytes).expect("lengths fit in 64 bits");
-                match file.read_at(&mut contents[filled_bytes..], read_offset) {
-                    Ok(0) => break,
-                    Ok(read_bytes) => filled_bytes += read_bytes,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            contents.truncate(filled_bytes);
-            Ok(contents.freeze())
-        })
-        .await
+        run_blocking(move || read_fully_at(&file, offset_bytes, length_bytes)).await
     }
 
+    /// Writes all of the data with a positional write.
     async fn write_at(&mut self, offset_bytes: u64, data: Bytes) -> io::Result<()> {
         let file = Arc::clone(&self.file);
         run_blocking(move || file.write_all_at(&data, offset_bytes)).await
     }
 
+    /// Calls `fdatasync`: the data reaches the disk, and so does the size if it changed.
     async fn sync_data(&mut self) -> io::Result<()> {
         let file = Arc::clone(&self.file);
         run_blocking(move || file.sync_data()).await
     }
 
+    /// Sets the length and flushes data and metadata, so the new length is durable.
     async fn set_length(&mut self, length_bytes: u64) -> io::Result<()> {
         let file = Arc::clone(&self.file);
         run_blocking(move || {
@@ -292,6 +443,7 @@ impl DiskFile for LocalDiskFile {
         .await
     }
 
+    /// Asks the file system for the file's length.
     async fn length_bytes(&self) -> io::Result<u64> {
         let file = Arc::clone(&self.file);
         run_blocking(move || Ok(file.metadata()?.len())).await
@@ -299,206 +451,5 @@ impl DiskFile for LocalDiskFile {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const PATH: &str = "7/3.seg";
-
-    async fn disk_in(directory: &tempfile::TempDir) -> LocalDisk {
-        LocalDisk::open(directory.path().join("data"))
-            .await
-            .expect("data directory")
-    }
-
-    #[tokio::test]
-    async fn written_bytes_are_read_back_after_reopening() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        let mut file = disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
-        file.write_at(3, Bytes::from_static(b"abc")).await.expect("write");
-        file.sync_data().await.expect("flush");
-
-        let reopened = disk_in(&directory).await.open_file(PATH).await.expect("open");
-        assert_eq!(
-            reopened.read_at(0, 64).await.expect("read"),
-            Bytes::from_static(b"\0\0\0abc")
-        );
-    }
-
-    #[tokio::test]
-    async fn new_file_starts_with_its_initial_content() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        disk.create_file(PATH, Bytes::from_static(b"header"), 8)
-            .await
-            .expect("new file");
-        let reopened = disk.open_file(PATH).await.expect("open");
-        assert_eq!(
-            reopened.read_at(0, 64).await.expect("read"),
-            Bytes::from_static(b"header\0\0")
-        );
-    }
-
-    #[tokio::test]
-    async fn rename_replaces_the_file_that_was_there() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        disk.write_file_atomically("7/3.seg", Bytes::from_static(b"old copy"))
-            .await
-            .expect("write");
-        disk.write_file_atomically("7/3.seg.repair", Bytes::from_static(b"new copy"))
-            .await
-            .expect("write");
-
-        disk.rename_file("7/3.seg.repair", "7/3.seg").await.expect("rename");
-
-        assert_eq!(
-            disk.read_file("7/3.seg").await.expect("read"),
-            Some(Bytes::from_static(b"new copy"))
-        );
-        assert_eq!(disk.read_file("7/3.seg.repair").await.expect("read"), None);
-    }
-
-    #[tokio::test]
-    async fn rename_of_a_missing_file_fails_and_leaves_the_target_alone() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        disk.write_file_atomically("7/3.seg", Bytes::from_static(b"old copy"))
-            .await
-            .expect("write");
-
-        let renamed = disk.rename_file("7/3.seg.repair", "7/3.seg").await;
-
-        assert_eq!(renamed.map_err(|error| error.kind()), Err(io::ErrorKind::NotFound));
-        assert_eq!(
-            disk.read_file("7/3.seg").await.expect("read"),
-            Some(Bytes::from_static(b"old copy"))
-        );
-    }
-
-    #[tokio::test]
-    async fn creation_leaves_no_scratch_file_behind() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        disk.create_file(PATH, Bytes::from_static(b"header"), 0)
-            .await
-            .expect("new file");
-        let scratch_path = directory.path().join("data").join("7").join("3.seg.tmp");
-        assert!(!scratch_path.exists());
-    }
-
-    #[tokio::test]
-    async fn new_file_has_its_preallocated_length() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        let file = disk.create_file(PATH, Bytes::new(), 4096).await.expect("new file");
-        assert_eq!(file.length_bytes().await.expect("length"), 4096);
-    }
-
-    #[tokio::test]
-    async fn creating_an_existing_file_fails() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
-        let second_attempt = disk.create_file(PATH, Bytes::new(), 0).await;
-        assert_eq!(
-            second_attempt.err().map(|error| error.kind()),
-            Some(io::ErrorKind::AlreadyExists)
-        );
-    }
-
-    #[tokio::test]
-    async fn opening_a_missing_file_fails() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let opened = disk_in(&directory).await.open_file(PATH).await;
-        assert_eq!(opened.err().map(|error| error.kind()), Some(io::ErrorKind::NotFound));
-    }
-
-    #[tokio::test]
-    async fn reading_past_the_end_returns_what_exists() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        let mut file = disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
-        file.write_at(0, Bytes::from_static(b"abc")).await.expect("write");
-        assert_eq!(file.read_at(1, 64).await.expect("read"), Bytes::from_static(b"bc"));
-    }
-
-    #[tokio::test]
-    async fn atomic_write_replaces_the_previous_content() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        for contents in [&b"first"[..], &b"second"[..]] {
-            disk.write_file_atomically("7/3.state", Bytes::from_static(contents))
-                .await
-                .expect("write");
-        }
-        assert_eq!(
-            disk.read_file("7/3.state").await.expect("read"),
-            Some(Bytes::from_static(b"second"))
-        );
-    }
-
-    #[tokio::test]
-    async fn reading_a_missing_small_file_returns_none() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        assert_eq!(disk.read_file("7/3.state").await.expect("read"), None);
-    }
-
-    #[tokio::test]
-    async fn files_are_listed_sorted_without_scratch_files() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        for path in ["7/3.seg", "2/9.seg", "7/3.state.tmp"] {
-            disk.create_file(path, Bytes::new(), 0).await.expect("new file");
-        }
-        assert_eq!(disk.list_files().await.expect("list"), ["2/9.seg", "7/3.seg"]);
-    }
-
-    #[tokio::test]
-    async fn removed_file_is_no_longer_listed() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
-        disk.remove_file(PATH).await.expect("remove");
-        assert_eq!(disk.list_files().await.expect("list"), Vec::<String>::new());
-    }
-
-    #[tokio::test]
-    async fn removing_a_missing_file_succeeds() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        assert!(disk.remove_file(PATH).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn shrinking_a_file_cuts_its_content() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        let mut file = disk.create_file(PATH, Bytes::new(), 0).await.expect("new file");
-        file.write_at(0, Bytes::from_static(b"keep-drop")).await.expect("write");
-        file.set_length(4).await.expect("shrink");
-        assert_eq!(file.read_at(0, 64).await.expect("read"), Bytes::from_static(b"keep"));
-    }
-
-    #[tokio::test]
-    async fn paths_that_escape_the_data_directory_are_refused() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let disk = disk_in(&directory).await;
-        for escaping_path in ["../outside", "/etc/passwd", "7/../../outside", ""] {
-            let created = disk.create_file(escaping_path, Bytes::new(), 0).await;
-            assert_eq!(
-                created.err().map(|error| error.kind()),
-                Some(io::ErrorKind::InvalidInput),
-                "path {escaping_path:?} was accepted"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn disk_reports_free_space_within_its_capacity() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let space = disk_in(&directory).await.space().await.expect("space");
-        assert!(space.capacity_bytes > 0 && space.free_bytes <= space.capacity_bytes);
-    }
-}
+#[path = "local_disk_test.rs"]
+mod tests;

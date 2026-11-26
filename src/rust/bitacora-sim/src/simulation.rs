@@ -18,7 +18,7 @@ use bitacora_client::{BitacoraClient, ClientSettings, ReadError, ReaderSettings,
 use bitacora_controller::{Controller, ControllerSettings};
 use bitacora_kv::{KV_MATERIALIZER, KvDependencies, KvStore};
 use bitacora_meta::{CopyState, PlacementPolicy, RetentionPolicy, SegmentRecord, StreamRecord};
-use bitacora_segment::Disk;
+use bitacora_segment::{CrashMode, Disk};
 use bitacora_testkit::{Cluster, LinkFault};
 use bitacora_types::replica_api::ReplicaApi;
 use bitacora_types::{DeterministicRandom, ReplicationSettings, SequenceNumber, SequenceRange};
@@ -39,6 +39,11 @@ const STREAM: &str = "simulated";
 /// Where tiered segments live in the object store. The key-value store's
 /// artifacts are under another prefix.
 const TIERED_SEGMENTS_KEY_PREFIX: &str = "streams/";
+
+/// What the path of every segment file on a replica's disk ends with. A
+/// torn crash tears these files only: the state files next to them are
+/// replaced atomically.
+const SEGMENT_FILE_SUFFIX: &str = ".seg";
 
 /// How often replicas renew their registration.
 const REGISTRATION_INTERVAL: Duration = Duration::from_secs(2);
@@ -753,8 +758,12 @@ async fn run_nemesis(
 fn crash_node(world: &World, node_number: usize, is_torn: bool, random: &mut DeterministicRandom) {
     let node = &world.cluster.nodes()[node_number];
     if is_torn {
-        let mut torn = random.fork();
-        node.crash_keeping(|path, durable, visible| tear_unflushed_writes(path, durable, visible, &mut torn));
+        // State files are replaced atomically and never torn; only segment
+        // files are.
+        node.crash_with(CrashMode::TearUnflushedWrites {
+            random: random.fork(),
+            path_suffix: SEGMENT_FILE_SUFFIX.to_owned(),
+        });
     } else {
         node.crash();
     }
@@ -784,36 +793,6 @@ async fn corrupt_a_stored_byte(world: &World, random: &mut DeterministicRandom) 
         world.unlucky_node
     ));
     disk.corrupt_byte(path, offset, 0x40);
-}
-
-/// Decides what a torn crash leaves in one file: everything that was
-/// flushed, plus a random-length part of what was written after it, whose
-/// last byte is damaged. State files are replaced atomically and never
-/// torn.
-fn tear_unflushed_writes(path: &str, durable: &[u8], visible: &[u8], random: &mut DeterministicRandom) -> Vec<u8> {
-    let is_segment_file = path.rsplit('.').next() == Some("seg");
-    let longest = durable.len().max(visible.len());
-    // What was written since the last flush need not be one run of bytes:
-    // an append also rewrites the flushed mark in the header.
-    let unflushed_bytes: Vec<usize> = (0..longest)
-        .filter(|index| durable.get(*index) != visible.get(*index))
-        .collect();
-    if !is_segment_file || unflushed_bytes.is_empty() {
-        return durable.to_vec();
-    }
-    let torn_position = random.index(unflushed_bytes.len());
-    let torn_at = unflushed_bytes[torn_position];
-
-    let written_byte = |index: usize| visible.get(index).copied().unwrap_or(0);
-    let mut survived = durable.to_vec();
-    if survived.len() <= torn_at {
-        survived.resize(torn_at + 1, 0);
-    }
-    for index in &unflushed_bytes[..torn_position] {
-        survived[*index] = written_byte(*index);
-    }
-    survived[torn_at] = !written_byte(torn_at);
-    survived
 }
 
 /// After healing: a fresh key-value store commits one last record, the
@@ -932,72 +911,6 @@ fn is_where_it_belongs(stream: &StreamRecord, segment: &SegmentRecord) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn torn(durable: &[u8], visible: &[u8], seed: u64) -> Vec<u8> {
-        tear_unflushed_writes("7/3.seg", durable, visible, &mut DeterministicRandom::from_seed(seed))
-    }
-
-    #[test]
-    fn tearing_never_changes_what_was_flushed() {
-        let durable = b"flushed-\0\0\0\0".to_vec();
-        let visible = b"flushed-tail".to_vec();
-        for seed in 0..50 {
-            assert_eq!(torn(&durable, &visible, seed)[..8], durable[..8], "seed {seed}");
-        }
-    }
-
-    #[test]
-    fn tearing_damages_the_unflushed_region() {
-        let durable = b"flushed-\0\0\0\0".to_vec();
-        let visible = b"flushed-tail".to_vec();
-        for seed in 0..50 {
-            let survived = torn(&durable, &visible, seed);
-            assert!(
-                survived != durable && survived != visible,
-                "seed {seed} left an intact file"
-            );
-        }
-    }
-
-    #[test]
-    fn tearing_handles_writes_past_the_flushed_length() {
-        let durable = b"flushed-".to_vec();
-        let visible = b"flushed-tail".to_vec();
-        for seed in 0..50 {
-            let survived = torn(&durable, &visible, seed);
-            assert!(
-                survived.len() > durable.len() && survived[..8] == durable[..],
-                "seed {seed}"
-            );
-        }
-    }
-
-    #[test]
-    fn tearing_leaves_flushed_bytes_between_two_unflushed_writes_alone() {
-        let durable = b"mark-A|flushed-data|\0\0\0\0".to_vec();
-        let visible = b"mark-B|flushed-data|tail".to_vec();
-        for seed in 0..50 {
-            let survived = torn(&durable, &visible, seed);
-            assert_eq!(survived[6..20], durable[6..20], "seed {seed} damaged flushed bytes");
-        }
-    }
-
-    #[test]
-    fn file_without_unflushed_writes_is_left_alone() {
-        let flushed = b"everything was flushed".to_vec();
-        assert_eq!(torn(&flushed, &flushed, 1), flushed);
-    }
-
-    #[test]
-    fn state_files_are_never_torn() {
-        let survived = tear_unflushed_writes(
-            "7/3.state",
-            b"old-state",
-            b"new-state",
-            &mut DeterministicRandom::from_seed(1),
-        );
-        assert_eq!(survived, b"old-state");
-    }
 
     #[test]
     fn fault_mix_without_faults_enables_nothing() {
