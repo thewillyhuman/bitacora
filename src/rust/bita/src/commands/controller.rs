@@ -23,7 +23,7 @@
 //!
 //! # See also
 //!
-//! - `bitacora-meta/src/store.rs`: `try_lead`, which writes the record.
+//! - `bitacora-meta/src/store/leadership.rs`: `try_lead`, which writes the record.
 
 use serde::Serialize;
 

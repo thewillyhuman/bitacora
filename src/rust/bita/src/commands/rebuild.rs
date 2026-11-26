@@ -59,7 +59,7 @@
 //! # See also
 //!
 //! - `commands/metadata.rs`: restoring a snapshot, which comes first when there is one.
-//! - `bitacora-meta/src/store.rs`: `adopt_stream`.
+//! - `bitacora-meta/src/store/recovery.rs`: `adopt_stream`.
 //! - `bitacora-segment/src/tiered.rs`: the footer of a tiered object.
 
 use std::collections::{BTreeMap, BTreeSet};
