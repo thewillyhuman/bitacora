@@ -111,6 +111,12 @@ func Start(t testing.TB, options Options) *Cluster {
 	return cluster
 }
 
+// KillReplica stops one of the replica daemons at once, as a crash would.
+// The replicas are numbered from 0.
+func (cluster *Cluster) KillReplica(number int) {
+	cluster.replicas[number].Kill()
+}
+
 // Bita runs the bita command-line tool against the cluster with JSON
 // output and returns what it printed. It fails the test if the tool does.
 func (cluster *Cluster) Bita(t testing.TB, arguments ...string) string {

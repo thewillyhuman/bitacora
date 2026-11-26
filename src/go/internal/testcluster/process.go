@@ -114,6 +114,20 @@ func (process *Process) Kill() {
 	<-process.exited
 }
 
+// WaitForExit waits until the program ends on its own and returns its exit
+// code and the end of what it printed. It fails the test if the program is
+// still running after timeout.
+func (process *Process) WaitForExit(t testing.TB, timeout time.Duration) (exitCode int, printed string) {
+	t.Helper()
+	select {
+	case <-process.exited:
+		return process.command.ProcessState.ExitCode(), string(process.logTail())
+	case <-time.After(timeout):
+		t.Fatalf("%s was still running after %v:\n%s", process.name, timeout, process.logTail())
+		return 0, ""
+	}
+}
+
 // logTail returns the end of what the program printed.
 func (process *Process) logTail() []byte {
 	const tailBytes = 8 * 1024
