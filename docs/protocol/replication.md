@@ -233,6 +233,32 @@ Every step can be repeated. A recovery that stops halfway is started again
 from step 1 by the next candidate, under a higher epoch. Two attempts may
 compute different recovery ends, but only one seal is written.
 
+What the steps leave to the candidate:
+
+- **The lease.** A candidate that was not told to force the takeover reads
+  the stream record before step 1. If `writer` is set and its `expires_at`
+  is later than the candidate's own clock, the candidate waits until then
+  and reads again, or gives up if that is longer than it may wait. A writer
+  renews its lease well before it lapses. A lease that cannot be renewed
+  does not stop a writer: only the epoch does.
+- **A fence that is refused.** A replica that refuses the fence as fenced
+  holds a higher epoch. Another candidate is ahead, and this one stops, as
+  after a failed claim. Any other failure is a replica that did not answer.
+- **More answers than needed.** With N − W + 1 answers the candidate may
+  go on. It may also wait a moment for the others: every further answer
+  can only raise the recovery end, and so keep more of what the old writer
+  sent. The client libraries wait 100 ms.
+- **The requests of the repair.** The read from the longest responder
+  carries the recovery epoch E + 1, which lets it reach past the durable
+  sequence to the end of the copy. The append to a shorter responder
+  carries the segment's descriptor as it is in the stream record, with the
+  segment's epoch E, the writer epoch E + 1, and a durable sequence of 0:
+  the candidate knows none, and the seal that follows says what may be
+  served. A responder without a copy gets one from that append.
+- **No standby.** If step 8 finds no standby replica set, the controller
+  has not placed one yet. The candidate keeps its epoch, waits and tries
+  the open again.
+
 ## A reader
 
 1. Read the stream record. A position below the low-water mark is
