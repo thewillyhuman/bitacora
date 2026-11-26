@@ -7,6 +7,7 @@ bitacora_library(
     deps = [
         "//src/rust/bitacora",
         "//src/rust/bitacora-process:bitacora_process",
+        "//src/rust/bitacora-testports:bitacora_testports",
     ],
 )
 

@@ -320,6 +320,7 @@ dependencies = [
  "bitacora",
  "bitacora-meta",
  "bitacora-process",
+ "bitacora-testports",
  "bytes",
  "tempfile",
  "tokio",

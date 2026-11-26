@@ -13,8 +13,7 @@
 //!
 //! - [`Binaries`]: where the programs are, or the decision to skip.
 //! - [`RealCluster`]: etcd, replica daemons and a controller daemon, started, ready, and stoppable.
-//! - [`ChildProcess`], [`free_local_ports`]: the building blocks, for tests that need a process of
-//!   their own.
+//! - [`ChildProcess`]: the building block, for tests that need a process of their own.
 //!
 //! # How it works
 //!
@@ -64,4 +63,4 @@ mod process;
 
 pub use binaries::{Binaries, CONTROLLER_BINARY_VARIABLE, ETCD_BINARY_VARIABLE, REPLICA_BINARY_VARIABLE};
 pub use cluster::{ExitedDaemon, RealCluster};
-pub use process::{ChildProcess, free_local_ports};
+pub use process::ChildProcess;

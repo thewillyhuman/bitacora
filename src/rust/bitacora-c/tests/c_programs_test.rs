@@ -21,8 +21,8 @@
 //!
 //! # How the fixtures work
 //!
-//! `bitacora-clusterkit` starts the cluster on free loopback ports in a temporary directory and stops it
-//! when the test ends. The test writes the cluster's configuration to a TOML file, the way an operator
+//! `bitacora-clusterkit` starts the cluster on loopback ports of its own in a temporary directory and
+//! stops it when the test ends. The test writes the cluster's configuration to a TOML file, the way an operator
 //! would hand it to a database, and passes its path to the C program.
 //!
 //! Both programs run against one cluster, one after the other, each on a stream of its own. A cluster

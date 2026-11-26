@@ -5,7 +5,6 @@
 //! - A child's exit status and output reach the test.
 //! - `terminate` and `kill` end a running child, and do nothing to one that has exited.
 //! - Dropping the wrapper kills the child.
-//! - Free ports are different from each other and can be bound.
 //! - The end of a log that is shown after a panic: its last lines, in order.
 //!
 //! # How the fixtures work
@@ -134,25 +133,6 @@ fn child_is_known_by_the_name_it_was_given() {
     let (_directory, child) = spawn_shell("exit 0");
 
     assert_eq!(child.name(), "child");
-}
-
-#[test]
-fn free_ports_are_different_from_each_other() {
-    let mut ports = free_local_ports(8);
-
-    ports.sort_unstable();
-    ports.dedup();
-
-    assert_eq!(ports.len(), 8);
-}
-
-#[test]
-fn free_port_can_be_bound() {
-    let ports = free_local_ports(1);
-
-    let bound = TcpListener::bind((Ipv4Addr::LOCALHOST, ports[0]));
-
-    assert!(bound.is_ok(), "{bound:?}");
 }
 
 #[test]

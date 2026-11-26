@@ -12,17 +12,20 @@
 //!
 //! - [`RealCluster`]: etcd, some replica daemons and one controller daemon, all running.
 //! - [`ExitedDaemon`]: how one daemon ended when the cluster was stopped.
-//! - Private steps of starting a cluster: `ReservedPorts`, `start_etcd`, `start_replica`,
-//!   `start_controller`, and one function per configuration file.
+//! - Private steps of starting a cluster: `start_etcd`, `start_replica`, `start_controller`, and one
+//!   function per configuration file.
 //!
 //! # How it works
 //!
-//! [`RealCluster::start`] picks free loopback ports for everything, starts a single-member etcd, waits
-//! until it is healthy, writes one configuration file per daemon into the cluster's temporary
-//! directory, starts the daemons, and waits until each reports ready on `/readyz`. The configurations
-//! are the ones an operator would write, with intervals shortened so that a test does not wait:
-//! replicas renew their registration every second, the controller makes a pass every 200 milliseconds
-//! and presumes a replica dead after three seconds of silence.
+//! [`RealCluster::start`] claims a block of loopback ports (`bitacora-testports`), starts a
+//! single-member etcd on two of them, waits until it is healthy, writes one configuration file per
+//! daemon into the cluster's temporary directory, starts the daemons, and waits until each reports
+//! ready on `/readyz`. The cluster keeps the block until it is dropped, so no other test on the machine
+//! is given one of its ports, also not while a replica is down between a kill and a restart.
+//!
+//! The configurations are the ones an operator would write, with intervals shortened so that a test
+//! does not wait: replicas renew their registration every second, the controller makes a pass every
+//! 200 milliseconds and presumes a replica dead after three seconds of silence.
 //!
 //! A test then talks to the cluster as an application does, through
 //! `bitacora::connect(cluster.cluster_config(), ..)`.
@@ -39,12 +42,14 @@
 //! - Every process of the cluster is killed when the [`RealCluster`] is dropped, and only then is the
 //!   temporary directory removed.
 //! - A [`RealCluster`] that exists was fully ready when [`RealCluster::start`] returned.
-//! - Ports are handed out in a fixed order: etcd's client port and peer port, then for each replica its
-//!   gRPC port and its observability port, then the controller's.
+//! - Ports are taken from the cluster's block in a fixed order: etcd's client port and peer port, then
+//!   for each replica its gRPC port and its observability port, then the controller's.
+//! - The block is released only after every process of the cluster is gone.
 //!
 //! # See also
 //!
-//! - `process.rs`: the child processes and the ports.
+//! - `process.rs`: the child processes.
+//! - `bitacora-testports`: where the ports come from, and why they are not simply free ports.
 //! - `binaries.rs`: where the programs come from.
 //! - `tests/real_cluster_test.rs`: the test that uses all of this.
 
@@ -57,11 +62,12 @@ use std::time::Duration;
 
 use bitacora::{ClusterConfig, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig};
 use bitacora_process::http_get;
+use bitacora_testports::PortBlock;
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
 
 use crate::binaries::Binaries;
-use crate::process::{ChildProcess, free_local_ports};
+use crate::process::ChildProcess;
 
 /// How long a process may take to become ready before the test gives up. Starting takes well under a
 /// second on an idle machine; the allowance is for a loaded continuous integration runner.
@@ -87,12 +93,6 @@ const ETCD_MEMBER_NAME: &str = "bitacora-clusterkit";
 /// percent) would then make replicas refuse every segment. How full the developer's disk is must not
 /// decide whether a test passes.
 const WHOLE_DISK_PERCENT: u8 = 100;
-
-/// How many ports etcd needs: one for clients, one for peers.
-const ETCD_PORT_COUNT: usize = 2;
-
-/// How many ports a replica daemon needs: one for gRPC, one for observability.
-const REPLICA_PORT_COUNT: usize = 2;
 
 /// One daemon of the cluster: its process and what is needed to probe and restart it.
 #[derive(Debug)]
@@ -188,6 +188,10 @@ pub struct RealCluster {
     controller: Daemon,
     /// The etcd server. Declared after the daemons so that it is dropped, and so killed, after them.
     _etcd: ChildProcess,
+    /// The block every port of the cluster was taken from. Kept so that no other test is given one of
+    /// them while the cluster runs, and declared after the processes so that it is released only once
+    /// they are gone.
+    _ports: PortBlock,
     /// Where the cluster is, as an application is told.
     cluster_config: ClusterConfig,
     /// Holds every configuration file, data directory and log. Declared last, so that it is removed
@@ -212,11 +216,12 @@ impl RealCluster {
     /// # Panics
     ///
     /// Panics if a process cannot be started, exits while starting, or is not ready in time. The
-    /// message includes the process's log.
+    /// message includes the process's log. Panics too if no block of ports can be claimed, or if the
+    /// cluster needs more ports than a block has, which takes more than twenty replicas.
     pub async fn start(binaries: &Binaries, replica_count: usize) -> Self {
         let directory = new_cluster_directory();
         let root = directory.path();
-        let mut ports = ReservedPorts::reserve(ETCD_PORT_COUNT + replica_count * REPLICA_PORT_COUNT + 1);
+        let mut ports = PortBlock::claim();
 
         let etcd_client_endpoint = format!("http://127.0.0.1:{}", ports.take());
         let etcd = start_etcd(&binaries.etcd, root, &etcd_client_endpoint, ports.take()).await;
@@ -242,6 +247,7 @@ impl RealCluster {
             replicas,
             controller,
             _etcd: etcd,
+            _ports: ports,
             cluster_config,
             _directory: directory,
         }
@@ -317,37 +323,13 @@ impl RealCluster {
     }
 }
 
-/// The loopback ports reserved for one cluster, handed out one at a time.
-struct ReservedPorts {
-    /// The ports nobody was given yet.
-    free_ports: Vec<u16>,
-}
-
-impl ReservedPorts {
-    /// Reserves `port_count` loopback ports that are free right now.
-    fn reserve(port_count: usize) -> Self {
-        Self {
-            free_ports: free_local_ports(port_count),
-        }
-    }
-
-    /// Hands out one of the reserved ports. No port is handed out twice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if more ports are taken than were reserved.
-    fn take(&mut self) -> u16 {
-        self.free_ports.pop().expect("enough ports were reserved")
-    }
-}
-
 /// Writes the configuration of replica `replica_number` below `root` and starts its daemon, without
 /// waiting for it to become ready. It takes two ports: gRPC first, then observability.
 fn start_replica(
     replica_number: usize,
     binary: &Path,
     root: &Path,
-    ports: &mut ReservedPorts,
+    ports: &mut PortBlock,
     cluster_config: &ClusterConfig,
 ) -> Daemon {
     let name = format!("replica-{replica_number}");
@@ -367,7 +349,7 @@ fn start_replica(
 
 /// Writes the controller's configuration below `root` and starts its daemon, without waiting for it to
 /// become ready. It takes one port, for observability.
-fn start_controller(binary: &Path, root: &Path, ports: &mut ReservedPorts, cluster_config: &ClusterConfig) -> Daemon {
+fn start_controller(binary: &Path, root: &Path, ports: &mut PortBlock, cluster_config: &ClusterConfig) -> Daemon {
     let observability_address = format!("127.0.0.1:{}", ports.take());
     let config_path = root.join("controller.toml");
     let config_text = controller_config_text(&observability_address, cluster_config);

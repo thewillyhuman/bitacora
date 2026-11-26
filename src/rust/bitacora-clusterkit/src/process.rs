@@ -11,7 +11,6 @@
 //! # What it contains
 //!
 //! - [`ChildProcess`]: a running child, killed when dropped.
-//! - [`free_local_ports`]: loopback ports that nothing listens on right now.
 //!
 //! # How it works
 //!
@@ -19,10 +18,6 @@
 //! what the daemon said. [`ChildProcess::terminate`] sends SIGTERM by running the `kill` program, which
 //! keeps this crate free of unsafe code and of a dependency for one system call.
 //! [`ChildProcess::kill`] sends SIGKILL through the standard library.
-//!
-//! [`free_local_ports`] binds port zero as often as asked, reads the ports the operating system chose,
-//! and closes the sockets again. Another program could take a port before the daemon binds it; the
-//! daemon then fails to start and the test fails with that message, instead of misbehaving.
 //!
 //! # Invariants
 //!
@@ -35,12 +30,11 @@
 //! - `daemons.rs`: starts the bitacora daemons as child processes.
 //! - `etcd.rs`: starts etcd as one.
 
-// This crate is a test fixture: starting processes, writing their logs and asking the operating system
-// for ports is its purpose, and there is no injected interface for any of it.
+// This crate is a test fixture: starting processes and writing their logs is its purpose, and there is
+// no injected interface for either.
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use std::fs::File;
-use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
@@ -224,31 +218,6 @@ fn last_lines_of(text: &str, line_count: usize) -> Vec<&str> {
     let lines: Vec<&str> = text.lines().collect();
     let first_shown = lines.len().saturating_sub(line_count);
     lines[first_shown..].to_vec()
-}
-
-/// Returns `count` different loopback ports that nothing is listening on right now.
-///
-/// The ports are bound all at once before any is closed again, which is what makes them different from
-/// each other: asking the operating system for one port at a time can return the same port twice.
-///
-/// # Arguments
-///
-/// * `count` - How many ports are needed.
-///
-/// # Panics
-///
-/// Panics if a loopback port cannot be bound.
-#[must_use]
-pub fn free_local_ports(count: usize) -> Vec<u16> {
-    let mut listeners = Vec::with_capacity(count);
-    for _port_number in 0..count {
-        listeners.push(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port can be bound"));
-    }
-    let mut ports = Vec::with_capacity(count);
-    for listener in &listeners {
-        ports.push(listener.local_addr().expect("a bound listener has an address").port());
-    }
-    ports
 }
 
 #[cfg(test)]

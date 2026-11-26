@@ -5,7 +5,8 @@ A bitacora cluster of real processes on one machine, for tests.
 ## What it owns
 
 - `RealCluster`: one etcd, some `bita-replica` daemons and one `bita-controller` daemon, started on
-  free loopback ports in a temporary directory, ready when `start` returns, and gone when dropped.
+  loopback ports of its own in a temporary directory, ready when `start` returns, and gone when
+  dropped.
 - `ChildProcess`: a child process that dies with the value that owns it, with its output in a log file.
 - `Binaries`: where the programs are, or the decision to skip the test.
 - `tests/real_cluster_test.rs`: the test of the design's last testing layer (section 15, "Layer 4: real
@@ -27,6 +28,11 @@ seconds of silence.
 appends at 95 by default. A developer's disk is often fuller than that, so the kit sets every
 threshold to 100 percent.
 
+**The ports are the cluster's own.** A cluster claims a block of ports from `bitacora-testports` and
+keeps it until it is dropped. A port that is merely free when the cluster starts can be given to
+another test before the daemon has bound it, and again while a replica is down between a kill and a
+restart; a port of a claimed block cannot.
+
 **Nothing waits by sleeping.** Starting a process polls its `/readyz` (etcd: its `/health`); every wait
 has an allowance and fails with the process's log when it runs out.
 
@@ -39,6 +45,7 @@ failure.
 
 - No process outlives the value that owns it, also when a test panics.
 - Everything a cluster writes is below one temporary directory, removed after its processes.
+- No other test is given a port of a cluster while the cluster exists.
 - A `RealCluster` that exists was fully ready when `start` returned.
 - Nothing here is used by production code.
 
@@ -47,7 +54,7 @@ failure.
 | File | Holds |
 | --- | --- |
 | `src/lib.rs` | The public surface |
-| `src/process.rs` | `ChildProcess`, `free_local_ports` |
+| `src/process.rs` | `ChildProcess` |
 | `src/binaries.rs` | `Binaries` and the environment variables |
 | `src/cluster.rs` | `RealCluster`: starting etcd and the daemons, killing, restarting, stopping |
 | `tests/real_cluster_test.rs` | The scenario, and what the daemons do with a wrong command line |
@@ -56,6 +63,6 @@ failure.
 
 ## Dependencies
 
-It depends on `bitacora` (the cluster configuration) and `bitacora-process` (the HTTP probe). Its test
-also uses `bitacora-meta` to read the stream's record. The daemons are not Rust dependencies: the test
-runs them as programs. Only tests depend on this crate.
+It depends on `bitacora` (the cluster configuration), `bitacora-process` (the HTTP probe) and
+`bitacora-testports` (the ports). Its test also uses `bitacora-meta` to read the stream's record. The
+daemons are not Rust dependencies: the test runs them as programs. Only tests depend on this crate.

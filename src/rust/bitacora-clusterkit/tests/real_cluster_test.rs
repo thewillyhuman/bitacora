@@ -18,7 +18,7 @@
 //!
 //! # How the fixtures work
 //!
-//! `bitacora-clusterkit` starts the processes on free loopback ports in a temporary directory and
+//! `bitacora-clusterkit` starts the processes on loopback ports of its own in a temporary directory and
 //! kills them when the test ends, also when it fails. The programs come from environment variables that
 //! the Bazel target sets. Under Cargo the tests pass without running unless the variables are set; they
 //! say so on standard error.
