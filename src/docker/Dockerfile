@@ -1,13 +1,14 @@
 # syntax=docker/dockerfile:1
 #
-# The container images of bitacora: one for each daemon, one for the bita
-# tool and one for the benchmark tool, all four from one Bazel release build.
+# The container images of bitacora: one for each daemon and one for each of
+# the bita tool, the benchmark tool and the soak tool, all five from one Bazel
+# release build.
 #
 #   docker build --file src/docker/Dockerfile --target bita-replica \
 #       --tag bitacora/bita-replica:0.1.0 .
 #
 # The build context is the root of the repository. hack/build_images.sh
-# builds and tags all four; README.md in this directory says how to run
+# builds and tags all five; README.md in this directory says how to run
 # them.
 
 # The Debian release of the image that builds and of the images that run.
@@ -16,7 +17,7 @@
 ARG DEBIAN_RELEASE=13
 
 # ---------------------------------------------------------------------------
-# build: compiles the four programs.
+# build: compiles the five programs.
 # ---------------------------------------------------------------------------
 FROM debian:${DEBIAN_RELEASE}-slim AS build
 
@@ -62,15 +63,17 @@ COPY --chown=1000:1000 . .
 RUN --mount=type=cache,target=/home/builder/.cache,uid=1000,gid=1000,sharing=locked \
     bazel build --config=release \
         //src/rust/bita-replica //src/rust/bita-controller //src/rust/bita //src/rust/bita-bench \
+        //src/rust/bita-soak \
     && mkdir -p /home/builder/out/state \
     && cp bazel-bin/src/rust/bita-replica/bita-replica \
         bazel-bin/src/rust/bita-controller/bita-controller \
         bazel-bin/src/rust/bita/bita \
         bazel-bin/src/rust/bita-bench/bita-bench \
+        bazel-bin/src/rust/bita-soak/bita-soak \
         /home/builder/out/
 
 # ---------------------------------------------------------------------------
-# runtime: what the four images share. It has the C library and the
+# runtime: what the five images share. It has the C library and the
 # certificate authorities and nothing else: no shell, no package manager.
 # ---------------------------------------------------------------------------
 FROM gcr.io/distroless/cc-debian${DEBIAN_RELEASE}:nonroot AS runtime
@@ -148,4 +151,18 @@ LABEL org.opencontainers.image.title="bita-bench" \
 COPY --from=build /home/builder/out/bita-bench /usr/bin/bita-bench
 
 ENTRYPOINT ["/usr/bin/bita-bench"]
+CMD ["--help"]
+
+# ---------------------------------------------------------------------------
+# bita-soak: the soak tool, for a job next to a cluster. It injects faults
+# through the Kubernetes API, so it needs a pod with a service account.
+# ---------------------------------------------------------------------------
+FROM runtime AS bita-soak
+
+LABEL org.opencontainers.image.title="bita-soak" \
+      org.opencontainers.image.description="bitacora soak tool"
+
+COPY --from=build /home/builder/out/bita-soak /usr/bin/bita-soak
+
+ENTRYPOINT ["/usr/bin/bita-soak"]
 CMD ["--help"]

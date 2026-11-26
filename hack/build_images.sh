@@ -3,7 +3,7 @@
 #
 # Usage: hack/build_images.sh [X.Y.Z | X.Y.Z-rc.N]
 #
-# Builds bita-replica, bita-controller, bita and bita-bench from
+# Builds bita-replica, bita-controller, bita, bita-bench and bita-soak from
 # src/docker/Dockerfile and tags each `<repository>/<name>:<version>`. Without a version, the one
 # written in MODULE.bazel is used. A version that ends in `-rc.N` is a
 # release candidate: images to try out before X.Y.Z is released. Nothing is
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # The images to build: each is a stage of the Dockerfile with the same name.
-readonly IMAGES=(bita-replica bita-controller bita bita-bench)
+readonly IMAGES=(bita-replica bita-controller bita bita-bench bita-soak)
 
 readonly IMAGE_REPOSITORY="${BITA_IMAGE_REPOSITORY:-bitacora}"
 readonly IMAGE_PLATFORM="${BITA_IMAGE_PLATFORM:-}"
@@ -77,7 +77,7 @@ fi
 for image in "${IMAGES[@]}"; do
     tag="${IMAGE_REPOSITORY}/${image}:${version}"
     echo "build_images: building ${tag}" >&2
-    # The four builds share the stage that compiles, which all but the first
+    # The five builds share the stage that compiles, which all but the first
     # find already built. An empty array expands to nothing here; the
     # form below also does so on the bash 3.2 of macOS.
     "${CONTAINER_TOOL}" build \

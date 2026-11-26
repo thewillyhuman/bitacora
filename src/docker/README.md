@@ -1,6 +1,6 @@
 # Container images
 
-One `Dockerfile` builds the four images of bitacora, each a stage of it:
+One `Dockerfile` builds the five images of bitacora, each a stage of it:
 
 | Image | Starts | Ports | Mount |
 | --- | --- | --- | --- |
@@ -8,6 +8,7 @@ One `Dockerfile` builds the four images of bitacora, each a stage of it:
 | `bita-controller` | `/usr/bin/bita-controller --config /etc/bitacora/controller.toml` | 9101 (metrics, probes) | the configuration file |
 | `bita` | `/usr/bin/bita` | none | nothing; pass `--etcd-endpoint` or mount a configuration file |
 | `bita-bench` | `/usr/bin/bita-bench` | none | nothing; pass `--etcd-endpoint` or mount a configuration file |
+| `bita-soak` | `/usr/bin/bita-soak` | none, or the one of `--metrics-listen-address` | nothing; pass `--etcd-endpoint`. For faults, a pod with a service account (`docs/soak.md`) |
 
 | File | What it is |
 | --- | --- |
@@ -21,8 +22,9 @@ One `Dockerfile` builds the four images of bitacora, each a stage of it:
 hack/build_images.sh 0.1.0
 ```
 
-builds `bitacora/bita-replica:0.1.0`, `bitacora/bita-controller:0.1.0`, `bitacora/bita:0.1.0` and
-`bitacora/bita-bench:0.1.0` for the machine's platform and prints the four tags. `BITA_IMAGE_REPOSITORY` changes what comes before the
+builds `bitacora/bita-replica:0.1.0`, `bitacora/bita-controller:0.1.0`, `bitacora/bita:0.1.0`,
+`bitacora/bita-bench:0.1.0` and `bitacora/bita-soak:0.1.0` for the machine's platform and prints the
+five tags. `BITA_IMAGE_REPOSITORY` changes what comes before the
 image name, `BITA_IMAGE_PLATFORM` the platform (`linux/amd64` or `linux/arm64`), and
 `BITA_CONTAINER_TOOL` the program that builds. Nothing is pushed: push the tags to the registry your
 cluster pulls from.
@@ -93,7 +95,7 @@ The images were built and started by hand when this directory was written; after
   on; the replica's example data directory is inside the volume, which belongs to the user the image
   runs as; no image runs as root or under a name; the build is a release build with a Bazelisk whose
   checksum is verified; the images are exactly those `hack/build_images.sh` builds.
-- `//src/docker:dockerfile_rejection_test` hands the same checker a `Dockerfile` with twelve known
+- `//src/docker:dockerfile_rejection_test` hands the same checker a `Dockerfile` with thirteen known
   mistakes and requires each to be named.
 - `//hack:build_images_test` runs `hack/build_images.sh` with a stand-in for `docker` and checks the
   file, stage, version and tag of each build.

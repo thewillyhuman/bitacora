@@ -96,7 +96,7 @@ Pick one; each page is complete.
 | --- | --- | --- |
 | Machines with systemd | An archive with the programs, the units and example configurations | `src/systemd/README.md` |
 | Kubernetes | A Helm chart: replicas as a StatefulSet, controllers as a Deployment | `src/helm/bitacora/README.md` |
-| Your own containers | Three images built from one Dockerfile | `src/docker/README.md` |
+| Your own containers | Five images built from one Dockerfile | `src/docker/README.md` |
 | Your laptop | `development/cluster.sh start` | `development/README.md` |
 
 None of them deploys etcd or the object store. Start etcd first; replicas and controllers can then start

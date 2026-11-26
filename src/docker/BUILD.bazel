@@ -16,6 +16,7 @@ _CHECKED_AGAINST = {
     "BITA_BINARY": "//src/rust/bita",
     "BITA_CONTROLLER_BINARY": "//src/rust/bita-controller",
     "BITA_REPLICA_BINARY": "//src/rust/bita-replica",
+    "BITA_SOAK_BINARY": "//src/rust/bita-soak",
     "BUILD_IMAGES": "//hack:build_images.sh",
     "CONTROLLER_CONFIG": "//src/rust/bita-controller:example.toml",
     "DOCKERIGNORE": "Dockerfile.dockerignore",
@@ -69,12 +70,13 @@ rejection_test(
         "bita-controller runs as root",
         "bita runs as root",
         "bita-bench runs as root",
+        "bita-soak runs as root",
         "the build stage does not copy bazel-bin/src/rust/bita/bita out of Bazel's output",
         "bita does not start /usr/bin/bita",
         "bita-controller is started with --settings, which it does not have",
         "bita-replica exposes '7000', but its example configuration listens on 7000 9100",
         "the example data directory /var/lib/bitacora/replica is outside the volume /data",
-        "but the Dockerfile defines 'bita-replica bita-controller bita bita-bench bita-extra'",
+        "but the Dockerfile defines 'bita-replica bita-controller bita bita-bench bita-soak bita-extra'",
     ],
 )
 
