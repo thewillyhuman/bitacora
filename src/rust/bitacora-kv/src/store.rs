@@ -89,7 +89,12 @@ use crate::record::{KvOperation, KvRecord};
 /// The name the materializer of a bitacora-kv store is registered under on its stream.
 pub const KV_MATERIALIZER: &str = "bitacora-kv";
 
+/// How long a read waits for the materializer to apply the sequence it reads at, unless the settings say otherwise.
+const DEFAULT_READ_WAIT: Duration = Duration::from_secs(10);
+
 /// What a store needs to reach the cluster.
+///
+/// The example of [`KvStore`] builds one for a cluster that runs inside the process.
 #[derive(Clone)]
 pub struct KvDependencies {
     /// The client the store writes and follows the stream with.
@@ -101,6 +106,22 @@ pub struct KvDependencies {
 }
 
 /// How a store takes its stream over, paces its checkpoints and bounds its reads.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use bitacora_client::TakeoverPolicy;
+/// use bitacora_kv::KvSettings;
+///
+/// // A store that replaces the one before it at once, for a planned move.
+/// let settings = KvSettings {
+///     takeover: TakeoverPolicy::Force,
+///     ..KvSettings::default()
+/// };
+/// assert_eq!(settings.read_wait, Duration::from_secs(10));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvSettings {
     /// What to do if another store still holds the writer's lease.
@@ -125,12 +146,39 @@ impl Default for KvSettings {
             checkpoint_after_bytes: runner.checkpoint_after_bytes,
             checkpoint_after: runner.checkpoint_after,
             retry_interval: runner.retry_interval,
-            read_wait: Duration::from_secs(10),
+            read_wait: DEFAULT_READ_WAIT,
+        }
+    }
+}
+
+impl KvSettings {
+    /// The settings of the runner that runs this store's materializer: the store's pacing under the store's name.
+    fn runner_settings(&self) -> RunnerSettings {
+        RunnerSettings {
+            checkpoint_after_bytes: self.checkpoint_after_bytes,
+            checkpoint_after: self.checkpoint_after,
+            retry_interval: self.retry_interval,
+            ..RunnerSettings::for_materializer(KV_MATERIALIZER)
         }
     }
 }
 
 /// Why an operation on a store failed, split by what the caller may conclude from it.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_client::AppendError;
+/// use bitacora_kv::KvError;
+///
+/// /// Whether the caller may try the same write again without reading the key back first.
+/// fn is_safe_to_repeat(write_error: &KvError) -> bool {
+///     matches!(write_error, KvError::NotWritten { .. })
+/// }
+///
+/// assert!(is_safe_to_repeat(&KvError::NotWritten { reason: AppendError::Closed }));
+/// assert!(!is_safe_to_repeat(&KvError::OutcomeUnknown { reason: AppendError::Fenced }));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum KvError {
     /// The store could not become the writer of the stream. Nothing changed.
@@ -181,13 +229,31 @@ pub enum KvError {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// A store on the stream `inventory` of a cluster that runs inside this process:
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use bitacora_artifact::MemoryArtifactStore;
+/// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
 /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
-/// # use bytes::Bytes;
-/// # async fn example(dependencies: KvDependencies) -> Result<(), bitacora_kv::KvError> {
-/// KvStore::initialize(&dependencies.metadata, "inventory")
-///     .await
-///     .expect("the stream exists");
+/// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let cluster = bitacora_testkit::Cluster::start(3).await;
+/// # let client = BitacoraClient::new(
+/// #     cluster.metadata().clone(),
+/// #     cluster.connector(),
+/// #     cluster.clock(),
+/// #     ClientSettings::default(),
+/// # );
+/// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+/// # let dependencies = KvDependencies {
+/// #     client,
+/// #     metadata: cluster.metadata().clone(),
+/// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+/// # };
+/// use bytes::Bytes;
+///
+/// KvStore::initialize(&dependencies.metadata, "inventory").await?;
 /// let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
 ///
 /// store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"12")).await?;
@@ -228,6 +294,38 @@ impl KvStore {
     ///
     /// Returns [`MetaError::StreamNotFound`] if the stream does not exist, or [`MetaError::Unavailable`]
     /// if the metadata store cannot be reached.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// // Preparing a stream twice changes nothing.
+    /// KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    ///
+    /// let stream = dependencies.metadata.get_stream("inventory").await?;
+    /// assert!(stream.materializers.contains(bitacora_kv::KV_MATERIALIZER));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn initialize(metadata: &MetadataStore, stream_name: &str) -> Result<(), MetaError> {
         metadata.register_materializer(stream_name, KV_MATERIALIZER).await?;
         Ok(())
@@ -246,20 +344,52 @@ impl KvStore {
     /// * `stream_name` - The stream the store lives on, prepared with [`KvStore::initialize`].
     /// * `settings` - Takeover, checkpoint pacing and read waits.
     ///
+    /// # Returns
+    ///
+    /// The store, with its materializer running in a task of its own. It is the writer of the stream.
+    ///
     /// # Errors
     ///
     /// Returns [`KvError::Open`] if the store could not become the writer; nothing changed then. Returns
     /// [`KvError::Materializer`] if the materializer could not start, for example because
     /// [`KvStore::initialize`] was never run; the stream is then left without a writer until a store is
     /// opened on it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// use bitacora_types::Epoch;
+    ///
+    /// KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    ///
+    /// // The first store on a stream writes under the first epoch.
+    /// assert_eq!(store.writer_epoch(), Epoch::new(1));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn open(dependencies: KvDependencies, stream_name: &str, settings: KvSettings) -> Result<Self, KvError> {
         let writer = dependencies.client.open_writer(stream_name, settings.takeover).await?;
-        let runner_settings = RunnerSettings {
-            checkpoint_after_bytes: settings.checkpoint_after_bytes,
-            checkpoint_after: settings.checkpoint_after,
-            retry_interval: settings.retry_interval,
-            ..RunnerSettings::for_materializer(KV_MATERIALIZER)
-        };
+        let runner_settings = settings.runner_settings();
         let runner_dependencies = RunnerDependencies {
             client: dependencies.client,
             metadata: dependencies.metadata,
@@ -284,6 +414,11 @@ impl KvStore {
 
     /// Sets the value of a key and waits until that is committed.
     ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to set.
+    /// * `value` - Its new value. An empty value is a value: the key exists afterwards.
+    ///
     /// # Returns
     ///
     /// The sequence number of the record that made the change. [`KvStore::get_as_of`] at that sequence
@@ -293,11 +428,50 @@ impl KvStore {
     ///
     /// Returns [`KvError::NotWritten`] if the record was refused, for example for its size, and
     /// [`KvError::OutcomeUnknown`] if the store cannot tell whether the put was committed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bytes::Bytes;
+    ///
+    /// let first_put = store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"12")).await?;
+    /// let second_put = store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"11")).await?;
+    ///
+    /// assert!(second_put > first_put);
+    /// assert_eq!(store.get(b"apples").await?, Some(Bytes::from_static(b"11")));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn put(&self, key: Bytes, value: Bytes) -> Result<SequenceNumber, KvError> {
         self.write(vec![KvOperation::Put { key, value }]).await
     }
 
     /// Removes a key and waits until that is committed. Removing a key that does not exist succeeds.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to remove.
     ///
     /// # Returns
     ///
@@ -306,6 +480,41 @@ impl KvStore {
     /// # Errors
     ///
     /// As for [`KvStore::put`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bytes::Bytes;
+    ///
+    /// store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"12")).await?;
+    /// store.delete(Bytes::from_static(b"apples")).await?;
+    /// store.delete(Bytes::from_static(b"never-written")).await?;
+    ///
+    /// assert_eq!(store.get(b"apples").await?, None);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn delete(&self, key: Bytes) -> Result<SequenceNumber, KvError> {
         self.write(vec![KvOperation::Delete { key }]).await
     }
@@ -324,6 +533,46 @@ impl KvStore {
     /// # Errors
     ///
     /// As for [`KvStore::put`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bitacora_kv::KvOperation;
+    /// use bytes::Bytes;
+    ///
+    /// // Twelve apples move from one shelf to another: no read sees them on both, or on neither.
+    /// let from_shelf_1 = KvOperation::Delete { key: Bytes::from_static(b"shelf-1/apples") };
+    /// let to_shelf_2 = KvOperation::Put {
+    ///     key: Bytes::from_static(b"shelf-2/apples"),
+    ///     value: Bytes::from_static(b"12"),
+    /// };
+    /// let moved = store.write(vec![from_shelf_1, to_shelf_2]).await?;
+    ///
+    /// assert_eq!(store.get_as_of(b"shelf-2/apples", moved).await?, Some(Bytes::from_static(b"12")));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn write(&self, operations: Vec<KvOperation>) -> Result<SequenceNumber, KvError> {
         let payload = KvRecord { operations }.encode();
         match self.writer.append(payload).await {
@@ -339,7 +588,11 @@ impl KvStore {
     /// before the call, and nothing that was never committed.
     ///
     /// It appends a barrier record, waits until the materializer has applied it, and reads at its
-    /// sequence; see the file documentation for why.
+    /// sequence; `store.rs` says why under "How a read is made linearizable".
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to read.
     ///
     /// # Returns
     ///
@@ -350,6 +603,40 @@ impl KvStore {
     /// Returns [`KvError::NotCurrent`] if the store could not prove it is still the writer; the read
     /// then gives no answer rather than a stale one. Returns [`KvError::Read`] or
     /// [`KvError::Materializer`] if the materializer did not get to the barrier in time or has stopped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bytes::Bytes;
+    ///
+    /// assert_eq!(store.get(b"apples").await?, None);
+    ///
+    /// store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"12")).await?;
+    /// assert_eq!(store.get(b"apples").await?, Some(Bytes::from_static(b"12")));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, KvError> {
         let barrier = self
             .writer
@@ -378,6 +665,41 @@ impl KvStore {
     ///
     /// Returns [`KvError::Read`] if `sequence` was not applied in time or is older than what the store
     /// still keeps, and [`KvError::Materializer`] if the materializer has stopped short of `sequence`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bytes::Bytes;
+    ///
+    /// let twelve = store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"12")).await?;
+    /// let eleven = store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"11")).await?;
+    ///
+    /// assert_eq!(store.get_as_of(b"apples", twelve).await?, Some(Bytes::from_static(b"12")));
+    /// assert_eq!(store.get_as_of(b"apples", eleven).await?, Some(Bytes::from_static(b"11")));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_as_of(&self, key: &[u8], sequence: SequenceNumber) -> Result<Option<Bytes>, KvError> {
         let bucket = bucket_of(key);
         let page = self.read_bucket(bucket, sequence).await?;
@@ -405,6 +727,46 @@ impl KvStore {
     /// # Errors
     ///
     /// As for [`KvStore::get_as_of`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bytes::Bytes;
+    ///
+    /// store.put(Bytes::from_static(b"fruit/pears"), Bytes::from_static(b"7")).await?;
+    /// store.put(Bytes::from_static(b"fruit/apples"), Bytes::from_static(b"12")).await?;
+    /// let last_put = store.put(Bytes::from_static(b"tools/saws"), Bytes::from_static(b"2")).await?;
+    ///
+    /// // Every key that starts with "fruit/": '0' is the byte after '/'.
+    /// let fruit = store.scan(b"fruit/", b"fruit0", last_put).await?;
+    ///
+    /// let apples = (Bytes::from_static(b"fruit/apples"), Bytes::from_static(b"12"));
+    /// let pears = (Bytes::from_static(b"fruit/pears"), Bytes::from_static(b"7"));
+    /// assert_eq!(fruit, vec![apples, pears]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn scan(
         &self,
         from_key: &[u8],
@@ -430,18 +792,133 @@ impl KvStore {
     }
 
     /// The last record the store's materializer has applied.
+    ///
+    /// # Returns
+    ///
+    /// The sequence number of that record. A read at or below it does not wait.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bytes::Bytes;
+    ///
+    /// let put = store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"12")).await?;
+    /// // A linearizable read waits until its barrier is applied, and the barrier follows the put.
+    /// store.get(b"apples").await?;
+    ///
+    /// assert!(store.applied_sequence() > put);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn applied_sequence(&self) -> SequenceNumber {
         self.pages.applied_sequence()
     }
 
     /// The epoch this store writes with.
+    ///
+    /// # Returns
+    ///
+    /// The epoch the store claimed when it became the writer. A store opened later on the same stream holds a
+    /// higher one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bitacora_types::Epoch;
+    ///
+    /// assert_eq!(store.writer_epoch(), Epoch::new(1));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn writer_epoch(&self) -> Epoch {
         self.writer.epoch()
     }
 
-    /// A handle that shows where the store's materializer is: applied, checkpointed, lag.
+    /// Gives a handle that shows where the store's materializer is: applied, checkpointed, lag.
+    ///
+    /// # Returns
+    ///
+    /// A handle that can be cloned, read and waited on from any task. It also says why the materializer
+    /// stopped, once it has.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_kv::{KvDependencies, KvSettings, KvStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("inventory", StreamOptions::default()).await?;
+    /// # let dependencies = KvDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # KvStore::initialize(&dependencies.metadata, "inventory").await?;
+    /// # let store = KvStore::open(dependencies, "inventory", KvSettings::default()).await?;
+    /// use bytes::Bytes;
+    ///
+    /// let put = store.put(Bytes::from_static(b"apples"), Bytes::from_static(b"12")).await?;
+    ///
+    /// let mut progress = store.progress();
+    /// let reached = progress.wait_until_applied(put).await?;
+    /// assert!(reached.applied_sequence >= put);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn progress(&self) -> RunnerProgress {
         self.progress.clone()

@@ -36,6 +36,9 @@
 //!   because changing them would silently lose every key that moves to another bucket.
 //! - A page holds each key at most once, in ascending byte order.
 //! - Applying is deterministic: the page after a record depends only on the page before and the record.
+//! - Applying a record to a bucket decodes the whole page and encodes it again. That runs for every record of a
+//!   bucket on every read that has to replay it, and it is the price of a page format this simple; a store with
+//!   large buckets would keep the pairs decoded. The cost was not measured.
 //!
 //! # See also
 //!
@@ -54,7 +57,21 @@ use crate::record::{KvOperation, KvRecord};
 /// this file.
 pub const BUCKET_COUNT: u32 = 64;
 
+/// The error for a page that ends before its pairs do.
+const CUT_SHORT: DamagedBucket = DamagedBucket {
+    reason: "the page is cut short",
+};
+
 /// The bucket a key lives in: CRC-32C of the key, modulo [`BUCKET_COUNT`].
+///
+/// # Arguments
+///
+/// * `key` - The key, as its bytes.
+///
+/// # Returns
+///
+/// The number of the bucket, from 0 to [`BUCKET_COUNT`] minus one. It is the identifier of the page the key
+/// lives on, and it is the same in every process and every version.
 ///
 /// # Examples
 ///
@@ -70,6 +87,17 @@ pub fn bucket_of(key: &[u8]) -> u32 {
 }
 
 /// Why a page is not a bucket.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_kv::{DamagedBucket, decode_bucket};
+/// use bytes::Bytes;
+///
+/// // A page that says it holds one pair and ends there.
+/// let cut_short = Bytes::from_static(&[1, 0, 0, 0]);
+/// assert_eq!(decode_bucket(&cut_short), Err(DamagedBucket { reason: "the page is cut short" }));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DamagedBucket {
     /// What is wrong with the page.
@@ -82,19 +110,40 @@ pub struct DamagedBucket {
 ///
 /// * `page` - A page as [`KvPages`] wrote it. Keys and values of the result share its memory.
 ///
+/// # Returns
+///
+/// Every pair of the bucket, by key.
+///
 /// # Errors
 ///
 /// Returns [`DamagedBucket`] if the page is cut short or goes on after its last pair.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_kv::{KvPages, KvRecord, bucket_of, decode_bucket};
+/// use bitacora_materializer::PageMaterializer;
+/// use bitacora_types::{LogRecord, SequenceNumber};
+/// use bytes::Bytes;
+///
+/// let put = LogRecord {
+///     sequence: SequenceNumber::new(1),
+///     payload: KvRecord::put(Bytes::from_static(b"colour"), Bytes::from_static(b"red")).encode(),
+/// };
+/// let page = KvPages.apply_record(&bucket_of(b"colour"), None, &put).expect("a valid record");
+///
+/// let pairs = decode_bucket(&Bytes::from(page)).expect("a page that was just written");
+/// assert_eq!(pairs.get(&b"colour"[..]), Some(&Bytes::from_static(b"red")));
+/// ```
 pub fn decode_bucket(page: &Bytes) -> Result<BTreeMap<Bytes, Bytes>, DamagedBucket> {
-    let cut_short = DamagedBucket {
-        reason: "the page is cut short",
-    };
     let mut unread = page.clone();
-    let pair_count = unread.try_get_u32_le().map_err(|_cut_short| cut_short)?;
+    let Ok(pair_count) = unread.try_get_u32_le() else {
+        return Err(CUT_SHORT);
+    };
     let mut pairs = BTreeMap::new();
     for _pair in 0..pair_count {
-        let key = read_length_prefixed(&mut unread).ok_or(cut_short)?;
-        let value = read_length_prefixed(&mut unread).ok_or(cut_short)?;
+        let key = read_length_prefixed(&mut unread).ok_or(CUT_SHORT)?;
+        let value = read_length_prefixed(&mut unread).ok_or(CUT_SHORT)?;
         pairs.insert(key, value);
     }
     if unread.has_remaining() {
@@ -119,6 +168,15 @@ pub fn decode_bucket(page: &Bytes) -> Result<BTreeMap<Bytes, Bytes>, DamagedBuck
 /// # Errors
 ///
 /// Returns [`DamagedBucket`] if the page cannot be decoded.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_kv::value_in_bucket;
+///
+/// // No record has touched the key's bucket yet, so there is no page and no value.
+/// assert_eq!(value_in_bucket(None, b"colour"), Ok(None));
+/// ```
 pub fn value_in_bucket(page: Option<&Bytes>, key: &[u8]) -> Result<Option<Bytes>, DamagedBucket> {
     let Some(page) = page else {
         return Ok(None);
@@ -162,6 +220,26 @@ fn invalid_record(log_record: &LogRecord, reason: &str) -> MaterializerError {
     }
 }
 
+/// Reads the operations out of a log record, or says which record cannot be applied and why.
+fn decode_record(log_record: &LogRecord) -> Result<KvRecord, MaterializerError> {
+    match KvRecord::decode(&log_record.payload) {
+        Ok(record) => Ok(record),
+        Err(record_error) => Err(invalid_record(log_record, &record_error.to_string())),
+    }
+}
+
+/// Carries out one operation on the pairs of the bucket its key hashes to.
+fn apply_operation(pairs: &mut BTreeMap<Bytes, Bytes>, operation: KvOperation) {
+    match operation {
+        KvOperation::Put { key, value } => {
+            pairs.insert(key, value);
+        }
+        KvOperation::Delete { key } => {
+            pairs.remove(&key);
+        }
+    }
+}
+
 /// The page logic of bitacora-kv: buckets of sorted key-value pairs.
 ///
 /// It has no state and no settings. The page adapter creates it with `Default`.
@@ -188,12 +266,12 @@ fn invalid_record(log_record: &LogRecord, reason: &str) -> MaterializerError {
 pub struct KvPages;
 
 impl PageMaterializer for KvPages {
+    /// The number of a bucket.
     type PageId = u32;
 
     /// The buckets of the keys the record changes, each once, in ascending order.
     fn pages_touched(&self, log_record: &LogRecord) -> Result<Vec<u32>, MaterializerError> {
-        let record = KvRecord::decode(&log_record.payload)
-            .map_err(|record_error| invalid_record(log_record, &record_error.to_string()))?;
+        let record = decode_record(log_record)?;
         let mut buckets = BTreeSet::new();
         for operation in &record.operations {
             buckets.insert(bucket_of(operation.key()));
@@ -208,33 +286,26 @@ impl PageMaterializer for KvPages {
         page_before: Option<&[u8]>,
         log_record: &LogRecord,
     ) -> Result<Vec<u8>, MaterializerError> {
-        let record = KvRecord::decode(&log_record.payload)
-            .map_err(|record_error| invalid_record(log_record, &record_error.to_string()))?;
+        let record = decode_record(log_record)?;
         let mut pairs = match page_before {
             Some(page) => decode_bucket(&Bytes::copy_from_slice(page))
                 .map_err(|damaged| invalid_record(log_record, damaged.reason))?,
             None => BTreeMap::new(),
         };
         for operation in record.operations {
-            if bucket_of(operation.key()) != *page_id {
-                continue;
-            }
-            match operation {
-                KvOperation::Put { key, value } => {
-                    pairs.insert(key, value);
-                }
-                KvOperation::Delete { key } => {
-                    pairs.remove(&key);
-                }
+            if bucket_of(operation.key()) == *page_id {
+                apply_operation(&mut pairs, operation);
             }
         }
         Ok(encode_bucket(&pairs))
     }
 
+    /// The bucket number as four little-endian bytes.
     fn encode_page_id(page_id: &u32) -> Vec<u8> {
         page_id.to_le_bytes().to_vec()
     }
 
+    /// The bucket number four little-endian bytes stand for, if it is a bucket of the store.
     fn decode_page_id(encoded_page_id: &[u8]) -> Option<u32> {
         let bucket = u32::from_le_bytes(encoded_page_id.try_into().ok()?);
         (bucket < BUCKET_COUNT).then_some(bucket)

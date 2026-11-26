@@ -390,9 +390,9 @@ async fn reopened_store_starts_from_its_checkpoint() {
     assert_eq!(reopened.progress().latest().committed_checkpoint, last_put);
 }
 
-#[tokio::test(start_paused = true)]
-async fn reopened_store_has_what_was_checkpointed_and_what_came_after() {
-    let harness = Harness::start().await;
+/// Opens a store, puts keys 0 to 19 with the value "before", checkpoints, puts keys 15 to 24 with the value
+/// "after", and closes the store. Whoever opens the stream next restores the checkpoint and applies the rest.
+async fn write_before_and_after_a_checkpoint(harness: &Harness) {
     let first_store = harness.open().await;
     let mut last_put = SequenceNumber::ZERO;
     for key_number in 0..20 {
@@ -402,11 +402,25 @@ async fn reopened_store_has_what_was_checkpointed_and_what_came_after() {
     for key_number in 15..25 {
         put(&first_store, &format!("key-{key_number}"), "after").await;
     }
-    drop(first_store);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reopened_store_has_what_was_checkpointed() {
+    let harness = Harness::start().await;
+    write_before_and_after_a_checkpoint(&harness).await;
 
     let reopened = harness.open().await;
 
     assert_eq!(reopened.get(b"key-3").await, Ok(Some(bytes("before"))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reopened_store_has_what_was_written_after_its_checkpoint() {
+    let harness = Harness::start().await;
+    write_before_and_after_a_checkpoint(&harness).await;
+
+    let reopened = harness.open().await;
+
     assert_eq!(reopened.get(b"key-17").await, Ok(Some(bytes("after"))));
     assert_eq!(reopened.get(b"key-24").await, Ok(Some(bytes("after"))));
 }
@@ -505,6 +519,14 @@ struct InterruptedWrites {
     was_reported_done_by_key: BTreeMap<String, bool>,
 }
 
+/// What one writer task learned about one of its puts.
+struct PutOutcome {
+    /// The key the put wrote.
+    key: String,
+    /// Whether the store reported the put as committed.
+    was_reported_done: bool,
+}
+
 /// How many tasks write to the store that is about to be replaced.
 const CONCURRENT_WRITERS: u32 = 4;
 
@@ -526,7 +548,10 @@ async fn take_over_in_the_middle_of_writes(harness: &Harness) -> InterruptedWrit
             for key_number in 0_u32.. {
                 let key = format!("key-{writer_number}-{key_number}");
                 let written = replaced.put(bytes(&key), bytes("written")).await;
-                outcomes.push((key, written.is_ok()));
+                outcomes.push(PutOutcome {
+                    key,
+                    was_reported_done: written.is_ok(),
+                });
                 if written.is_err() {
                     break;
                 }
@@ -542,8 +567,8 @@ async fn take_over_in_the_middle_of_writes(harness: &Harness) -> InterruptedWrit
 
     let mut was_reported_done_by_key = BTreeMap::new();
     while let Some(finished) = writers.join_next().await {
-        for (key, was_reported_done) in finished.expect("a writer does not panic") {
-            was_reported_done_by_key.insert(key, was_reported_done);
+        for outcome in finished.expect("a writer does not panic") {
+            was_reported_done_by_key.insert(outcome.key, outcome.was_reported_done);
         }
     }
     InterruptedWrites {
@@ -616,9 +641,17 @@ fn segment_filling_value(marker: u8) -> Bytes {
     Bytes::from(vec![marker; 2048])
 }
 
+/// A store whose log was truncated below its checkpoint.
+struct TruncatedStore {
+    /// The store, still open.
+    store: KvStore,
+    /// The sequence of the last put the store made before its checkpoint.
+    last_put: SequenceNumber,
+}
+
 /// Writes ten keys, one segment each, checkpoints, and lets the controller truncate the log below the
-/// checkpoint. Returns the store and the sequence of the last put.
-async fn store_whose_log_was_truncated(harness: &Harness) -> (KvStore, SequenceNumber) {
+/// checkpoint.
+async fn store_whose_log_was_truncated(harness: &Harness) -> TruncatedStore {
     let store = harness.open_with_small_segments().await;
     let mut last_put = SequenceNumber::ZERO;
     for key_number in 0..10_u8 {
@@ -631,25 +664,25 @@ async fn store_whose_log_was_truncated(harness: &Harness) -> (KvStore, SequenceN
     }
     checkpointed(&store, last_put).await;
     harness.run_controller_pass().await;
-    (store, last_put)
+    TruncatedStore { store, last_put }
 }
 
 #[tokio::test(start_paused = true)]
 async fn log_below_the_checkpoint_of_the_store_is_truncated() {
     let harness = Harness::start().await;
 
-    let (_store, last_put) = store_whose_log_was_truncated(&harness).await;
+    let truncated = store_whose_log_was_truncated(&harness).await;
 
     let low_water_mark = harness.low_water_mark().await;
     assert!(low_water_mark > SequenceNumber::FIRST, "{low_water_mark}");
-    assert!(low_water_mark <= last_put.next(), "{low_water_mark}");
+    assert!(low_water_mark <= truncated.last_put.next(), "{low_water_mark}");
 }
 
 #[tokio::test(start_paused = true)]
 async fn store_reads_every_key_after_its_log_was_truncated() {
     let harness = Harness::start().await;
 
-    let (store, _last_put) = store_whose_log_was_truncated(&harness).await;
+    let store = store_whose_log_was_truncated(&harness).await.store;
 
     for key_number in 0..10_u8 {
         let read = store.get(format!("key-{key_number}").as_bytes()).await;
@@ -662,7 +695,7 @@ async fn store_reads_every_key_after_its_log_was_truncated() {
 async fn store_reads_history_whose_records_were_truncated() {
     let harness = Harness::start().await;
 
-    let (store, _last_put) = store_whose_log_was_truncated(&harness).await;
+    let store = store_whose_log_was_truncated(&harness).await.store;
 
     // The fifth put is long gone from the log; the layers still know what the store held then.
     let fifth_put = SequenceNumber::new(5);
@@ -673,7 +706,7 @@ async fn store_reads_history_whose_records_were_truncated() {
 #[tokio::test(start_paused = true)]
 async fn store_reopens_after_its_log_was_truncated() {
     let harness = Harness::start().await;
-    let (store, _last_put) = store_whose_log_was_truncated(&harness).await;
+    let store = store_whose_log_was_truncated(&harness).await.store;
     drop(store);
 
     let reopened = harness.open().await;
@@ -684,7 +717,7 @@ async fn store_reopens_after_its_log_was_truncated() {
 #[tokio::test(start_paused = true)]
 async fn writes_and_reads_go_on_while_the_log_is_being_truncated() {
     let harness = Harness::start().await;
-    let (store, _last_put) = store_whose_log_was_truncated(&harness).await;
+    let store = store_whose_log_was_truncated(&harness).await.store;
 
     for round in 0..5_u8 {
         harness.run_controller_pass().await;

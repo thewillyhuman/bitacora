@@ -49,7 +49,23 @@ const KIND_PUT: u8 = 1;
 /// The stored kind of a delete.
 const KIND_DELETE: u8 = 2;
 
+/// What is wrong with a payload that ends before the record does.
+const CUT_SHORT: &str = "it is cut short";
+
 /// Why a log record's payload is not a bitacora-kv record.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_kv::{KvRecord, KvRecordError};
+/// use bytes::Bytes;
+///
+/// let nothing = Bytes::new();
+/// assert_eq!(
+///     KvRecord::decode(&nothing),
+///     Err(KvRecordError::Malformed { reason: "it is empty" })
+/// );
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum KvRecordError {
     /// The payload was written by a format this code does not know.
@@ -68,6 +84,16 @@ pub enum KvRecordError {
 }
 
 /// One change to one key.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_kv::KvOperation;
+/// use bytes::Bytes;
+///
+/// let change = KvOperation::Put { key: Bytes::from_static(b"colour"), value: Bytes::from_static(b"red") };
+/// assert_eq!(change.key(), &Bytes::from_static(b"colour"));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvOperation {
     /// Sets the value of a key, whether or not it had one.
@@ -86,6 +112,20 @@ pub enum KvOperation {
 
 impl KvOperation {
     /// The key the operation changes.
+    ///
+    /// # Returns
+    ///
+    /// The key of the put or of the delete. It decides which bucket page the operation touches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_kv::KvOperation;
+    /// use bytes::Bytes;
+    ///
+    /// let removal = KvOperation::Delete { key: Bytes::from_static(b"shape") };
+    /// assert_eq!(removal.key(), &Bytes::from_static(b"shape"));
+    /// ```
     #[must_use]
     pub const fn key(&self) -> &Bytes {
         match self {
@@ -120,12 +160,47 @@ pub struct KvRecord {
 impl KvRecord {
     /// A record that changes nothing. A linearizable read appends one to learn a position in the log
     /// that is current.
+    ///
+    /// # Returns
+    ///
+    /// A record without operations. It is a valid record of the stream and takes a sequence number like any
+    /// other.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_kv::KvRecord;
+    ///
+    /// let barrier = KvRecord::barrier();
+    /// assert!(barrier.operations.is_empty());
+    /// assert_eq!(KvRecord::decode(&barrier.encode()), Ok(barrier));
+    /// ```
     #[must_use]
     pub const fn barrier() -> Self {
         Self { operations: Vec::new() }
     }
 
     /// A record that sets one key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to set.
+    /// * `value` - Its new value. An empty value is a value: the key exists afterwards.
+    ///
+    /// # Returns
+    ///
+    /// A record with the one put.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_kv::{KvOperation, KvRecord};
+    /// use bytes::Bytes;
+    ///
+    /// let record = KvRecord::put(Bytes::from_static(b"colour"), Bytes::from_static(b"red"));
+    /// assert_eq!(record.operations.len(), 1);
+    /// assert_eq!(record.operations[0].key(), &Bytes::from_static(b"colour"));
+    /// ```
     #[must_use]
     pub fn put(key: Bytes, value: Bytes) -> Self {
         Self {
@@ -134,6 +209,24 @@ impl KvRecord {
     }
 
     /// A record that removes one key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to remove. It need not exist.
+    ///
+    /// # Returns
+    ///
+    /// A record with the one delete.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_kv::{KvOperation, KvRecord};
+    /// use bytes::Bytes;
+    ///
+    /// let record = KvRecord::delete(Bytes::from_static(b"shape"));
+    /// assert_eq!(record.operations, vec![KvOperation::Delete { key: Bytes::from_static(b"shape") }]);
+    /// ```
     #[must_use]
     pub fn delete(key: Bytes) -> Self {
         Self {
@@ -143,30 +236,31 @@ impl KvRecord {
 
     /// The payload of the log record that carries these operations.
     ///
+    /// # Returns
+    ///
+    /// The bytes to append to the stream. Equal records give equal bytes, and [`KvRecord::decode`] turns them
+    /// back.
+    ///
     /// # Panics
     ///
     /// Panics if the record has 2^32 operations or more, or a key or value of 4 GiB or more. The log
     /// refuses records far smaller than that.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_kv::KvRecord;
+    ///
+    /// // The format version, then the number of operations: none.
+    /// assert_eq!(KvRecord::barrier().encode(), &[1, 0, 0, 0, 0][..]);
+    /// ```
     #[must_use]
     pub fn encode(&self) -> Bytes {
         let mut payload = BytesMut::new();
         payload.put_u8(RECORD_FORMAT_VERSION);
         payload.put_u32_le(length_as_u32(self.operations.len()));
         for operation in &self.operations {
-            match operation {
-                KvOperation::Put { key, value } => {
-                    payload.put_u8(KIND_PUT);
-                    payload.put_u32_le(length_as_u32(key.len()));
-                    payload.put_slice(key);
-                    payload.put_u32_le(length_as_u32(value.len()));
-                    payload.put_slice(value);
-                }
-                KvOperation::Delete { key } => {
-                    payload.put_u8(KIND_DELETE);
-                    payload.put_u32_le(length_as_u32(key.len()));
-                    payload.put_slice(key);
-                }
-            }
+            put_operation(&mut payload, operation);
         }
         payload.freeze()
     }
@@ -178,37 +272,84 @@ impl KvRecord {
     /// * `payload` - The payload of a record of a bitacora-kv stream. Keys and values of the result
     ///   share its memory.
     ///
+    /// # Returns
+    ///
+    /// The record the payload was encoded from.
+    ///
     /// # Errors
     ///
     /// Returns [`KvRecordError`] if the payload was not produced by [`KvRecord::encode`] of this or an
     /// older format version.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_kv::{KvRecord, KvRecordError};
+    /// use bytes::Bytes;
+    ///
+    /// let payload = KvRecord::put(Bytes::from_static(b"colour"), Bytes::from_static(b"red")).encode();
+    /// let record = KvRecord::decode(&payload).expect("a payload that was just encoded");
+    /// assert_eq!(record.operations.len(), 1);
+    ///
+    /// let from_a_newer_format = Bytes::from_static(&[9, 0, 0, 0, 0]);
+    /// assert_eq!(
+    ///     KvRecord::decode(&from_a_newer_format),
+    ///     Err(KvRecordError::UnsupportedVersion { found: 9 })
+    /// );
+    /// ```
     pub fn decode(payload: &Bytes) -> Result<Self, KvRecordError> {
         let mut unread = payload.clone();
-        let version = unread.try_get_u8().map_err(|_cut_short| malformed("it is empty"))?;
+        let Ok(version) = unread.try_get_u8() else {
+            return Err(malformed("it is empty"));
+        };
         if version != RECORD_FORMAT_VERSION {
             return Err(KvRecordError::UnsupportedVersion { found: version });
         }
-        let operation_count = unread
-            .try_get_u32_le()
-            .map_err(|_cut_short| malformed("it is cut short"))?;
+        let Ok(operation_count) = unread.try_get_u32_le() else {
+            return Err(malformed(CUT_SHORT));
+        };
         let mut operations = Vec::new();
         for _operation in 0..operation_count {
-            let kind = unread.try_get_u8().map_err(|_cut_short| malformed("it is cut short"))?;
-            let key = read_length_prefixed(&mut unread)?;
-            let operation = match kind {
-                KIND_PUT => KvOperation::Put {
-                    key,
-                    value: read_length_prefixed(&mut unread)?,
-                },
-                KIND_DELETE => KvOperation::Delete { key },
-                _unknown => return Err(malformed("it holds an unknown kind of operation")),
-            };
-            operations.push(operation);
+            operations.push(read_operation(&mut unread)?);
         }
         if unread.has_remaining() {
             return Err(malformed("it goes on after its last operation"));
         }
         Ok(Self { operations })
+    }
+}
+
+/// Appends one operation to the payload of a record.
+fn put_operation(payload: &mut BytesMut, operation: &KvOperation) {
+    match operation {
+        KvOperation::Put { key, value } => {
+            payload.put_u8(KIND_PUT);
+            payload.put_u32_le(length_as_u32(key.len()));
+            payload.put_slice(key);
+            payload.put_u32_le(length_as_u32(value.len()));
+            payload.put_slice(value);
+        }
+        KvOperation::Delete { key } => {
+            payload.put_u8(KIND_DELETE);
+            payload.put_u32_le(length_as_u32(key.len()));
+            payload.put_slice(key);
+        }
+    }
+}
+
+/// Reads one operation and moves `unread` past it.
+fn read_operation(unread: &mut Bytes) -> Result<KvOperation, KvRecordError> {
+    let Ok(kind) = unread.try_get_u8() else {
+        return Err(malformed(CUT_SHORT));
+    };
+    let key = read_length_prefixed(unread)?;
+    match kind {
+        KIND_PUT => Ok(KvOperation::Put {
+            key,
+            value: read_length_prefixed(unread)?,
+        }),
+        KIND_DELETE => Ok(KvOperation::Delete { key }),
+        _unknown => Err(malformed("it holds an unknown kind of operation")),
     }
 }
 
@@ -224,11 +365,12 @@ fn length_as_u32(length: usize) -> u32 {
 
 /// Reads a length and then that many bytes, or fails if the payload ends first.
 fn read_length_prefixed(unread: &mut Bytes) -> Result<Bytes, KvRecordError> {
-    let length = unread
-        .try_get_u32_le()
-        .map_err(|_cut_short| malformed("it is cut short"))? as usize;
+    let Ok(length) = unread.try_get_u32_le() else {
+        return Err(malformed(CUT_SHORT));
+    };
+    let length = length as usize;
     if unread.remaining() < length {
-        return Err(malformed("it is cut short"));
+        return Err(malformed(CUT_SHORT));
     }
     Ok(unread.split_to(length))
 }

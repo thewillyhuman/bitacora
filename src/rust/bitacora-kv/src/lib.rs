@@ -14,7 +14,7 @@
 //! - [`KvPages`], [`bucket_of`], [`decode_bucket`], [`value_in_bucket`]: keys on bucket pages.
 //! - [`KvDependencies`], [`KvSettings`], [`KvError`], [`KV_MATERIALIZER`].
 //!
-//! # How it fits together
+//! # How it works
 //!
 //! ```text
 //! put / delete --> KvRecord --> StreamWriter --> log
@@ -24,10 +24,25 @@
 //! get ---- barrier record, then read as of it --> bucket pages
 //! ```
 //!
+//! A store is the writer of its stream. Every change is one record of the stream. A materializer follows the stream
+//! and keeps the keys on 64 bucket pages, of which the page adapter keeps every version. A read looks a key up in
+//! its bucket as of a sequence number: one the caller names, or, for the latest value, the sequence of a barrier
+//! record the read appends first, which proves that the store was still the writer.
+//!
+//! # Invariants
+//!
+//! - A value returned by [`KvStore::get`] was the committed value of the key at some moment between the call and
+//!   its return.
+//! - A write reported as done is in the log once, at the returned sequence number.
+//! - Reads are answered only from records the log has committed.
+//! - The record format, the bucket count and the hash never change for an existing store.
+//! - The crate depends on `bitacora-types`, `bitacora-artifact`, `bitacora-meta`, `bitacora-client` and
+//!   `bitacora-materializer` only.
+//!
 //! # See also
 //!
-//! The `README.md` of this crate, and `docs/decisions/0004-materializer-framework.md` for how reads are
-//! made linearizable.
+//! - `README.md` in this crate: the design, and which file holds what.
+//! - `docs/decisions/0004-materializer-framework.md`: how reads are made linearizable.
 
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
