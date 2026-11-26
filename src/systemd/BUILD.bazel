@@ -1,0 +1,86 @@
+"""systemd units for the daemons, and the archive that installs them on a machine."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "shellcheck_test")
+
+# What the archive installs: mode, file, and where it goes under /.
+#
+# The configuration files are the examples that each daemon keeps next to its
+# code and tests against itself, so what is installed cannot fall behind what
+# the daemons accept. They are installed as `.example` next to the place the
+# units read, so that unpacking a newer archive never overwrites the
+# configuration an operator wrote.
+_INSTALLED_FILES = [
+    ("0755", "//src/rust/bita-replica", "usr/bin/bita-replica"),
+    ("0755", "//src/rust/bita-controller", "usr/bin/bita-controller"),
+    ("0755", "//src/rust/bita", "usr/bin/bita"),
+    ("0644", "bita-replica.service", "usr/lib/systemd/system/bita-replica.service"),
+    ("0644", "bita-controller.service", "usr/lib/systemd/system/bita-controller.service"),
+    ("0644", "bitacora.sysusers", "usr/lib/sysusers.d/bitacora.conf"),
+    ("0644", "//src/rust/bita-replica:example.toml", "etc/bitacora/replica.toml.example"),
+    ("0644", "//src/rust/bita-controller:example.toml", "etc/bitacora/controller.toml.example"),
+]
+
+# `bazel build --config=release //src/systemd:package` builds the archive
+# for the platform Bazel runs on. Unpack it at / on the target machine.
+genrule(
+    name = "package",
+    srcs = [source for _mode, source, _target in _INSTALLED_FILES],
+    outs = ["bitacora-systemd.tar.gz"],
+    cmd = "$(location package.sh) $@ " + " ".join([
+        "{}:$(location {})={}".format(mode, source, target)
+        for mode, source, target in _INSTALLED_FILES
+    ]),
+    tools = ["package.sh"],
+)
+
+# The units checked against the programs, the configuration and the user
+# they are installed with.
+sh_test(
+    name = "units_test",
+    size = "small",
+    srcs = ["units_test.sh"],
+    args = ["$(rootpath :package)"],
+    data = [":package"],
+)
+
+# A replica unit with one mistake of each kind the checker looks for.
+genrule(
+    name = "broken_replica_unit",
+    srcs = ["bita-replica.service"],
+    outs = ["broken/bita-replica.service"],
+    cmd = """sed \\
+        -e 's/^NoNewPrivileges=yes$$/NoNewPrivilges=yes/' \\
+        -e 's/^RestartPreventExitStatus=2$$/RestartPreventExitStatus=3/' \\
+        -e 's|^\\(ExecStart=.*\\)$$|\\1 --verbose|' \\
+        -e 's/^User=bitacora$$/User=root/' \\
+        -e 's/^TimeoutStopSec=30s$$/TimeoutStopSec=5s/' \\
+        -e 's/^StateDirectory=bitacora$$/StateDirectory=elsewhere/' \\
+        $< >$@""",
+)
+
+# The checker must fail on the broken unit and name every mistake in it.
+sh_test(
+    name = "units_checker_test",
+    size = "small",
+    srcs = ["units_checker_test.sh"],
+    args = [
+        "$(rootpath units_test.sh)",
+        "$(rootpath :package)",
+        "$(rootpath :broken_replica_unit)",
+    ],
+    data = [
+        "units_test.sh",
+        ":broken_replica_unit",
+        ":package",
+    ],
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = [
+        "package.sh",
+        "units_checker_test.sh",
+        "units_test.sh",
+    ],
+)

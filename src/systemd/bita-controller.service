@@ -1,0 +1,67 @@
+# bitacora controller: looks after a cluster.
+#
+# Run it on two or three machines with the same configuration except
+# `identity`: one instance leads and the others stand by. Its configuration is
+# /etc/bitacora/controller.toml; see the comments in that file.
+
+[Unit]
+Description=bitacora controller
+Documentation=https://github.com/thewillyhuman/bitacora/blob/main/src/systemd/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=bitacora
+Group=bitacora
+ExecStart=/usr/bin/bita-controller --config /etc/bitacora/controller.toml
+
+# Variables for the configuration file, which may refer to them as
+# "${NAME}", and the credentials of the object store. The file is optional.
+EnvironmentFile=-/etc/bitacora/bita-controller.env
+
+# The controller exits with 1 when it could not start, for example because
+# its metrics port is taken: restart it. It exits with 2 when its
+# configuration is wrong: that needs a person, not a restart.
+Restart=on-failure
+RestartSec=2s
+RestartPreventExitStatus=2
+
+# On SIGTERM the controller gives a running round ten seconds, then stops.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+LimitNOFILE=65536
+
+# The controller keeps no state of its own. It only writes below
+# /var/lib/bitacora when the object store is a local directory there, as in
+# the example configuration.
+StateDirectory=bitacora
+StateDirectoryMode=0750
+UMask=0027
+
+# The controller needs the network, and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

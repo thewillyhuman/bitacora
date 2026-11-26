@@ -1,0 +1,5 @@
+# The user the bitacora daemons run as. Installed as
+# /usr/lib/sysusers.d/bitacora.conf and applied by systemd-sysusers.
+#
+# Type  Name      ID  GECOS               Home directory     Shell
+u       bitacora  -   "bitacora daemons"  /var/lib/bitacora  /usr/sbin/nologin

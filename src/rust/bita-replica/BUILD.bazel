@@ -1,6 +1,6 @@
 load("//src/rust:defs.bzl", "bitacora_binary")
 
-exports_files(["Cargo.toml"])
+exports_files(["Cargo.toml", "example.toml"])
 
 bitacora_binary(
     name = "bita-replica",

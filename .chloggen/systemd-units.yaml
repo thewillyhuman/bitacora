@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "Add systemd units for bita-replica and bita-controller, the bitacora system user, and //src/systemd:package, which builds an archive of the programs, the units and the example configuration to unpack on a machine."
+issues: [5]

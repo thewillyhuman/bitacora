@@ -1,0 +1,67 @@
+# bitacora replica: one storage node of a cluster.
+#
+# One replica serves one data directory. Its configuration is
+# /etc/bitacora/replica.toml; see the comments in that file.
+
+[Unit]
+Description=bitacora replica
+Documentation=https://github.com/thewillyhuman/bitacora/blob/main/src/systemd/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=bitacora
+Group=bitacora
+ExecStart=/usr/bin/bita-replica --config /etc/bitacora/replica.toml
+
+# Variables for the configuration file, which may refer to them as
+# "${NAME}", and the credentials of the object store. The file is optional.
+EnvironmentFile=-/etc/bitacora/bita-replica.env
+
+# The replica exits with 1 when it could not start or had to stop, for
+# example because the disk refused a write: restart it. It exits with 2 when
+# its configuration is wrong: that needs a person, not a restart.
+Restart=on-failure
+RestartSec=2s
+RestartPreventExitStatus=2
+
+# On SIGTERM the replica gives requests in flight ten seconds, then stops.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# One file per open segment, one connection per client.
+LimitNOFILE=1048576
+
+# /var/lib/bitacora, created for the user above. The data directory of the
+# example configuration is below it; a data directory elsewhere, such as a
+# disk of its own, needs a ReadWritePaths= line in a drop-in.
+StateDirectory=bitacora
+StateDirectoryMode=0750
+UMask=0027
+
+# The replica needs its data directory and the network, and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
