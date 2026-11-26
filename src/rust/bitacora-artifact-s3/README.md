@@ -71,16 +71,18 @@ of it for nothing. See `docs/decisions/0005-s3-backend.md`.
 ## Tests
 
 The unit tests need nothing. The tests in `tests/s3/` start the
-[Versity S3 Gateway](https://github.com/versity/versitygw) on a free local
-port. Bazel fetches a pinned release and passes its path in
-`BITA_S3_SERVER_BINARY`; nothing is downloaded while a test runs. Under
-Cargo, set the variable to the path of a `versitygw` program; without it
-those tests pass without running and say so once.
+[Versity S3 Gateway](https://github.com/versity/versitygw) on a loopback
+port that no other test is given (`bitacora-testports`). Bazel fetches a
+pinned release and passes its path in `BITA_S3_SERVER_BINARY`; nothing is
+downloaded while a test runs. Under Cargo, set the variable to the path of a
+`versitygw` program; without it those tests pass without running and say so
+once.
 
 ## Dependencies
 
-May depend on `bitacora-artifact` and on third-party crates. Nothing in the
-workspace may depend on it except the binaries that open an S3 store.
+May depend on `bitacora-artifact` and on third-party crates; its tests also
+use `bitacora-testports`. Nothing in the workspace may depend on it except
+the binaries that open an S3 store.
 
 ```text
 bitacora-artifact  <-  bitacora-artifact-s3  <-  binaries

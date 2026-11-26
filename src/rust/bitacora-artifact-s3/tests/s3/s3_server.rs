@@ -13,22 +13,23 @@
 //! - [`S3Server`]: one running server with one bucket, stopped and wiped when dropped.
 //! - [`shared_s3_server`]: the server that all tests running at the moment share.
 //! - [`s3_server_binary`]: where the server program is, or `None` to skip.
-//! - [`loopback_listener`], [`port_of`] and [`free_local_port`]: how tests get ports that nobody else is
-//!   using.
+//! - [`loopback_listener`] and [`port_of`]: a listener of the test's own, for a server that never answers.
 //! - [`BUCKET`], [`ACCESS_KEY`] and [`SECRET_KEY`]: what the server is started with.
 //!
 //! # How it works
 //!
 //! The server is the Versity S3 Gateway with its POSIX backend: it serves a directory over the S3
 //! protocol, and every directory directly below it is a bucket. [`S3Server::start`] creates that directory
-//! with one bucket in it inside the test's temporary directory, asks the operating system for a free port,
-//! starts the gateway on it and lists the bucket in a loop until the gateway answers. The gateway keeps
-//! object metadata in a second directory (`--sidecar`) and not in extended attributes, so the tests do not
-//! depend on what the file system of the temporary directory supports.
+//! with one bucket in it inside the test's temporary directory, takes a port, starts the gateway on it and
+//! lists the bucket in a loop until the gateway answers. The gateway keeps object metadata in a second
+//! directory (`--sidecar`) and not in extended attributes, so the tests do not depend on what the file
+//! system of the temporary directory supports.
 //!
-//! The port is found by binding port zero and closing the listener again, so another program could in
-//! theory take it before the gateway binds it; the gateway then exits and the test fails with a clear
-//! message instead of misbehaving.
+//! The port comes from the block of ports that this test binary shares
+//! (`bitacora_testports::take_shared_port`). No other test on the machine is given a port of that block, so
+//! nothing can take the port between the moment a test learns it and the moment the gateway binds it. A
+//! port that the operating system chose and that was closed again has no such protection: these tests once
+//! failed in 1 of 30 parallel runs because another test had been handed the same port.
 //!
 //! Starting the gateway takes a moment, so tests share one: [`shared_s3_server`] hands out a counted
 //! reference and starts a new process only when none is alive. The process is stopped when the last test
@@ -42,11 +43,12 @@
 //! - Dropping it kills the process before its directories are removed, also while a test is panicking.
 //! - Under Bazel a missing server program is a failure, never a skip: a test that silently does nothing
 //!   must not look green in continuous integration.
+//! - Every port a test passes to the gateway, or expects nothing to listen on, comes from the shared block.
 
 // Production code must reach the network through the injected interfaces, which is why clippy forbids
 // `TcpListener`, and the disk through `Disk`, which is why it forbids `create_dir_all`. This module only
-// asks the operating system for port numbers and prepares the directory of a child process, and there is
-// no interface for either.
+// opens a listener that never answers and prepares the directory of a child process, and there is no
+// interface for either.
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use std::io::Write;
@@ -59,6 +61,7 @@ use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
 use bitacora_artifact_s3::{S3ArtifactStore, S3Credentials, S3Settings};
+use bitacora_testports::take_shared_port;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -117,7 +120,7 @@ pub(crate) struct S3Server {
 }
 
 impl S3Server {
-    /// Starts the server on a free local port and waits until it answers.
+    /// Starts the server on a port of the shared block and waits until it answers.
     ///
     /// # Arguments
     ///
@@ -131,7 +134,7 @@ impl S3Server {
     ///
     /// Panics like [`S3Server::start_on_port`].
     pub(crate) async fn start(binary: &Path) -> Self {
-        Self::start_on_port(binary, free_local_port()).await
+        Self::start_on_port(binary, take_shared_port()).await
     }
 
     /// Starts the server on a port the test has chosen and waits until it answers. For tests that open a
@@ -140,8 +143,8 @@ impl S3Server {
     /// # Arguments
     ///
     /// * `binary` - Path of the server program, as [`s3_server_binary`] returns it.
-    /// * `port` - The loopback port stores will connect to. It must be free, as a port from
-    ///   [`free_local_port`] is.
+    /// * `port` - The loopback port stores will connect to: one from
+    ///   `bitacora_testports::take_shared_port`, which nothing else is given.
     ///
     /// # Returns
     ///
@@ -149,9 +152,8 @@ impl S3Server {
     ///
     /// # Panics
     ///
-    /// Panics when the program cannot be started, when it exits while starting (a port that was taken in
-    /// the meantime shows up this way), or when it does not answer within [`STARTUP_ALLOWANCE`]. In the
-    /// last two cases the process is killed first.
+    /// Panics when the program cannot be started, when it exits while starting, or when it does not answer
+    /// within [`STARTUP_ALLOWANCE`]. In the last two cases the process is killed first.
     pub(crate) async fn start_on_port(binary: &Path, port: u16) -> Self {
         let directory = new_server_directory();
         let buckets_directory = directory.path().join("buckets");
@@ -339,7 +341,8 @@ fn announce_skipped_tests() {
 /// is using.
 ///
 /// Nothing ever accepts on the listener. A test keeps it open to have a server that takes connections and
-/// never answers, or closes it to have a port that refuses them.
+/// never answers. The port is the test's as long as the listener is open, which is why it needs no port of
+/// the shared block.
 pub(crate) fn loopback_listener() -> TcpListener {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a loopback port can be bound")
 }
@@ -348,12 +351,6 @@ pub(crate) fn loopback_listener() -> TcpListener {
 pub(crate) fn port_of(listener: &TcpListener) -> u16 {
     let address = listener.local_addr().expect("a bound listener has an address");
     address.port()
-}
-
-/// Returns a loopback port that nothing is listening on right now: one the operating system just handed
-/// out and that was closed again.
-pub(crate) fn free_local_port() -> u16 {
-    port_of(&loopback_listener())
 }
 
 /// Creates the empty directory the server keeps its buckets and metadata in, inside the test's own

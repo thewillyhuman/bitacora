@@ -19,11 +19,12 @@ use std::time::Duration;
 
 use bitacora_artifact::{ArtifactError, ArtifactStore};
 use bitacora_artifact_s3::{S3ArtifactStore, S3Credentials, S3Settings};
+use bitacora_testports::take_shared_port;
 use bytes::Bytes;
 use tokio::time::Instant;
 
 use crate::s3_server::{
-    ACCESS_KEY, BUCKET, S3Server, SECRET_KEY, free_local_port, fresh_namespace, loopback_listener, open_store, port_of,
+    ACCESS_KEY, BUCKET, S3Server, SECRET_KEY, fresh_namespace, loopback_listener, open_store, port_of,
     s3_server_binary, shared_s3_server,
 };
 
@@ -176,7 +177,7 @@ async fn wrong_credentials_never_store_anything() {
 /// Needs no server at all, so it also runs where the server program is missing.
 #[tokio::test]
 async fn service_that_nothing_listens_at_is_unavailable() {
-    let endpoint = format!("http://127.0.0.1:{}", free_local_port());
+    let endpoint = format!("http://127.0.0.1:{}", take_shared_port());
     let store = store_at(&endpoint, Duration::from_secs(20));
     let asked_at = Instant::now();
 
@@ -238,7 +239,7 @@ async fn store_opened_before_its_server_was_up_works_once_it_is() {
     let Some(binary) = s3_server_binary() else {
         return;
     };
-    let port = free_local_port();
+    let port = take_shared_port();
     let store = store_at(&format!("http://127.0.0.1:{port}"), Duration::from_secs(20));
     let while_down = store.put_object("a", Bytes::from_static(b"x")).await;
     let _server = S3Server::start_on_port(&binary, port).await;

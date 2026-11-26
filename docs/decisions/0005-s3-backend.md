@@ -130,9 +130,10 @@ its root. It keeps object metadata in a second directory (`--sidecar`), so
 the tests do not depend on extended attributes in the file system. Bazel
 downloads the release for the platform (macOS arm64, Linux x86-64, Linux
 arm64), pinned by the checksums of the release's `checksums.txt`, and passes
-its path in `BITA_S3_SERVER_BINARY`. The test starts it on a free loopback
-port with its data in the test's temporary directory and kills it when the
-last test using it ends. Nothing is downloaded while a test runs.
+its path in `BITA_S3_SERVER_BINARY`. The test starts it on a loopback port
+that no other test is given (`bitacora-testports`), with its data in the
+test's temporary directory, and kills it when the last test using it ends.
+Nothing is downloaded while a test runs.
 
 MinIO would have been the obvious server. It no longer publishes binaries:
 its download address answers `410 Gone`.

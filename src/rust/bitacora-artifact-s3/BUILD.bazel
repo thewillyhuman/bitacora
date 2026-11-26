@@ -7,9 +7,9 @@ bitacora_library(
     deps = ["//src/rust/bitacora-artifact:bitacora_artifact"],
 )
 
-# Runs the store against a real S3 server, which the test starts on a free
-# local port. Medium because it starts a process and talks to it over
-# localhost; it still finishes in seconds, hence the short timeout.
+# Runs the store against a real S3 server, which the test starts on a
+# loopback port of its own. Medium because it starts a process and talks to
+# it over localhost; it still finishes in seconds, hence the short timeout.
 bitacora_integration_test(
     name = "s3_test",
     size = "medium",
@@ -21,5 +21,6 @@ bitacora_integration_test(
     deps = [
         ":bitacora_artifact_s3",
         "//src/rust/bitacora-artifact:bitacora_artifact",
+        "//src/rust/bitacora-testports:bitacora_testports",
     ],
 )

@@ -10,10 +10,10 @@
 //!
 //! # How the fixtures work
 //!
-//! `s3_server.rs` starts the Versity S3 Gateway on a free local port, with its data in the test's temporary
-//! directory, and stops it when the last test using it ends. Bazel fetches the pinned program and passes
-//! its path in `BITA_S3_SERVER_BINARY`. Under Cargo the variable is set by hand; when it is not, every test
-//! here passes without running and says so once.
+//! `s3_server.rs` starts the Versity S3 Gateway on a loopback port that no other test is given, with its
+//! data in the test's temporary directory, and stops it when the last test using it ends. Bazel fetches the
+//! pinned program and passes its path in `BITA_S3_SERVER_BINARY`. Under Cargo the variable is set by hand;
+//! when it is not, every test here passes without running and says so once.
 //!
 //! Every test starts with the same two lines: get the shared server or return, then open a store under a
 //! key prefix of its own.
