@@ -140,7 +140,7 @@ Section 16 of the design proposes targets for three replicas on NVMe disks with 
 | Sustained throughput per stream | 50 MiB/s | 111.4 MiB/s | Met with requests of 4 MiB, the default since `0.1.0-rc.4`; 23.8 MiB/s with the 256 KiB of the versions before |
 | Tail reader delay behind commit | 5 ms | | Not measured: the tool has no such workload |
 | Write unavailability on writer failover | 5 s | | Not measured: a forced takeover was over within the five seconds its pod took to start, run and stop |
-| Write pause on a replica-failure roll | 200 ms | 157 ms | Met in the one run made with a replica that was killed. Not met when a zone was cut off the network instead: the worst append then took 25.6 s, see "A soak" |
+| Write pause on a replica-failure roll | 200 ms | 157 ms | Met in the one run made with a replica that was killed. Not met when a zone was cut off the network instead: the worst append then took 15 to 31 s, see "A soak" |
 
 None of this says whether the targets hold on the disks they were written for. That takes a run on such
 disks.
@@ -166,10 +166,10 @@ each, the streams were read back in full.
 | The cluster was upgraded four more times, to `0.1.0-rc.3`, `0.1.0-rc.4`, `0.1.0-rc.5` and `0.1.0-rc.8` | No stream lost a record |
 
 No network was cut by hand. A policy that isolated one replica was accepted by the cluster and had no
-effect: the replica kept renewing its registration, and new connections reached it. That turned out to
-depend on the machine. The soak below cut a whole zone off, and there the policies held: the cluster
-enforces network policies on the machines of at least one zone and not on a machine of another. A cut on
-this cluster therefore has to be seen to be in effect before it counts, which is what the soak tool does.
+effect: the replica kept renewing its registration, and new connections reached it. The soak below found
+that this is about that one pod. Policies that cut a whole zone off held for every other pod they
+selected, in all three zones. A cut on this cluster therefore has to be seen to be in effect before it
+counts, which is what the soak tool does.
 
 ## A soak
 
@@ -185,22 +185,53 @@ the reason in every line it printed.
 A run of three days was started on the same version on 2026-11-26: four streams at twenty appends a
 second each, a fault a minute, every segment uploaded a minute after it is sealed and released by the
 replicas two minutes later, so that most of what the audit reads comes from the object store. Its result
-is not in yet, and this page does not count it. Its first two rounds, of ten minutes each, are:
+is not in yet, and this page does not count it. Its first six rounds, of ten minutes each, are:
 
-| Round | Appends committed | Records read | Faults | Longest append | Verdict |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 50,278 | 100,552 | 2 replicas, 2 controllers and 2 etcd members killed; one zone cut off twice | 25.6 s | Clean |
-| 2 | 47,899 | 95,794 | 3 replicas, 2 controllers and 3 etcd members killed | 543 ms | Clean |
+| Round | Appends committed | Records read | Killed: replicas, controllers, etcd members | Zones cut off | Longest append | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 50,278 | 100,552 | 2, 2, 2 | 2 | 25.6 s | Clean |
+| 2 | 47,899 | 95,794 | 3, 2, 3 | 0 | 543 ms | Clean |
+| 3 | 47,677 | 95,350 | 3, 1, 1 | 3 | 30.7 s | Clean |
+| 4 | 46,961 | 93,918 | 1, 3, 2 | 2 | 15.4 s | Clean |
+| 5 | 45,716 | 91,428 | 2, 2, 2 | 2 | 25.7 s | Clean |
+| 6 | 45,937 | 91,870 | 3, 2, 1 | 2 | 30.7 s | Clean |
 
-The zone that was cut off held two of the five replicas and one of the three etcd members, for half a
-minute each time. That the cuts were in effect is not only the tool's word: for their duration the
-Prometheus could not scrape those three processes, and none of them restarted. In the second round the
-tool cut off a single replica on a machine of another zone, saw it renew its registration from behind the
-cut, and gave that kind of fault up for the run.
+In one hour: 284,468 appends committed and every record read back twice, with 14 replicas, 12 controllers
+and 11 etcd members killed and a zone cut off eleven times. No append was lost or left without an outcome,
+and no writer lost its stream.
 
-No append was lost or left without an outcome in either round. What the cut cost is time: with kills
-alone the longest append took half a second, with the zone cut off it took 25.6 s, although two replicas
-of every stream and two etcd members could be reached throughout.
+A zone that is cut off holds one or two of the five replicas and one of the three etcd members, for half
+a minute. That the cuts were in effect is not only the tool's word: for their duration the Prometheus
+could not scrape the processes of the zone, and none of them restarted. All three zones were cut. One
+replica pod is the exception: a cut of that replica alone was seen not to be in effect, and the tool gave
+that kind of fault up for the run; when its zone was cut, the Prometheus still reached it.
+
+What a cut costs is time. With kills alone the longest append of a round took half a second. In every
+round with a zone cut off it took 15 to 31 s, although two replicas of every stream and two etcd members
+could be reached throughout.
+
+### Where the time goes
+
+The stall was reproduced on one machine, with five replicas and three etcd members as local processes
+and one writer at 16 appends in flight. A process that is frozen is silent in the way a zone that is cut
+off is: its connections stay open and nothing answers.
+
+| Frozen for 30 to 45 s | Longest append |
+| --- | --- |
+| One replica of the open segment | 185 ms. The writer rolled away from it after its 10 s |
+| One etcd member, a follower | 61 ms |
+| The etcd leader | 74 ms |
+| One replica of the open segment and one etcd member, as when a zone is cut off: ten runs | 0.2, 0.2, 5.3, 5.4, 10.2, 10.4, 10.4 and 30.6 s; in two runs the writer stopped |
+
+Neither a silent replica nor a silent etcd member hurts by itself. Together they do. The writer rolls
+away from the silent replica, and a roll makes three requests to the metadata store, one after the other,
+while nothing commits: a read, the conditional write, and a read of the replica registry. The client keeps
+sending requests to the silent etcd member, since nothing tells it that the member is gone, and a request
+that lands there waits out its 5 s. A read is tried twice and may land there both times. The stalls are
+therefore multiples of five seconds, on one machine and on the cluster alike. This is not fixed.
+
+In two of the ten runs the writer did not stall but stopped, with "another writer has taken the stream",
+while it was the only writer. That is a defect of the Rust client and is fixed; it is listed below.
 
 ## Tiering
 
@@ -235,8 +266,8 @@ not seen.
 
 ## What these runs found
 
-Things that no test on one machine had shown. The third and the last are not fixed. Where a test now
-holds a fix, it is named.
+Things that no test on one machine had shown. The third is not fixed, and neither is the stall of a
+zone that falls silent. Where a test now holds a fix, it is named.
 
 - **A tool that had just started sometimes could not read the metadata store.** About one or two runs of
   `bita` in a hundred failed with "etcd did not answer the read within 5s", with etcd in good health: the first
@@ -270,18 +301,20 @@ holds a fix, it is named.
   cluster. The streams deleted in those minutes return as records whose segments are gone, and the rebuild
   planned only the streams it found. `bita metadata rebuild` now ends with a list of the records of which
   no data was found (`bita`, `rebuild_test.rs`).
-- **A zone that falls silent stalls its writers for many seconds.** A killed process refuses connections
-  at once. A zone that is cut off answers nothing, and everything that talks to it waits: a request to a
-  replica or to etcd is given up after 5 s, a writer rolls away from a silent replica after 10 s, and
-  neither connection probes whether the other side is still there. Which of these made up the 25.6 s of
-  the soak's first round was not established. Not fixed.
+- **A zone that falls silent stalls its writers for many seconds**, as described under "Where the time
+  goes". A killed process refuses connections at once; a zone that is cut off answers nothing, and the
+  client of the metadata store has no way to notice. Not fixed.
+- **A writer could stop although nobody had taken its stream.** A roll seals the open segment in the
+  stream's record, and the controller then tells the segment's replicas. If the roll was slow from there
+  on, as it is with a silent etcd member, the writer still talked to those replicas, and took their
+  answer, sealed, for another writer's takeover. A sender now waits when it is told so during the writer's
+  own roll (`bitacora-client`, `tests/writer_test.rs`). The Go client was not affected.
 
 ## What was not measured
 
 - Disks like those the design assumes, and therefore whether its targets hold.
 - A reader's delay behind the writer, and the time a writer failover takes.
-- The loss of a machine, and a partition other than of the one zone whose machines enforce network
-  policies.
+- The loss of a machine, and a partition of anything but a whole zone.
 - More than 128 streams or more than five replicas.
 - A run longer than a few minutes. The soak above is the first, and it has not finished.
 - An object store other than one S3 server on one volume, and what happens when it is slow or away.
