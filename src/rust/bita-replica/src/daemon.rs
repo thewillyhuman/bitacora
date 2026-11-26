@@ -15,13 +15,17 @@
 //! - [`open_environment`], [`bind_listeners`]: build both from the settings.
 //! - [`run`]: runs the daemon until it is told to stop or has to.
 //! - [`DaemonError`]: why it could not start or had to stop.
+//! - `StartedDaemon`: everything [`run`] started, with one method per phase: `start`,
+//!   `wait_for_a_reason_to_stop` and `shut_down`.
 //!
 //! # How it works
 //!
-//! [`run`] goes through these steps:
+//! [`run`] goes through these steps. The first five are `StartedDaemon::start`, the sixth is
+//! `StartedDaemon::wait_for_a_reason_to_stop` and the last is `StartedDaemon::shut_down`:
 //!
 //! 1. Start the observability endpoint, so that `/healthz` answers while the rest starts.
-//! 2. Wrap the disk, the metadata store and the object store in the decorators that record metrics.
+//! 2. Wrap the disk, the metadata store and the object store in the decorators that record metrics, and
+//!    refuse an empty data directory under an identity the cluster knows (`identity.rs`).
 //! 3. Open the replica on the disk, which loads every segment copy found there.
 //! 4. Serve the replica over gRPC, through the decorator that records requests.
 //! 5. Start the registration loop and the scrub schedule.
@@ -74,7 +78,7 @@ use bitacora_types::{Clock, ReplicaId, SegmentAddress, SystemClock};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio::time::timeout;
 
 use crate::config::ReplicaDaemonSettings;
@@ -180,6 +184,21 @@ enum StopReason {
     WriteFailure(WriteFailure),
     /// The gRPC server ended by itself, with this description of how.
     ServerStopped(String),
+}
+
+impl StopReason {
+    /// What [`run`] returns for this reason: success if the daemon was asked to stop, and otherwise the
+    /// error that names what made it stop.
+    fn into_result(self) -> Result<(), DaemonError> {
+        match self {
+            Self::Signal(_signal) => Ok(()),
+            Self::WriteFailure(write_failure) => Err(DaemonError::StorageFailed {
+                segment: write_failure.segment,
+                reason: write_failure.reason,
+            }),
+            Self::ServerStopped(reason) => Err(DaemonError::ServerStopped { reason }),
+        }
+    }
 }
 
 /// Opens what the daemon is wired to in production: the data directory on the local file system, the
@@ -299,47 +318,143 @@ pub(crate) async fn run(
     listeners: Listeners,
     shutdown: impl Future<Output = ShutdownSignal> + Send,
 ) -> Result<(), DaemonError> {
-    let metrics_registry = Arc::new(MetricsRegistry::new());
-    let readiness = Readiness::new();
-    let endpoint = start_endpoint(listeners.observability, &metrics_registry, &readiness);
+    let mut daemon = StartedDaemon::start(&settings, environment, listeners).await?;
+    tracing::info!(
+        replica_id = %daemon.replica.replica_id(),
+        advertised_address = %settings.advertised_address,
+        "replica is serving"
+    );
+    let stop_reason = daemon.wait_for_a_reason_to_stop(shutdown).await;
+    tracing::info!(?stop_reason, "replica is shutting down");
+    daemon.shut_down(&stop_reason).await;
+    stop_reason.into_result()
+}
 
-    let metadata = MetadataStore::new(Arc::new(InstrumentedKeyValueStore::new(
-        environment.key_value_store,
-        &metrics_registry,
-    )));
-    // Before anything is written to the directory or answered on the network.
-    if let Err(daemon_error) = refuse_a_known_identity_on_an_empty_directory(
-        environment.disk.as_ref(),
-        &settings.proposed_replica_id,
-        &metadata,
-    )
-    .await
-    {
-        stop_within_the_grace_period(endpoint, "observability endpoint").await;
-        return Err(daemon_error);
-    }
-    let replica = open_replica(
-        &settings,
-        ReplicaParts {
+/// Everything a running daemon consists of: what [`run`] started and has to stop again.
+struct StartedDaemon {
+    /// The replica, opened on its data directory.
+    replica: Arc<Replica>,
+    /// The gRPC server that serves the replica.
+    server: StoppableTask<Result<(), ServeError>>,
+    /// The observability endpoint.
+    endpoint: StoppableTask<std::io::Result<()>>,
+    /// The registration loop and the scrub schedule.
+    background_loops: JoinSet<()>,
+    /// What `/readyz` reports. The registration loop sets it; shutting down clears it.
+    readiness: Readiness,
+}
+
+impl StartedDaemon {
+    /// Starts the daemon: steps 1 to 5 of the file header, in that order.
+    ///
+    /// # Errors
+    ///
+    /// * [`DaemonError::IdentityAlreadyKnown`] or [`DaemonError::CannotStart`] if the identity check
+    ///   refuses the data directory. The observability endpoint is stopped before this returns.
+    /// * [`DaemonError::CannotStart`] if the replica cannot be opened on the disk. The endpoint is then
+    ///   asked to stop but not waited for.
+    async fn start(
+        settings: &ReplicaDaemonSettings,
+        environment: Environment,
+        listeners: Listeners,
+    ) -> Result<Self, DaemonError> {
+        let metrics_registry = Arc::new(MetricsRegistry::new());
+        let readiness = Readiness::new();
+        let endpoint = start_endpoint(listeners.observability, &metrics_registry, &readiness);
+        let key_value_store = InstrumentedKeyValueStore::new(environment.key_value_store, &metrics_registry);
+        let metadata = MetadataStore::new(Arc::new(key_value_store));
+        // Before anything is written to the directory or answered on the network.
+        let disk = environment.disk.as_ref();
+        let checked =
+            refuse_a_known_identity_on_an_empty_directory(disk, &settings.proposed_replica_id, &metadata).await;
+        if let Err(daemon_error) = checked {
+            stop_within_the_grace_period(endpoint, "observability endpoint").await;
+            return Err(daemon_error);
+        }
+        let replica_parts = ReplicaParts {
             disk: environment.disk,
             object_store: environment.object_store,
             connector: environment.connector,
-        },
-        &metrics_registry,
-    )
-    .await?;
-    let mut server = start_server(&replica, listeners.grpc, &metrics_registry);
+        };
+        let replica = open_replica(settings, replica_parts, &metrics_registry).await?;
+        let server = start_server(&replica, listeners.grpc, &metrics_registry);
+        let registration = registration_of(settings, &replica, metadata, environment.clock, &metrics_registry);
+        let background_loops = start_background_loops(registration, &replica, settings, &readiness);
+        Ok(Self {
+            replica,
+            server,
+            endpoint,
+            background_loops,
+            readiness,
+        })
+    }
 
-    let daemon_metrics = ReplicaDaemonMetrics::register(&metrics_registry);
-    let registration = Registration {
+    /// Waits for the first reason to stop: step 6 of the file header.
+    ///
+    /// # Returns
+    ///
+    /// The shutdown signal, the write the disk refused, or how the gRPC server ended by itself.
+    async fn wait_for_a_reason_to_stop(&mut self, shutdown: impl Future<Output = ShutdownSignal> + Send) -> StopReason {
+        tokio::pin!(shutdown);
+        tokio::select! {
+            signal = &mut shutdown => StopReason::Signal(signal),
+            write_failure = self.replica.write_failed() => StopReason::WriteFailure(write_failure),
+            server_outcome = &mut self.server.task => StopReason::ServerStopped(describe_server_end(server_outcome)),
+        }
+    }
+
+    /// Stops everything that was started: step 7 of the file header.
+    ///
+    /// The loops go first, so that nothing marks the daemon ready again or registers a replica that is
+    /// about to stop answering. A gRPC server that ended by itself is not asked to stop again.
+    async fn shut_down(mut self, stop_reason: &StopReason) {
+        self.background_loops.shutdown().await;
+        self.readiness.set_ready(false);
+        if !matches!(stop_reason, StopReason::ServerStopped(_)) {
+            stop_within_the_grace_period(self.server, "gRPC server").await;
+        }
+        self.replica.stop();
+        stop_within_the_grace_period(self.endpoint, "observability endpoint").await;
+    }
+}
+
+/// Says how a gRPC server that was not asked to stop came to an end.
+fn describe_server_end(server_outcome: Result<Result<(), ServeError>, JoinError>) -> String {
+    match server_outcome {
+        Ok(Ok(())) => "it returned without being asked to".to_owned(),
+        Ok(Err(serve_error)) => serve_error.to_string(),
+        Err(join_error) => join_error.to_string(),
+    }
+}
+
+/// Builds what the registration loop works with, and registers the daemon's own metrics.
+fn registration_of(
+    settings: &ReplicaDaemonSettings,
+    replica: &Arc<Replica>,
+    metadata: MetadataStore,
+    clock: Arc<dyn Clock>,
+    metrics_registry: &MetricsRegistry,
+) -> Registration {
+    Registration {
         metadata,
-        replica: Arc::clone(&replica) as Arc<dyn ReplicaApi>,
-        clock: environment.clock,
+        replica: Arc::clone(replica) as Arc<dyn ReplicaApi>,
+        clock,
         advertised_address: settings.advertised_address.clone(),
         failure_domains: settings.failure_domains.clone(),
-        metrics: daemon_metrics.clone(),
-    };
+        metrics: ReplicaDaemonMetrics::register(metrics_registry),
+    }
+}
+
+/// Starts the two loops that run next to the server: the registration, which also makes the daemon
+/// ready, and the scrub schedule. They share the daemon's metrics.
+fn start_background_loops(
+    registration: Registration,
+    replica: &Arc<Replica>,
+    settings: &ReplicaDaemonSettings,
+    readiness: &Readiness,
+) -> JoinSet<()> {
     let mut background_loops = JoinSet::new();
+    let scrub_metrics = registration.metrics.clone();
     let readiness_of_the_registration = readiness.clone();
     let registration_interval = settings.registration_interval;
     background_loops.spawn(async move {
@@ -348,46 +463,11 @@ pub(crate) async fn run(
             .await;
     });
     background_loops.spawn(run_scrub_schedule(
-        Arc::clone(&replica),
+        Arc::clone(replica),
         settings.scrub_interval,
-        daemon_metrics,
+        scrub_metrics,
     ));
-    tracing::info!(
-        replica_id = %replica.replica_id(),
-        advertised_address = %settings.advertised_address,
-        "replica is serving"
-    );
-
-    tokio::pin!(shutdown);
-    let stop_reason = tokio::select! {
-        signal = &mut shutdown => StopReason::Signal(signal),
-        write_failure = replica.write_failed() => StopReason::WriteFailure(write_failure),
-        server_outcome = &mut server.task => StopReason::ServerStopped(match server_outcome {
-            Ok(Ok(())) => "it returned without being asked to".to_owned(),
-            Ok(Err(serve_error)) => serve_error.to_string(),
-            Err(join_error) => join_error.to_string(),
-        }),
-    };
-    tracing::info!(?stop_reason, "replica is shutting down");
-
-    // The loops go first, so that nothing marks the daemon ready again or registers a replica that is
-    // about to stop answering.
-    background_loops.shutdown().await;
-    readiness.set_ready(false);
-    if !matches!(stop_reason, StopReason::ServerStopped(_)) {
-        stop_within_the_grace_period(server, "gRPC server").await;
-    }
-    replica.stop();
-    stop_within_the_grace_period(endpoint, "observability endpoint").await;
-
-    match stop_reason {
-        StopReason::Signal(_signal) => Ok(()),
-        StopReason::WriteFailure(write_failure) => Err(DaemonError::StorageFailed {
-            segment: write_failure.segment,
-            reason: write_failure.reason,
-        }),
-        StopReason::ServerStopped(reason) => Err(DaemonError::ServerStopped { reason }),
-    }
+    background_loops
 }
 
 /// Starts the observability endpoint, so that `/healthz` answers while the rest of the daemon starts.

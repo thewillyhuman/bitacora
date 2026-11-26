@@ -17,6 +17,7 @@
 //! # What it contains
 //!
 //! - [`refuse_a_known_identity_on_an_empty_directory`]: the check, run once before the replica is opened.
+//! - Its steps: `has_an_identity` (rule 1 below), `how_the_cluster_knows` and `how_a_stream_names` (rule 2).
 //!
 //! # How it works
 //!
@@ -41,7 +42,7 @@
 //! - `docs/protocol/disk-format.md`: the identity file of a data directory.
 //! - `bitacora-replica`: `Replica::open`, which stores the proposed identity on an empty directory.
 
-use bitacora_meta::{MetadataStore, StreamRecord};
+use bitacora_meta::{MetaError, MetadataStore, StreamRecord};
 use bitacora_segment::Disk;
 use bitacora_types::ReplicaId;
 
@@ -74,45 +75,60 @@ pub(crate) async fn refuse_a_known_identity_on_an_empty_directory(
     proposed_replica_id: &ReplicaId,
     metadata: &MetadataStore,
 ) -> Result<(), DaemonError> {
-    let stored_identity = match disk.read_file(IDENTITY_FILE_PATH).await {
-        Ok(stored_identity) => stored_identity,
-        Err(io_error) => {
-            return Err(DaemonError::cannot_start(
-                "read the identity of the data directory",
-                &io_error,
-            ));
-        }
-    };
-    if stored_identity.is_some() {
+    if has_an_identity(disk).await? {
         return Ok(());
     }
+    let known_from = match how_the_cluster_knows(metadata, proposed_replica_id).await {
+        Ok(known_from) => known_from,
+        Err(meta_error) => {
+            let check = format!("check that the identity {proposed_replica_id} is new to the cluster");
+            return Err(DaemonError::cannot_start(check, &meta_error));
+        }
+    };
+    match known_from {
+        Some(known_from) => Err(DaemonError::IdentityAlreadyKnown {
+            replica_id: proposed_replica_id.clone(),
+            known_from,
+        }),
+        None => Ok(()),
+    }
+}
 
-    let check = format!("check that the identity {proposed_replica_id} is new to the cluster");
-    let registered_replicas = match metadata.list_replicas().await {
-        Ok(registered_replicas) => registered_replicas,
-        Err(meta_error) => return Err(DaemonError::cannot_start(check, &meta_error)),
-    };
-    for registered_replica in &registered_replicas {
-        if &registered_replica.replica_id == proposed_replica_id {
-            return Err(DaemonError::IdentityAlreadyKnown {
-                replica_id: proposed_replica_id.clone(),
-                known_from: format!("it is registered at {}", registered_replica.address),
-            });
+/// Whether the data directory on `disk` already has its identity file, which means it is not empty.
+///
+/// # Errors
+///
+/// Returns [`DaemonError::CannotStart`] if the file cannot be read.
+async fn has_an_identity(disk: &dyn Disk) -> Result<bool, DaemonError> {
+    match disk.read_file(IDENTITY_FILE_PATH).await {
+        Ok(stored_identity) => Ok(stored_identity.is_some()),
+        Err(io_error) => Err(DaemonError::cannot_start(
+            "read the identity of the data directory",
+            &io_error,
+        )),
+    }
+}
+
+/// Says how the cluster knows `replica_id`, if it does.
+///
+/// The registry of replicas is asked first. The streams are only asked if the registry does not name the
+/// identity: a stream can name a replica that is no longer registered.
+///
+/// # Errors
+///
+/// Returns the metadata store's error if the registry or the streams cannot be read.
+async fn how_the_cluster_knows(metadata: &MetadataStore, replica_id: &ReplicaId) -> Result<Option<String>, MetaError> {
+    for registered_replica in &metadata.list_replicas().await? {
+        if &registered_replica.replica_id == replica_id {
+            return Ok(Some(format!("it is registered at {}", registered_replica.address)));
         }
     }
-    let streams = match metadata.list_streams().await {
-        Ok(streams) => streams,
-        Err(meta_error) => return Err(DaemonError::cannot_start(check, &meta_error)),
-    };
-    for stream in &streams {
-        if let Some(known_from) = how_a_stream_names(stream, proposed_replica_id) {
-            return Err(DaemonError::IdentityAlreadyKnown {
-                replica_id: proposed_replica_id.clone(),
-                known_from,
-            });
+    for stream in &metadata.list_streams().await? {
+        if let Some(known_from) = how_a_stream_names(stream, replica_id) {
+            return Ok(Some(known_from));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Says how `stream` names `replica_id`, if it does: as the holder of a copy of one of its segments, or

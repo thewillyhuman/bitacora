@@ -37,7 +37,7 @@
 //! - `daemon.rs`: what the settings are used for.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bitacora::ClusterConfig;
@@ -214,24 +214,11 @@ impl ReplicaConfigFile {
     /// * a preallocation below one page, a threshold above 100 percent, or an append threshold below
     ///   the threshold for new segments.
     pub(crate) fn validate(self) -> Result<ReplicaDaemonSettings, InvalidConfig> {
-        let proposed_replica_id = match ReplicaId::new(self.replica_id) {
-            Ok(replica_id) => replica_id,
-            Err(invalid) => return Err(InvalidConfig::because("replica_id", invalid.to_string())),
-        };
-        if self.data_directory.as_os_str().is_empty() {
-            return Err(InvalidConfig::because(
-                "data_directory",
-                "it is empty; name the directory that holds the segment files",
-            ));
-        }
+        let proposed_replica_id = parse_replica_id(self.replica_id)?;
+        check_data_directory(&self.data_directory)?;
         let listen_address = parse_listen_address("listen_address", &self.listen_address)?;
         let metrics_listen_address = parse_listen_address("metrics_listen_address", &self.metrics_listen_address)?;
-        if listen_address == metrics_listen_address {
-            return Err(InvalidConfig::because(
-                "metrics_listen_address",
-                "it is the same as listen_address; gRPC and metrics need a port each",
-            ));
-        }
+        check_listen_addresses_differ(listen_address, metrics_listen_address)?;
         check_advertised_address(&self.advertised_address)?;
         for failure_domain in &self.failure_domains {
             check_failure_domain(failure_domain)?;
@@ -258,33 +245,12 @@ impl ReplicaConfigFile {
 impl StorageConfig {
     /// Checks the `[storage]` table and lays it over the replica's default settings.
     fn validate(self) -> Result<ReplicaSettings, InvalidConfig> {
-        if self.preallocated_segment_bytes < SMALLEST_PREALLOCATION_BYTES {
-            return Err(InvalidConfig::because(
-                "storage.preallocated_segment_bytes",
-                format!(
-                    "{} is less than {SMALLEST_PREALLOCATION_BYTES}, the smallest that is accepted",
-                    self.preallocated_segment_bytes
-                ),
-            ));
-        }
-        check_percent(
-            "storage.refuse_new_segments_at_used_percent",
-            self.refuse_new_segments_at_used_percent,
-        )?;
-        check_percent(
-            "storage.refuse_appends_at_used_percent",
-            self.refuse_appends_at_used_percent,
-        )?;
-        if self.refuse_appends_at_used_percent < self.refuse_new_segments_at_used_percent {
-            return Err(InvalidConfig::because(
-                "storage.refuse_appends_at_used_percent",
-                format!(
-                    "{} is below refuse_new_segments_at_used_percent ({}); a replica must stop taking \
-                     new segments before it stops taking appends",
-                    self.refuse_appends_at_used_percent, self.refuse_new_segments_at_used_percent
-                ),
-            ));
-        }
+        let new_segments_percent = self.refuse_new_segments_at_used_percent;
+        let appends_percent = self.refuse_appends_at_used_percent;
+        check_preallocation(self.preallocated_segment_bytes)?;
+        check_percent("storage.refuse_new_segments_at_used_percent", new_segments_percent)?;
+        check_percent("storage.refuse_appends_at_used_percent", appends_percent)?;
+        check_thresholds_are_in_order(new_segments_percent, appends_percent)?;
         Ok(ReplicaSettings {
             preallocated_segment_bytes: self.preallocated_segment_bytes,
             refuse_new_segments_at_used_percent: self.refuse_new_segments_at_used_percent,
@@ -293,6 +259,69 @@ impl StorageConfig {
             ..ReplicaSettings::default()
         })
     }
+}
+
+/// Parses the identity the configuration proposes for an empty data directory.
+fn parse_replica_id(replica_id: String) -> Result<ReplicaId, InvalidConfig> {
+    match ReplicaId::new(replica_id) {
+        Ok(replica_id) => Ok(replica_id),
+        Err(invalid) => Err(InvalidConfig::because("replica_id", invalid.to_string())),
+    }
+}
+
+/// Checks that a data directory is named. Whether it exists and can be written is found out when the
+/// daemon opens it.
+fn check_data_directory(data_directory: &Path) -> Result<(), InvalidConfig> {
+    if data_directory.as_os_str().is_empty() {
+        return Err(InvalidConfig::because(
+            "data_directory",
+            "it is empty; name the directory that holds the segment files",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that gRPC and metrics are not served on the same address: each needs a port of its own.
+fn check_listen_addresses_differ(
+    listen_address: SocketAddr,
+    metrics_listen_address: SocketAddr,
+) -> Result<(), InvalidConfig> {
+    if listen_address == metrics_listen_address {
+        return Err(InvalidConfig::because(
+            "metrics_listen_address",
+            "it is the same as listen_address; gRPC and metrics need a port each",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that segment files are preallocated at least one page at a time.
+fn check_preallocation(preallocated_segment_bytes: u64) -> Result<(), InvalidConfig> {
+    if preallocated_segment_bytes < SMALLEST_PREALLOCATION_BYTES {
+        return Err(InvalidConfig::because(
+            "storage.preallocated_segment_bytes",
+            format!(
+                "{preallocated_segment_bytes} is less than {SMALLEST_PREALLOCATION_BYTES}, the smallest that is \
+                 accepted"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that the replica stops taking new segments no later than it stops taking appends, so that a
+/// disk that fills up first stops growing in segments and only then refuses the writers it has.
+fn check_thresholds_are_in_order(new_segments_percent: u8, appends_percent: u8) -> Result<(), InvalidConfig> {
+    if appends_percent < new_segments_percent {
+        return Err(InvalidConfig::because(
+            "storage.refuse_appends_at_used_percent",
+            format!(
+                "{appends_percent} is below refuse_new_segments_at_used_percent ({new_segments_percent}); a replica \
+                 must stop taking new segments before it stops taking appends"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Parses an address to listen on, which must be an IP address and a port.
