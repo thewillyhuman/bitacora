@@ -31,6 +31,8 @@
 //!
 //! # See also
 //!
+//! - `docs/protocol/checkpoint-manifest.md`: the same layout, for readers in other languages. Change
+//!   both together.
 //! - `contract.rs`: [`CheckpointManifest`], the value being stored.
 //! - `runner.rs`: where manifests are written and read.
 

@@ -187,11 +187,9 @@ The store's materializer is registered on the stream under the name
    record of `bitacora-metrics` ([metadata.md](metadata.md)). Its
    `checkpoint` is the last record the blocks cover; its `manifest` is a
    key.
-2. Read the object `materializers/<stream id>/bitacora-metrics/<manifest>`
-   ([object-store.md](object-store.md)). It is a checkpoint manifest; its
-   details are an artifact catalog. Both layouts are defined in the file
-   headers of `manifest.rs` and `artifact_catalog.rs` in
-   `src/rust/bitacora-materializer`.
+2. Read the object `materializers/<stream id>/bitacora-metrics/<manifest>`.
+   It is a checkpoint manifest; its details are an artifact catalog
+   ([checkpoint-manifest.md](checkpoint-manifest.md)).
 3. Each catalog entry gives the range of records a block covers, the block's
    key under the same prefix, and its size.
 

@@ -58,6 +58,8 @@
 //!
 //! # See also
 //!
+//! - `docs/protocol/checkpoint-manifest.md`: the layout of the stored catalog, for readers in other
+//!   languages. Change it together with `encode_catalog`.
 //! - `contract.rs`: the contract this adapter implements.
 //! - `page_store.rs`: the other adapter, for workloads that update pages.
 
