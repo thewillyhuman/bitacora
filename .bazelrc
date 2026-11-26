@@ -20,6 +20,12 @@ common --repository_cache=~/.cache/bitacora/bazel-repository
 # One configuration file per tool, shared with cargo.
 build --@rules_rust//rust/settings:clippy.toml=//src/rust:clippy.toml
 build --@rules_rust//rust/settings:rustfmt.toml=//src/rust:rustfmt.toml
+# Clippy treats every warning as an error. The flag is read only where
+# clippy runs, which is under `--config=lint`. It is set for every build
+# because Bazel analyses everything again when a setting changes, and a
+# setting that only `lint` had made that happen on every switch between a
+# linted and a plain build.
+build --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
 # Go without cgo: the Go client has no C code, and pure Go needs no C
 # toolchain and links faster.
@@ -31,12 +37,11 @@ test --test_output=errors
 build:macos --macos_minimum_os=12.0
 build:macos --host_macos_minimum_os=12.0
 
-# `--config=lint` adds clippy and rustfmt to whatever is being built, and
-# turns every warning into an error. Continuous integration always uses it.
+# `--config=lint` adds clippy and rustfmt to whatever is being built, and a
+# finding of either fails the build. Continuous integration always uses it.
 build:lint --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:lint --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
 build:lint --output_groups=+clippy_checks,+rustfmt_checks
-build:lint --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
 # `--config=ci` is what continuous integration runs: everything `lint` does,
 # with output suited to a log file.
