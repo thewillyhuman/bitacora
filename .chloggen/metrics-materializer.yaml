@@ -1,0 +1,4 @@
+change_type: new_component
+component: metrics
+note: "Add bitacora-metrics, the second materializer: a time-series store that appends batches of samples to a stream, serves recent samples from memory and older ones from immutable compressed blocks in the object store, and answers queries by label matchers over a time range."
+issues: [6]

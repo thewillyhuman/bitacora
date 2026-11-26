@@ -15,6 +15,7 @@ a page disagree, that is a bug in one of them.
 | [object-store.md](object-store.md) | Which keys the object store holds and who owns them |
 | [metadata.md](metadata.md) | The keys and records of the metadata store |
 | [wire.md](wire.md) | The gRPC services a replica offers |
+| [metrics.md](metrics.md) | The records and blocks of the metrics store, a materializer |
 
 ## Conventions
 
@@ -41,5 +42,7 @@ Every format carries its own version, so that each can change alone:
 | Tiered object | Footer | 1 |
 | Metadata records | `schema_version` field | 1 |
 | Wire protocol | Protobuf package (`bitacora.v1`) | 1 |
+| Metrics record | First byte | 1 |
+| Metrics block | Footer | 1 |
 
 A program refuses a version newer than the ones it knows. It never guesses.

@@ -406,6 +406,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-metrics"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bitacora-artifact",
+ "bitacora-client",
+ "bitacora-controller",
+ "bitacora-materializer",
+ "bitacora-meta",
+ "bitacora-testkit",
+ "bitacora-types",
+ "bytes",
+ "crc32c",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bitacora-model"
 version = "0.0.0"
 

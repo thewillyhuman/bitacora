@@ -49,6 +49,7 @@ crate.from_cargo(
         "//src/rust/bitacora-materializer:Cargo.toml",
         "//src/rust/bitacora-meta:Cargo.toml",
         "//src/rust/bitacora-meta-etcd:Cargo.toml",
+        "//src/rust/bitacora-metrics:Cargo.toml",
         "//src/rust/bitacora-model:Cargo.toml",
         "//src/rust/bitacora-process:Cargo.toml",
         "//src/rust/bitacora-proto:Cargo.toml",
