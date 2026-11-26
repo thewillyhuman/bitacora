@@ -1,0 +1,15 @@
+# Settings of hadolint for the Dockerfile of this directory. hadolint_test.sh
+# makes every finding a failure, whatever its severity.
+
+# Images may only come from these registries.
+trustedRegistries:
+  - docker.io
+  - gcr.io
+
+ignored:
+  # DL3008 wants a version on every package that apt-get installs. Debian
+  # removes a version from its archive when it publishes the next one, so a
+  # pinned version breaks the build a few weeks later without making it
+  # more reproducible. The packages only build the programs; none of them
+  # is in an image that runs.
+  - DL3008

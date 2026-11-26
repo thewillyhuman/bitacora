@@ -49,3 +49,18 @@ alias(
     ),
     visibility = ["//visibility:public"],
 )
+
+# hadolint, which lints the Dockerfile. On macOS it is the x86-64 release,
+# which runs through Rosetta.
+alias(
+    name = "hadolint",
+    actual = select(
+        {
+            ":linux_arm64": "@hadolint_linux_arm64//file",
+            ":linux_x86_64": "@hadolint_linux_x86_64//file",
+            ":macos_arm64": "@hadolint_macos_x86_64//file",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)

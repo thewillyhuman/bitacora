@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "Add container images for bita-replica, bita-controller and bita: one Dockerfile that builds them with Bazel into distroless images running as a numbered non-root user, and hack/build_images.sh, which builds and tags them by version."
+issues: [5]

@@ -1,0 +1,14 @@
+# What the image build must not read from the repository. A file with this
+# name next to a Dockerfile applies to builds of that Dockerfile.
+
+# History and tooling: the build reads neither.
+.git
+.github
+.claude
+
+# What a developer's machine built or set: the image is built from sources
+# alone, with the settings every build shares.
+bazel-*
+src/rust/target
+user.bazelrc
+**/.DS_Store

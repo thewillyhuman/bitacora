@@ -22,6 +22,7 @@ implementing it are recorded in [docs/decisions](docs/decisions).
 | Path | Contents |
 | --- | --- |
 | `docs/` | The design, the wire and disk formats, decision records, guides |
+| `src/docker/` | The container images of the daemons and of the `bita` tool |
 | `src/proto/` | The wire protocol, as language-neutral Protocol Buffers definitions |
 | `src/rust/` | The Cargo workspace: one crate per component |
 | `src/c/` | The C client: its header, an example and the C tests; see [docs/clients/c.md](docs/clients/c.md) |

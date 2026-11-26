@@ -3,6 +3,17 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//hack/tools:defs.bzl", "shellcheck_test")
 
+# Read by the test of the Dockerfile, which must define the images this builds.
+exports_files(["build_images.sh"])
+
+sh_test(
+    name = "build_images_test",
+    size = "small",
+    srcs = ["tests/build_images_test.sh"],
+    args = ["$(rootpath build_images.sh)"],
+    data = ["build_images.sh"],
+)
+
 sh_test(
     name = "create_release_test",
     size = "small",
@@ -24,10 +35,12 @@ sh_test(
 shellcheck_test(
     name = "shellcheck_test",
     srcs = [
+        "build_images.sh",
         "check.sh",
         "chloggen.sh",
         "commit.sh",
         "create_release.sh",
+        "tests/build_images_test.sh",
         "tests/create_release_test.sh",
         "tests/rejection_test_test.sh",
         "//hack/tools:rejection_test.sh",

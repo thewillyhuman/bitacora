@@ -1,0 +1,96 @@
+"""The container images, and the tests that check their Dockerfile without building it."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
+
+# What dockerfile_test.sh checks the Dockerfile against.
+_CHECKED_AGAINST = {
+    "BAZELRC": "//:.bazelrc",
+    "BITA_BINARY": "//src/rust/bita",
+    "BITA_CONTROLLER_BINARY": "//src/rust/bita-controller",
+    "BITA_REPLICA_BINARY": "//src/rust/bita-replica",
+    "BUILD_IMAGES": "//hack:build_images.sh",
+    "CONTROLLER_CONFIG": "//src/rust/bita-controller:example.toml",
+    "DOCKERIGNORE": "Dockerfile.dockerignore",
+    "REPLICA_CONFIG": "//src/rust/bita-replica:example.toml",
+}
+
+# The Dockerfile checked against the programs, the example configurations
+# and the script that builds the images.
+sh_test(
+    name = "dockerfile_test",
+    size = "small",
+    srcs = ["dockerfile_test.sh"],
+    data = ["Dockerfile"] + _CHECKED_AGAINST.values(),
+    env = {
+        variable: "$(rootpath {})".format(label)
+        for variable, label in _CHECKED_AGAINST.items()
+    } | {"DOCKERFILE": "$(rootpath Dockerfile)"},
+)
+
+# The Dockerfile with one mistake of each kind the checker looks for.
+genrule(
+    name = "broken_dockerfile",
+    srcs = ["Dockerfile"],
+    outs = ["broken/Dockerfile"],
+    cmd = """sed \\
+        -e 's/^USER 65532:65532$$/USER root/' \\
+        -e 's/^EXPOSE 7000 9100$$/EXPOSE 7000/' \\
+        -e 's|^CMD \\["--config", "/etc/bitacora/controller.toml"\\]$$|CMD ["--settings", "/etc/bitacora/controller.toml"]|' \\
+        -e 's|^ENTRYPOINT \\["/usr/bin/bita"\\]$$|ENTRYPOINT ["/usr/local/bin/bita"]|' \\
+        -e 's/--config=release/--config=opt/' \\
+        -e 's|^VOLUME /var/lib/bitacora$$|VOLUME /data|' \\
+        -e 's|bazel-bin/src/rust/bita/bita |bazel-bin/src/rust/bita/bitacli |' \\
+        -e 's/^\\(ARG BAZELISK_SHA256_ARM64=\\).*$$/\\1unchecked/' \\
+        $< >$@ && echo 'FROM runtime AS bita-extra' >>$@""",
+)
+
+# The checker must fail on the broken Dockerfile and name every mistake in it.
+rejection_test(
+    name = "dockerfile_rejection_test",
+    args = [],
+    checker = "dockerfile_test.sh",
+    data = [":broken_dockerfile"] + _CHECKED_AGAINST.values(),
+    env = {
+        variable: "$(rootpath {})".format(label)
+        for variable, label in _CHECKED_AGAINST.items()
+    } | {"DOCKERFILE": "$(rootpath :broken_dockerfile)"},
+    findings = [
+        "the programs are not built with --config=release",
+        "does not pin a checksum of Bazelisk for each of the two architectures",
+        "bita-replica runs as root",
+        "bita-controller runs as root",
+        "bita runs as root",
+        "the build stage does not copy bazel-bin/src/rust/bita/bita out of Bazel's output",
+        "bita does not start /usr/bin/bita",
+        "bita-controller is started with --settings, which it does not have",
+        "bita-replica exposes '7000', but its example configuration listens on 7000 9100",
+        "the example data directory /var/lib/bitacora/replica is outside the volume /data",
+        "but the Dockerfile defines 'bita-replica bita-controller bita bita-extra'",
+    ],
+)
+
+# The Dockerfile linted with the pinned hadolint.
+sh_test(
+    name = "hadolint_test",
+    size = "small",
+    srcs = ["hadolint_test.sh"],
+    args = [
+        "$(rootpath //hack/tools:hadolint)",
+        "$(rootpath hadolint.yaml)",
+        "$(rootpath Dockerfile)",
+    ],
+    data = [
+        "Dockerfile",
+        "hadolint.yaml",
+        "//hack/tools:hadolint",
+    ],
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = [
+        "dockerfile_test.sh",
+        "hadolint_test.sh",
+    ],
+)

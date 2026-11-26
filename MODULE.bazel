@@ -209,3 +209,32 @@ http_archive(
     strip_prefix = "shellcheck-v0.11.0",
     urls = ["https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.aarch64.tar.xz"],
 )
+
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+# hadolint, which lints the Dockerfile. The checksums are those of the
+# checksums.sha256 file of the release. The release for macOS on arm64 is
+# 103 MB, so the 23 MB one for x86-64 is used there and runs through Rosetta.
+http_file(
+    name = "hadolint_macos_x86_64",
+    downloaded_file_path = "hadolint",
+    executable = True,
+    sha256 = "ffe9bb18b23d5ed1eae50237aecdbb523d016e96da0bd4e7aa432040acfc3fde",
+    urls = ["https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-macos-x86_64"],
+)
+
+http_file(
+    name = "hadolint_linux_x86_64",
+    downloaded_file_path = "hadolint",
+    executable = True,
+    sha256 = "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507",
+    urls = ["https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64"],
+)
+
+http_file(
+    name = "hadolint_linux_arm64",
+    downloaded_file_path = "hadolint",
+    executable = True,
+    sha256 = "f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d",
+    urls = ["https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-arm64"],
+)

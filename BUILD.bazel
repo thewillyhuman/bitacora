@@ -1,1 +1,4 @@
 """Repository root. Source lives under //src, one directory per language."""
+
+# Read by the tests that check deployment files against the build settings.
+exports_files([".bazelrc"])
