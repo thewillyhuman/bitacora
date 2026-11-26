@@ -17,6 +17,7 @@
 //! - [`DaemonError`]: why it could not start or had to stop.
 //! - `StartedDaemon`: everything [`run`] started, with one method per phase: `start`,
 //!   `wait_for_a_reason_to_stop` and `shut_down`.
+//! - `open_checked_replica`: steps 2 and 3 below, the two that can refuse to start the daemon.
 //!
 //! # How it works
 //!
@@ -51,7 +52,10 @@
 //!
 //! - The gRPC server answers under the identity of the data directory, which is also the registered
 //!   one.
-//! - After [`run`] returns, nothing of the daemon is still running: no task, no open socket.
+//! - After [`run`] returns, nothing of the daemon is still running: no task, no open socket. That holds
+//!   for a daemon that could not start too: the observability endpoint, which is started before
+//!   anything that can fail, has stopped before the error is returned. A supervisor starts the daemon
+//!   again at once, on the same ports.
 //! - The server is given a bounded time to finish requests in flight; shutdown never hangs on a client.
 //!
 //! # See also
@@ -350,9 +354,11 @@ impl StartedDaemon {
     /// # Errors
     ///
     /// * [`DaemonError::IdentityAlreadyKnown`] or [`DaemonError::CannotStart`] if the identity check
-    ///   refuses the data directory. The observability endpoint is stopped before this returns.
-    /// * [`DaemonError::CannotStart`] if the replica cannot be opened on the disk. The endpoint is then
-    ///   asked to stop but not waited for.
+    ///   refuses the data directory.
+    /// * [`DaemonError::CannotStart`] if the replica cannot be opened on the disk.
+    ///
+    /// In both cases the observability endpoint, the one thing that was started by then, has stopped
+    /// before this returns.
     async fn start(
         settings: &ReplicaDaemonSettings,
         environment: Environment,
@@ -363,20 +369,19 @@ impl StartedDaemon {
         let endpoint = start_endpoint(listeners.observability, &metrics_registry, &readiness);
         let key_value_store = InstrumentedKeyValueStore::new(environment.key_value_store, &metrics_registry);
         let metadata = MetadataStore::new(Arc::new(key_value_store));
-        // Before anything is written to the directory or answered on the network.
-        let disk = environment.disk.as_ref();
-        let checked =
-            refuse_a_known_identity_on_an_empty_directory(disk, &settings.proposed_replica_id, &metadata).await;
-        if let Err(daemon_error) = checked {
-            stop_within_the_grace_period(endpoint, "observability endpoint").await;
-            return Err(daemon_error);
-        }
         let replica_parts = ReplicaParts {
             disk: environment.disk,
             object_store: environment.object_store,
             connector: environment.connector,
         };
-        let replica = open_replica(settings, replica_parts, &metrics_registry).await?;
+        let opened = open_checked_replica(settings, &metadata, replica_parts, &metrics_registry).await;
+        let replica = match opened {
+            Ok(replica) => replica,
+            Err(daemon_error) => {
+                stop_within_the_grace_period(endpoint, "observability endpoint").await;
+                return Err(daemon_error);
+            }
+        };
         let server = start_server(&replica, listeners.grpc, &metrics_registry);
         let registration = registration_of(settings, &replica, metadata, environment.clock, &metrics_registry);
         let background_loops = start_background_loops(registration, &replica, settings, &readiness);
@@ -494,6 +499,27 @@ struct ReplicaParts {
     object_store: Option<Arc<dyn ArtifactStore>>,
     /// How the replica reaches its peers when it repairs a copy.
     connector: Arc<dyn ReplicaConnector>,
+}
+
+/// Refuses an empty data directory under an identity the cluster knows, and then opens the replica:
+/// steps 2 and 3 of the file header. They are one function because they are the two steps that can
+/// refuse to start the daemon, and whoever calls them has one thing to undo when either does.
+///
+/// The check comes before anything is written to the directory or answered on the network.
+///
+/// # Errors
+///
+/// * [`DaemonError::IdentityAlreadyKnown`] or [`DaemonError::CannotStart`] if the identity check refuses
+///   the data directory (`identity.rs`).
+/// * [`DaemonError::CannotStart`] if the replica cannot be opened on the disk.
+async fn open_checked_replica(
+    settings: &ReplicaDaemonSettings,
+    metadata: &MetadataStore,
+    parts: ReplicaParts,
+    metrics_registry: &MetricsRegistry,
+) -> Result<Arc<Replica>, DaemonError> {
+    refuse_a_known_identity_on_an_empty_directory(parts.disk.as_ref(), &settings.proposed_replica_id, metadata).await?;
+    open_replica(settings, parts, metrics_registry).await
 }
 
 /// Opens the replica on its instrumented disk and gives it its instrumented object store.

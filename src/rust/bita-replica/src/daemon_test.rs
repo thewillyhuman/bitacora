@@ -7,6 +7,8 @@
 //! - The metadata store being away: the daemon serves, is not ready, and registers when it returns.
 //! - Stopping: a shutdown signal ends it cleanly and leaves its registration; a refused flush ends it
 //!   with an error.
+//! - Not starting: a data directory whose identity cannot be read ends the daemon with an error, and
+//!   its observability port is free the moment `run` has returned.
 //! - The pieces around the replica: the data directory's identity, the drain state, the object store.
 //!
 //! # How the fixtures work
@@ -16,6 +18,10 @@
 //! tests reach it the way its users do: over gRPC with the real connector and over HTTP. Time is real,
 //! because sockets are; the registration interval is 50 milliseconds so that nothing waits long, and
 //! every wait is bounded by `GENEROUS_WAIT`.
+//!
+//! `DaemonInputs` is what `run` is called with. `RunningDaemon` passes it to `run` in a task of its own.
+//! The tests of a daemon that cannot start call `run` themselves instead, so that nothing else gets to
+//! run between the moment `run` returns and the moment the test looks at what it left behind.
 //!
 //! What only a real process shows (exit codes, signals, a real disk, etcd) is covered by the test of a
 //! cluster of real processes.
@@ -73,25 +79,34 @@ impl Stores {
         open_replica(&stores.disk, "replica-a").await.stop();
         stores
     }
+
+    /// Working stores whose data directory was used before, and whose identity file has since lost a
+    /// bit and is no longer text. No replica can be opened on such a directory.
+    async fn with_a_damaged_identity() -> Self {
+        let stores = Self::with_a_used_data_directory().await;
+        stores.disk.corrupt_byte("replica.id", 0, 0b1000_0000);
+        stores
+    }
 }
 
-/// A daemon that runs inside the test, with what a test needs to use and stop it.
-struct RunningDaemon {
-    /// What the daemon was started on.
-    stores: Stores,
-    /// The replica, reached over gRPC as a client reaches it.
-    remote: Arc<dyn ReplicaApi>,
-    /// Where the observability endpoint listens, as `host:port`.
-    observability_address: String,
-    /// Sends the shutdown signal.
-    shutdown_sender: oneshot::Sender<ShutdownSignal>,
-    /// The task that runs the daemon, and what `run` returns.
-    running: JoinHandle<Result<(), DaemonError>>,
+/// What `run` is called with for a daemon that proposes the identity `replica-a`, and where that daemon
+/// will listen.
+struct DaemonInputs {
+    /// The daemon's settings.
+    settings: ReplicaDaemonSettings,
+    /// The in-memory stand-ins the daemon is wired to.
+    environment: Environment,
+    /// The daemon's two sockets, bound to loopback ports the operating system chose.
+    listeners: Listeners,
+    /// Where the gRPC server will listen.
+    grpc_address: std::net::SocketAddr,
+    /// Where the observability endpoint will listen.
+    observability_address: std::net::SocketAddr,
 }
 
-impl RunningDaemon {
-    /// Starts a daemon that proposes the identity `replica-a` on `stores`.
-    async fn start(stores: Stores) -> Self {
+impl DaemonInputs {
+    /// Builds what a daemon on `stores` is run with.
+    async fn on(stores: &Stores) -> Self {
         let grpc = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port can be bound");
@@ -124,6 +139,36 @@ impl RunningDaemon {
             connector: bitacora::replica_connector(),
             clock: Arc::new(SystemClock),
         };
+        Self {
+            settings,
+            environment,
+            listeners: Listeners { grpc, observability },
+            grpc_address,
+            observability_address,
+        }
+    }
+}
+
+/// A daemon that runs inside the test, with what a test needs to use and stop it.
+struct RunningDaemon {
+    /// What the daemon was started on.
+    stores: Stores,
+    /// The replica, reached over gRPC as a client reaches it.
+    remote: Arc<dyn ReplicaApi>,
+    /// Where the observability endpoint listens, as `host:port`.
+    observability_address: String,
+    /// Sends the shutdown signal.
+    shutdown_sender: oneshot::Sender<ShutdownSignal>,
+    /// The task that runs the daemon, and what `run` returns.
+    running: JoinHandle<Result<(), DaemonError>>,
+}
+
+impl RunningDaemon {
+    /// Starts a daemon that proposes the identity `replica-a` on `stores`.
+    async fn start(stores: Stores) -> Self {
+        let inputs = DaemonInputs::on(&stores).await;
+        let grpc_address = inputs.grpc_address;
+        let observability_address = inputs.observability_address;
         let (shutdown_sender, shutdown_receiver) = oneshot::channel::<ShutdownSignal>();
         let shutdown = async move {
             match shutdown_receiver.await {
@@ -132,7 +177,7 @@ impl RunningDaemon {
                 Err(_sender_dropped) => ShutdownSignal::Terminate,
             }
         };
-        let running = tokio::spawn(run(settings, environment, Listeners { grpc, observability }, shutdown));
+        let running = tokio::spawn(run(inputs.settings, inputs.environment, inputs.listeners, shutdown));
         // The identity of the data directory wins over the proposed one, so ask the disk.
         let remote = GrpcReplicaConnector::new(GrpcConnectorSettings::default())
             .connect(&identity_on(&stores.disk).await, &grpc_address.to_string());
@@ -505,6 +550,51 @@ async fn daemon_on_an_empty_data_directory_does_not_start_while_the_metadata_sto
     let outcome = run_until_it_stops(stores).await;
 
     assert!(matches!(outcome, Err(DaemonError::CannotStart { .. })), "{outcome:?}");
+}
+
+/// A shutdown signal that never comes: for a daemon that is expected to end by itself.
+async fn never_asked_to_stop() -> ShutdownSignal {
+    std::future::pending().await
+}
+
+#[tokio::test]
+async fn daemon_does_not_start_on_a_data_directory_whose_identity_is_damaged() {
+    let stores = Stores::with_a_damaged_identity().await;
+    let inputs = DaemonInputs::on(&stores).await;
+
+    let outcome = run(
+        inputs.settings,
+        inputs.environment,
+        inputs.listeners,
+        never_asked_to_stop(),
+    )
+    .await;
+
+    assert!(matches!(outcome, Err(DaemonError::CannotStart { .. })), "{outcome:?}");
+}
+
+/// The endpoint is started first, so that `/healthz` answers while the rest starts. When the rest cannot
+/// start, the endpoint must be gone before `run` returns: a supervisor starts the daemon again at once,
+/// on the same port.
+///
+/// The test calls `run` itself and binds the port in the same breath. An endpoint that was only asked
+/// to stop has had no chance to do so by then, and still holds the port.
+#[tokio::test]
+async fn observability_port_is_free_once_a_daemon_that_could_not_start_has_returned() {
+    let stores = Stores::with_a_damaged_identity().await;
+    let inputs = DaemonInputs::on(&stores).await;
+    let observability_address = inputs.observability_address;
+
+    let _could_not_start = run(
+        inputs.settings,
+        inputs.environment,
+        inputs.listeners,
+        never_asked_to_stop(),
+    )
+    .await;
+
+    let bound = TcpListener::bind(observability_address).await;
+    assert!(bound.is_ok(), "{bound:?}");
 }
 
 /// The identity belongs to the data directory, whatever the configuration proposes.
