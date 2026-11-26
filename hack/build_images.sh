@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Builds the container images of bitacora and tags them with a version.
 #
-# Usage: hack/build_images.sh [X.Y.Z]
+# Usage: hack/build_images.sh [X.Y.Z | X.Y.Z-rc.N]
 #
 # Builds bita-replica, bita-controller and bita from src/docker/Dockerfile
 # and tags each `<repository>/<name>:<version>`. Without a version, the one
-# written in MODULE.bazel is used. Nothing is pushed: the script prints the
-# tags, and `docker push` takes them to the registry a cluster pulls from.
+# written in MODULE.bazel is used. A version that ends in `-rc.N` is a
+# release candidate: images to try out before X.Y.Z is released. Nothing is
+# pushed: the script prints the tags, and `docker push` takes them to the
+# registry a cluster pulls from.
 #
 # Environment:
 #   BITA_IMAGE_REPOSITORY  what comes before the image name (default: bitacora)
@@ -60,8 +62,8 @@ if [[ -z "${version}" ]]; then
     version="$(sed -n -E '/^ *version = "([^"]+)",?$/{s//\1/p;q;}' "${repository_root}/MODULE.bazel")"
     [[ -n "${version}" ]] || fail "MODULE.bazel does not say which version this is"
 fi
-if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "build_images: ${version} is not a version of the form X.Y.Z" >&2
+if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+    echo "build_images: ${version} is not a version of the form X.Y.Z or X.Y.Z-rc.N" >&2
     exit 2
 fi
 

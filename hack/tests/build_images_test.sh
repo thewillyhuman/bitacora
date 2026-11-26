@@ -67,11 +67,18 @@ BITA_IMAGE_REPOSITORY=registry.example.org/storage BITA_IMAGE_PLATFORM=linux/amd
 expect_call 1 "--build-arg VERSION=2.0.0" "--tag registry.example.org/storage/bita-replica:2.0.0" \
     "--platform linux/amd64"
 
+echo "--- the version of a release candidate is honoured"
+: >"${calls}"
+"${repository}/hack/build_images.sh" 2.0.0-rc.3 >/dev/null 2>&1 || fail "a release candidate was refused"
+expect_call 1 "--build-arg VERSION=2.0.0-rc.3" "--tag bitacora/bita-replica:2.0.0-rc.3"
+
 echo "--- what is not a version is refused before anything is built"
 : >"${calls}"
-exit_code=0
-"${repository}/hack/build_images.sh" latest >/dev/null 2>&1 || exit_code=$?
-((exit_code == 2)) || fail "'latest' was not refused with exit code 2 but ${exit_code}"
+for not_a_version in latest 2.0.0-rc 2.0.0-rc.x 2.0.0-beta.1 2.0.0-rc.1.2; do
+    exit_code=0
+    "${repository}/hack/build_images.sh" "${not_a_version}" >/dev/null 2>&1 || exit_code=$?
+    ((exit_code == 2)) || fail "'${not_a_version}' was not refused with exit code 2 but ${exit_code}"
+done
 [[ ! -s "${calls}" ]] || fail "an image was built for a version that was refused"
 exit_code=0
 "${repository}/hack/build_images.sh" 1.0.0 2.0.0 >/dev/null 2>&1 || exit_code=$?
