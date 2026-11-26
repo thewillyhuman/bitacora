@@ -12,6 +12,8 @@
 //!
 //! - [`RealCluster`]: etcd, some replica daemons and one controller daemon, all running.
 //! - [`ExitedDaemon`]: how one daemon ended when the cluster was stopped.
+//! - Private steps of starting a cluster: `ReservedPorts`, `start_etcd`, `start_replica`,
+//!   `start_controller`, and one function per configuration file.
 //!
 //! # How it works
 //!
@@ -37,6 +39,8 @@
 //! - Every process of the cluster is killed when the [`RealCluster`] is dropped, and only then is the
 //!   temporary directory removed.
 //! - A [`RealCluster`] that exists was fully ready when [`RealCluster::start`] returned.
+//! - Ports are handed out in a fixed order: etcd's client port and peer port, then for each replica its
+//!   gRPC port and its observability port, then the controller's.
 //!
 //! # See also
 //!
@@ -212,11 +216,10 @@ impl RealCluster {
     pub async fn start(binaries: &Binaries, replica_count: usize) -> Self {
         let directory = new_cluster_directory();
         let root = directory.path();
-        let mut ports = free_local_ports(ETCD_PORT_COUNT + replica_count * REPLICA_PORT_COUNT + 1);
-        let mut next_port = move || ports.pop().expect("enough ports were reserved");
+        let mut ports = ReservedPorts::reserve(ETCD_PORT_COUNT + replica_count * REPLICA_PORT_COUNT + 1);
 
-        let etcd_client_endpoint = format!("http://127.0.0.1:{}", next_port());
-        let etcd = start_etcd(&binaries.etcd, root, &etcd_client_endpoint, next_port()).await;
+        let etcd_client_endpoint = format!("http://127.0.0.1:{}", ports.take());
+        let etcd = start_etcd(&binaries.etcd, root, &etcd_client_endpoint, ports.take()).await;
         let cluster_config = ClusterConfig {
             etcd_endpoints: vec![etcd_client_endpoint],
             etcd_key_prefix: DEFAULT_ETCD_KEY_PREFIX.to_owned(),
@@ -224,40 +227,12 @@ impl RealCluster {
                 path: root.join("objects"),
             },
         };
-
         let mut replicas = Vec::with_capacity(replica_count);
         for replica_number in 0..replica_count {
-            let name = format!("replica-{replica_number}");
-            let grpc_address = format!("127.0.0.1:{}", next_port());
-            let observability_address = format!("127.0.0.1:{}", next_port());
-            let config_path = root.join(format!("{name}.toml"));
-            let config_text = replica_config_text(
-                &name,
-                &root.join(&name),
-                &grpc_address,
-                &observability_address,
-                &cluster_config,
-            );
-            write_file(&config_path, &config_text);
-            replicas.push(Daemon::start(
-                &name,
-                &binaries.replica,
-                &config_path,
-                observability_address,
-            ));
+            let replica = start_replica(replica_number, &binaries.replica, root, &mut ports, &cluster_config);
+            replicas.push(replica);
         }
-        let controller_observability_address = format!("127.0.0.1:{}", next_port());
-        let controller_config_path = root.join("controller.toml");
-        write_file(
-            &controller_config_path,
-            &controller_config_text(&controller_observability_address, &cluster_config),
-        );
-        let mut controller = Daemon::start(
-            "controller",
-            &binaries.controller,
-            &controller_config_path,
-            controller_observability_address,
-        );
+        let mut controller = start_controller(&binaries.controller, root, &mut ports, &cluster_config);
 
         for replica in &mut replicas {
             replica.wait_until_ready().await;
@@ -342,6 +317,64 @@ impl RealCluster {
     }
 }
 
+/// The loopback ports reserved for one cluster, handed out one at a time.
+struct ReservedPorts {
+    /// The ports nobody was given yet.
+    free_ports: Vec<u16>,
+}
+
+impl ReservedPorts {
+    /// Reserves `port_count` loopback ports that are free right now.
+    fn reserve(port_count: usize) -> Self {
+        Self {
+            free_ports: free_local_ports(port_count),
+        }
+    }
+
+    /// Hands out one of the reserved ports. No port is handed out twice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if more ports are taken than were reserved.
+    fn take(&mut self) -> u16 {
+        self.free_ports.pop().expect("enough ports were reserved")
+    }
+}
+
+/// Writes the configuration of replica `replica_number` below `root` and starts its daemon, without
+/// waiting for it to become ready. It takes two ports: gRPC first, then observability.
+fn start_replica(
+    replica_number: usize,
+    binary: &Path,
+    root: &Path,
+    ports: &mut ReservedPorts,
+    cluster_config: &ClusterConfig,
+) -> Daemon {
+    let name = format!("replica-{replica_number}");
+    let grpc_address = format!("127.0.0.1:{}", ports.take());
+    let observability_address = format!("127.0.0.1:{}", ports.take());
+    let config_path = root.join(format!("{name}.toml"));
+    let config_text = replica_config_text(
+        &name,
+        &root.join(&name),
+        &grpc_address,
+        &observability_address,
+        cluster_config,
+    );
+    write_file(&config_path, &config_text);
+    Daemon::start(&name, binary, &config_path, observability_address)
+}
+
+/// Writes the controller's configuration below `root` and starts its daemon, without waiting for it to
+/// become ready. It takes one port, for observability.
+fn start_controller(binary: &Path, root: &Path, ports: &mut ReservedPorts, cluster_config: &ClusterConfig) -> Daemon {
+    let observability_address = format!("127.0.0.1:{}", ports.take());
+    let config_path = root.join("controller.toml");
+    let config_text = controller_config_text(&observability_address, cluster_config);
+    write_file(&config_path, &config_text);
+    Daemon::start("controller", binary, &config_path, observability_address)
+}
+
 /// Waits for a daemon that was asked to stop.
 async fn wait_for_exit(daemon: &mut Daemon) -> ExitedDaemon {
     ExitedDaemon {
@@ -376,6 +409,30 @@ fn write_file(path: &Path, text: &str) {
 ///
 /// Panics if etcd exits while starting or is not healthy within [`STARTUP_ALLOWANCE`].
 async fn start_etcd(binary: &Path, root: &Path, client_endpoint: &str, peer_port: u16) -> ChildProcess {
+    let mut command = etcd_command(binary, root, client_endpoint, peer_port);
+    let mut etcd = ChildProcess::spawn("etcd", &mut command, &root.join("etcd.log"));
+
+    // etcd answers `/health` on its client port with 200 once it has elected itself leader.
+    let client_address = client_endpoint.trim_start_matches("http://");
+    let deadline = Instant::now() + STARTUP_ALLOWANCE;
+    loop {
+        let answer = http_get(client_address, "/health", PROBE_TIMEOUT).await;
+        if answer.is_ok_and(|answer| answer.status == 200) {
+            return etcd;
+        }
+        assert!(!etcd.has_exited(), "etcd exited while starting:\n{}", etcd.log());
+        assert!(
+            Instant::now() < deadline,
+            "etcd was not healthy within {STARTUP_ALLOWANCE:?}:\n{}",
+            etcd.log()
+        );
+        sleep(READINESS_POLL_INTERVAL).await;
+    }
+}
+
+/// The command line of a single-member etcd that keeps its data below `root`, serves clients on
+/// `client_endpoint` and its one peer, itself, on `peer_port`.
+fn etcd_command(binary: &Path, root: &Path, client_endpoint: &str, peer_port: u16) -> Command {
     let peer_endpoint = format!("http://127.0.0.1:{peer_port}");
     let mut command = Command::new(binary);
     command
@@ -398,24 +455,7 @@ async fn start_etcd(binary: &Path, root: &Path, client_endpoint: &str, peer_port
         .arg("--unsafe-no-fsync")
         .arg("--log-level")
         .arg("error");
-    let mut etcd = ChildProcess::spawn("etcd", &mut command, &root.join("etcd.log"));
-
-    // etcd answers `/health` on its client port with 200 once it has elected itself leader.
-    let client_address = client_endpoint.trim_start_matches("http://");
-    let deadline = Instant::now() + STARTUP_ALLOWANCE;
-    loop {
-        let answer = http_get(client_address, "/health", PROBE_TIMEOUT).await;
-        if answer.is_ok_and(|answer| answer.status == 200) {
-            return etcd;
-        }
-        assert!(!etcd.has_exited(), "etcd exited while starting:\n{}", etcd.log());
-        assert!(
-            Instant::now() < deadline,
-            "etcd was not healthy within {STARTUP_ALLOWANCE:?}:\n{}",
-            etcd.log()
-        );
-        sleep(READINESS_POLL_INTERVAL).await;
-    }
+    command
 }
 
 /// Writes a path as a TOML string: in double quotes, with backslashes and quotes escaped.

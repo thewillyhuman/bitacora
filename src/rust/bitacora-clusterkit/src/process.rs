@@ -50,6 +50,10 @@ use tokio::time::{Instant, sleep};
 /// How long to wait between two looks at whether a child has exited.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// How many lines of a child's log are shown when the test that owns it panics: enough to hold the
+/// error a daemon logs when it stops, and few enough to be read in the output of a failed test.
+const LOG_LINES_SHOWN_ON_PANIC: usize = 15;
+
 /// A child process that belongs to a test. Dropping it kills the child.
 #[derive(Debug)]
 pub struct ChildProcess {
@@ -206,14 +210,20 @@ impl Drop for ChildProcess {
     fn drop(&mut self) {
         if std::thread::panicking() {
             let log = self.log();
-            let last_lines: Vec<&str> = log.lines().rev().take(15).collect();
             eprintln!("--- last output of {} ---", self.name);
-            for line in last_lines.iter().rev() {
+            for line in last_lines_of(&log, LOG_LINES_SHOWN_ON_PANIC) {
                 eprintln!("{line}");
             }
         }
         self.kill();
     }
+}
+
+/// The last `line_count` lines of `text`, in their order, or all of them if there are fewer.
+fn last_lines_of(text: &str, line_count: usize) -> Vec<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    let first_shown = lines.len().saturating_sub(line_count);
+    lines[first_shown..].to_vec()
 }
 
 /// Returns `count` different loopback ports that nothing is listening on right now.

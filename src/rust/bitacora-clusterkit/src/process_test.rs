@@ -6,6 +6,7 @@
 //! - `terminate` and `kill` end a running child, and do nothing to one that has exited.
 //! - Dropping the wrapper kills the child.
 //! - Free ports are different from each other and can be bound.
+//! - The end of a log that is shown after a panic: its last lines, in order.
 //!
 //! # How the fixtures work
 //!
@@ -152,4 +153,18 @@ fn free_port_can_be_bound() {
     let bound = TcpListener::bind((Ipv4Addr::LOCALHOST, ports[0]));
 
     assert!(bound.is_ok(), "{bound:?}");
+}
+
+#[test]
+fn last_lines_of_a_long_text_are_its_end_in_order() {
+    let last_lines = last_lines_of("one\ntwo\nthree\nfour\n", 2);
+
+    assert_eq!(last_lines, vec!["three", "four"]);
+}
+
+#[test]
+fn last_lines_of_a_short_text_are_all_of_it() {
+    let last_lines = last_lines_of("one\ntwo\n", 15);
+
+    assert_eq!(last_lines, vec!["one", "two"]);
 }
