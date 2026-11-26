@@ -22,7 +22,8 @@ of the documentation is listed in [docs/README.md](docs/README.md).
 ## Status
 
 Every milestone of the design's roadmap (section 18) is written and tested
-here, on one machine and in continuous integration. No cluster has run for
+here, on one machine and in continuous integration, and release candidates
+have run on one Kubernetes cluster for an afternoon. No cluster has run for
 days, no release is tagged, and nothing is frozen: formats and interfaces
 can still change.
 
@@ -30,10 +31,10 @@ can still change.
 | --- | --- | --- |
 | M0 Specification | An executable model of append, roll and failover, searched exhaustively; the protocol documents in [docs/protocol](docs/protocol/README.md) | |
 | M1 Single-node log | Segment format, replica, writer and reader; crash and torn-write tests; a fuzz test of the decoder | |
-| M2 Replicated log | Quorum appends, rolls, writer failover, the etcd backend; a deterministic simulation that runs a fault matrix on every build | The performance targets of section 16: `bita-bench` measures, but nothing was measured on real hardware |
+| M2 Replicated log | Quorum appends, rolls, writer failover, the etcd backend; a deterministic simulation that runs a fault matrix on every build | The performance targets of section 16: [measured](docs/measurements.md) on network block storage only, where the latency targets are missed; not on the disks the targets assume |
 | M3 Lifecycle | Controller with placement, repair, tiering to an object store, truncation and retention; the `bita` tool | |
 | M4 Materializers | The framework, both adapters and bitacora-kv, whose histories are checked for linearizability under the fault matrix | |
-| M5 Hardening | Daemons, Helm chart, systemd units, container images, metrics, alert rules, a dashboard, and tests on a cluster of real processes | The chart was never installed and the units never ran under systemd. No nightly runs, no upgrade test, no TLS, no tagged release |
+| M5 Hardening | Daemons, Helm chart, systemd units, container images, metrics, alert rules, a dashboard, and tests on a cluster of real processes. The chart ran a cluster on Kubernetes that [survived](docs/measurements.md) a killed replica, a killed controller, a writer takeover and an upgrade under load, each done once by hand | The units never ran under systemd. No nightly runs, no automated upgrade test, no TLS, no tagged release, only release candidates |
 | M6 Second materializer | A metrics-block materializer built on the public interface; the C and the Go client | Five gaps of the materializer interface are open ([record 0015](docs/decisions/0015-metrics-materializer.md)), so it is not frozen |
 
 ## Try it on one machine

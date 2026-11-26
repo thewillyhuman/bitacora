@@ -12,6 +12,7 @@ this directory holds what spans them.
 | [clients/c.md](clients/c.md), [clients/go.md](clients/go.md) | Use bitacora from C or from Go |
 | [protocol/README.md](protocol/README.md) | Write a program that talks to a cluster, or read what is on a disk |
 | [benchmark.md](benchmark.md) | Measure a cluster with `bita-bench` |
+| [measurements.md](measurements.md) | See what was measured on real machines, and what was not |
 
 ## Reference
 
