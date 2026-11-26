@@ -154,6 +154,41 @@ Each of these is one conditional write of the stream record.
 | Release a tiered segment | `tiered` is the upload that was verified | `copies` emptied, `are_local_copies_dropped` true |
 | Truncate | `materializers` is what the controller saw | `low_water_mark` raised; sealed, untiered segments wholly below it removed |
 | Remove a tiered segment | Its object was deleted first | The segment removed |
+| Ask for truncation | None | `truncate_before` raised to the position asked for. A position at or below the recorded one changes nothing: it only moves forward |
+
+### Creating a stream
+
+A stream's name, like a materializer's, is 1 to 255 ASCII letters, digits,
+`.`, `_` or `-`, so that it can be part of a key. `replication.write_quorum`
+is at least 1 and at most `replication.replica_count`.
+
+Creating a stream is one transaction, conditional on `streams/<name>` being
+absent and on `counters/stream-id` being at the revision read, or absent if
+no stream was ever created. It writes:
+
+- `counters/stream-id`: the identifier read plus one, 1 for the first stream;
+- `streams/<name>`: a record with that identifier, `epoch` 0, `writer`
+  `null`, no segments, `next_segment_id` 1, `low_water_mark` 1,
+  `truncate_before` `null` and no materializers.
+
+`standby_replicas` is `null`, or a replica set the creator chose by the
+placement rules below. With `null`, the stream can be opened once the
+controller has placed a standby, which it does in its next pass; a writer
+that finds none waits and tries again.
+
+### Registering a materializer
+
+One transaction, conditional on the revision of the stream record: the name
+is added to `materializers`, which is kept sorted, and
+`checkpoints/<stream id>/<materializer>` is written with `checkpoint` one
+below the stream's `low_water_mark`, `fencing_token` 0 and `manifest`
+`null`. Because both are written together, the low-water mark cannot pass
+a materializer between its registration and its first checkpoint.
+Registering a name that is registered already changes nothing; in
+particular, the checkpoint is not reset.
+
+Unregistering removes the name and deletes the checkpoint record, in one
+transaction. Unregistering a name that is not registered changes nothing.
 
 ## Checkpoint record
 
