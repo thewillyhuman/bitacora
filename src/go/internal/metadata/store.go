@@ -34,6 +34,9 @@ var (
 	// ErrInvalidName says a name is empty, too long or has a character
 	// other than an ASCII letter, a digit, '.', '_' or '-'.
 	ErrInvalidName = errors.New("name is not valid")
+	// ErrInvalidReplication says the write quorum is not between one and
+	// the number of replicas.
+	ErrInvalidReplication = errors.New("replication settings are not valid")
 	// ErrFenced says the stream's epoch is not the one the caller holds:
 	// another writer has taken the stream.
 	ErrFenced = errors.New("stream was taken by another writer")
@@ -135,10 +138,15 @@ func (store *Store) UpdateStream(ctx context.Context, name string, change func(*
 // CreateStream creates a stream without a first segment: it has no standby
 // replica set, which the controller places as soon as it can. The stream's
 // identifier is the next value of the cluster's counter, taken in the same
-// transaction. The error wraps [ErrStreamExists] or [ErrInvalidName].
+// transaction. The error wraps [ErrStreamExists], [ErrInvalidName] or
+// [ErrInvalidReplication].
 func (store *Store) CreateStream(ctx context.Context, name string, replication ReplicationSettings, retention RetentionPolicy) (StreamRecord, error) {
 	if err := validateName(name); err != nil {
 		return StreamRecord{}, err
+	}
+	if replication.WriteQuorum < 1 || replication.WriteQuorum > replication.ReplicaCount {
+		return StreamRecord{}, fmt.Errorf("%w: a write quorum of %d with %d replicas",
+			ErrInvalidReplication, replication.WriteQuorum, replication.ReplicaCount)
 	}
 	key := streamKeyPrefix + name
 	for range maxUpdateAttempts {
@@ -313,6 +321,20 @@ func (store *Store) RollSegment(ctx context.Context, name string, epoch, segment
 		return err
 	})
 	return stream, opened, err
+}
+
+// RequestTruncation records that the stream's owner allows every record
+// below sequence to be deleted. The position only moves forward: a request
+// below the recorded one changes nothing. Deleting is the controller's
+// work, which also honours the materializers and the retention policy.
+func (store *Store) RequestTruncation(ctx context.Context, name string, sequence uint64) error {
+	_, err := store.UpdateStream(ctx, name, func(stream *StreamRecord) error {
+		if stream.TruncateBefore == nil || *stream.TruncateBefore < sequence {
+			stream.TruncateBefore = new(sequence)
+		}
+		return nil
+	})
+	return err
 }
 
 // RegisterMaterializer adds materializer to the stream and creates its

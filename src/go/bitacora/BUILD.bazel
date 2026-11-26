@@ -4,6 +4,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "bitacora",
     srcs = [
+        "admin.go",
         "client.go",
         "doc.go",
         "errors.go",
@@ -32,6 +33,7 @@ go_test(
     name = "bitacora_test",
     size = "small",
     srcs = [
+        "admin_test.go",
         "client_test.go",
         "cluster_test.go",
         "fakereplica_test.go",

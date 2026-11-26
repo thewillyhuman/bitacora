@@ -124,6 +124,22 @@ func waitForStream(t *testing.T, cluster *testcluster.Cluster, name string, what
 	}
 }
 
+// etcdHasKey reports whether the cluster's etcd holds a key, given without
+// the cluster's prefix.
+func etcdHasKey(t *testing.T, cluster *testcluster.Cluster, key string) bool {
+	t.Helper()
+	etcd, err := clientv3.New(clientv3.Config{Endpoints: []string{cluster.EtcdEndpoint}, DialTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("connect to etcd: %v", err)
+	}
+	defer etcd.Close()
+	stored, err := metadata.NewEtcdStore(etcd, testcluster.EtcdKeyPrefix, 5*time.Second).Get(t.Context(), key)
+	if err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+	return stored != nil
+}
+
 // follower is a Go reader that follows a stream in the background.
 type follower struct {
 	// records receives every record the follower yields.

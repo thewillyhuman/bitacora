@@ -10,6 +10,8 @@ import (
 var (
 	// ErrStreamNotFound says no stream has the given name.
 	ErrStreamNotFound = errors.New("bitacora: stream does not exist")
+	// ErrStreamExists says a stream of the given name exists already.
+	ErrStreamExists = errors.New("bitacora: stream already exists")
 	// ErrInvalidArgument says a name, a range or an option cannot be used.
 	ErrInvalidArgument = errors.New("bitacora: invalid argument")
 	// ErrUnavailable says the metadata store, the replicas that hold the
@@ -55,7 +57,9 @@ func fromMetadata(err error) error {
 		return nil
 	case errors.Is(err, metadata.ErrStreamNotFound):
 		return fmt.Errorf("%w: %w", ErrStreamNotFound, err)
-	case errors.Is(err, metadata.ErrInvalidName):
+	case errors.Is(err, metadata.ErrStreamExists):
+		return fmt.Errorf("%w: %w", ErrStreamExists, err)
+	case errors.Is(err, metadata.ErrInvalidName), errors.Is(err, metadata.ErrInvalidReplication):
 		return fmt.Errorf("%w: %w", ErrInvalidArgument, err)
 	case errors.Is(err, metadata.ErrFenced):
 		return fmt.Errorf("%w: %w", ErrFenced, err)

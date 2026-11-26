@@ -1,4 +1,4 @@
 change_type: new_component
 component: client
-note: "Add a native Go client in src/go: a quorum-committing stream writer that takes over from another writer and rolls on replica failure, and a stream reader that reads ranges, follows a stream as records commit and reads tiered segments from the object store."
+note: "Add a native Go client in src/go that interoperates with the Rust one: a quorum-committing stream writer that takes over from another writer and rolls on replica failure, a stream reader that reads ranges, follows a stream as records commit and reads tiered segments from the object store, and stream administration."
 issues: [6]

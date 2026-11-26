@@ -474,3 +474,65 @@ func TestListReplicasReadsTheRegistry(t *testing.T) {
 		t.Errorf("replicas = %+v, want the one registered at 10.0.0.11:7000", replicas)
 	}
 }
+
+func TestCreateStreamRefusesReplicationThatCannotCommit(t *testing.T) {
+	tests := []struct {
+		name        string
+		replication ReplicationSettings
+		wantErr     error
+	}{
+		{"three replicas, quorum two", ReplicationSettings{ReplicaCount: 3, WriteQuorum: 2}, nil},
+		{"one replica, quorum one", ReplicationSettings{ReplicaCount: 1, WriteQuorum: 1}, nil},
+		{"a quorum of everyone", ReplicationSettings{ReplicaCount: 3, WriteQuorum: 3}, nil},
+		{"a quorum of nobody", ReplicationSettings{ReplicaCount: 3, WriteQuorum: 0}, ErrInvalidReplication},
+		{"a quorum larger than the replica set", ReplicationSettings{ReplicaCount: 2, WriteQuorum: 3}, ErrInvalidReplication},
+		{"no replicas at all", ReplicationSettings{}, ErrInvalidReplication},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewStore(NewMemoryStore())
+
+			_, err := store.CreateStream(t.Context(), streamName, test.replication, RetentionPolicy{})
+
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("CreateStream error = %v, want %v", err, test.wantErr)
+			}
+			if _, readErr := store.GetStream(t.Context(), streamName); (readErr == nil) != (test.wantErr == nil) {
+				t.Errorf("after CreateStream = %v the stream reads as %v", err, readErr)
+			}
+		})
+	}
+}
+
+func TestTheTruncationPositionOnlyMovesForward(t *testing.T) {
+	store := newStoreWithStream(t)
+	steps := []struct {
+		request uint64
+		want    uint64
+	}{
+		{request: 100, want: 100},
+		{request: 40, want: 100},
+		{request: 100, want: 100},
+		{request: 250, want: 250},
+	}
+	for _, step := range steps {
+		if err := store.RequestTruncation(t.Context(), streamName, step.request); err != nil {
+			t.Fatalf("RequestTruncation(%d): %v", step.request, err)
+		}
+		stream, err := store.GetStream(t.Context(), streamName)
+		if err != nil {
+			t.Fatalf("GetStream: %v", err)
+		}
+		if stream.TruncateBefore == nil || *stream.TruncateBefore != step.want {
+			t.Errorf("after a request to truncate before %d the position is %v, want %d", step.request, stream.TruncateBefore, step.want)
+		}
+		// Asking is all it does: records are deleted by the controller.
+		if stream.LowWaterMark != 1 {
+			t.Errorf("the request moved the low-water mark to %d", stream.LowWaterMark)
+		}
+	}
+
+	if err := store.RequestTruncation(t.Context(), "payments", 10); !errors.Is(err, ErrStreamNotFound) {
+		t.Errorf("RequestTruncation of a missing stream = %v, want ErrStreamNotFound", err)
+	}
+}
