@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# The example of docs/clients/go.md, as a program. It is compiled with the
+# module, run against a real cluster by //src/go/interop, and compared with
+# what the page prints by the test below.
+go_library(
+    name = "quickstart_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/thewillyhuman/bitacora/src/go/examples/quickstart",
+    visibility = ["//visibility:private"],
+    deps = ["//src/go/bitacora"],
+)
+
+go_binary(
+    name = "quickstart",
+    embed = [":quickstart_lib"],
+    visibility = ["//src/go:__subpackages__"],
+)
+
+go_test(
+    name = "quickstart_test",
+    size = "small",
+    srcs = ["quickstart_test.go"],
+    data = [
+        "main.go",
+        "//docs:clients/go.md",
+    ],
+    embed = [":quickstart_lib"],
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

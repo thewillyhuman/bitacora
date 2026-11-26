@@ -28,6 +28,7 @@ go_test(
     data = [
         "gofmt_test.go",
         "//src/go/bitacora:sources",
+        "//src/go/examples/quickstart:sources",
         "//src/go/internal/frame:sources",
         "//src/go/internal/metadata:sources",
         "//src/go/internal/replica:sources",

@@ -3,9 +3,12 @@
 A native Go client: it speaks the same gRPC protocol to replicas and keeps
 the same records in etcd as the Rust client, so the two can be used on the
 same cluster and on the same stream. It was written from the protocol
-documents in [docs/protocol](../../docs/protocol), not from the Rust code.
+documents in [docs/protocol](../../docs/protocol), not from the Rust code;
+[decision 0016](../../docs/decisions/0016-go-client.md) says why, and lists
+what the documents had to be taught on the way.
 
-This page is for people who change it.
+How to use it is in [docs/clients/go.md](../../docs/clients/go.md). This
+page is for people who change it.
 
 ## Layout
 
@@ -14,6 +17,7 @@ One Go module, `github.com/thewillyhuman/bitacora/src/go`.
 | Directory | What it is |
 | --- | --- |
 | `bitacora/` | The client: the package applications import |
+| `examples/quickstart/` | The example of the client's page, as a program the tests run |
 | `interop/` | Tests against a cluster of the real Rust daemons and tools |
 | `internal/wire/` | The gRPC stubs, generated from `src/proto` and checked in |
 | `internal/frame/` | The batch frame: how records travel and are stored, under one CRC-32C |

@@ -15,3 +15,10 @@ exports_files(
     ],
     visibility = ["//visibility:public"],
 )
+
+# The Go client's page is compared with the example it shows, which is a
+# program the Go tests compile and run.
+exports_files(
+    ["clients/go.md"],
+    visibility = ["//src/go:__subpackages__"],
+)

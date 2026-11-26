@@ -34,6 +34,9 @@ const (
 	// BenchmarkBinaryVariable names the benchmark tool, bita-bench, which
 	// tests use as a Rust writer that stays open.
 	BenchmarkBinaryVariable = "BITA_BENCH_BINARY"
+	// QuickstartBinaryVariable names the Go client's example program,
+	// src/go/examples/quickstart.
+	QuickstartBinaryVariable = "BITA_GO_QUICKSTART_BINARY"
 )
 
 // startupTimeout is how long a program may take until it answers.

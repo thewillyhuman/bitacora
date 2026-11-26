@@ -15,6 +15,7 @@ go_test(
     size = "medium",
     srcs = glob(["*_test.go"]),
     data = [
+        "//src/go/examples/quickstart",
         "//src/rust:etcd",
         "//src/rust/bita",
         "//src/rust/bita-bench",
@@ -26,6 +27,7 @@ go_test(
         "BITA_CLI_BINARY": "$(rootpath //src/rust/bita)",
         "BITA_CONTROLLER_BINARY": "$(rootpath //src/rust/bita-controller)",
         "BITA_ETCD_BINARY": "$(rootpath //src/rust:etcd)",
+        "BITA_GO_QUICKSTART_BINARY": "$(rootpath //src/go/examples/quickstart)",
         "BITA_REPLICA_BINARY": "$(rootpath //src/rust/bita-replica)",
     },
     deps = [

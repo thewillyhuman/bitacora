@@ -145,6 +145,14 @@ func (cluster *Cluster) StartBenchmark(t testing.TB, arguments ...string) *Proce
 	return start(t, cluster.directory, "bita-bench", program, cluster.toolArguments(arguments)...)
 }
 
+// Quickstart runs the Go client's example program against the cluster and
+// returns what it printed. The error, if the program failed, holds what it
+// wrote to standard error.
+func (cluster *Cluster) Quickstart(t testing.TB) (string, error) {
+	t.Helper()
+	return run(binary(t, QuickstartBinaryVariable), "", cluster.EtcdEndpoint)
+}
+
 // toolArguments puts in front of arguments what tells a bita tool where the
 // cluster is and to print JSON.
 func (cluster *Cluster) toolArguments(arguments []string) []string {
