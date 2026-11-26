@@ -28,7 +28,8 @@
 //! ```
 //!
 //! `--help` and `--version` win over everything else, so that they work even next to arguments that
-//! would be refused.
+//! would be refused. [`parse_command_line`] therefore looks for them first (`is_asked_for`), and only
+//! then goes through the arguments in order; `config_value_of` reads the value of one `--config`.
 //!
 //! `--check-config` exists so that a configuration can be judged before anything depends on it: by a
 //! supervisor before it starts or restarts the daemon, by whatever renders the file for a deployment,
@@ -120,15 +121,11 @@ pub enum UsageError {
 /// ```
 pub fn parse_command_line(arguments: impl IntoIterator<Item = String>) -> Result<CommandLine, UsageError> {
     let arguments: Vec<String> = arguments.into_iter().collect();
-    for argument in &arguments {
-        if argument == "--help" || argument == "-h" {
-            return Ok(CommandLine::PrintHelp);
-        }
+    if is_asked_for(&arguments, "--help", "-h") {
+        return Ok(CommandLine::PrintHelp);
     }
-    for argument in &arguments {
-        if argument == "--version" || argument == "-V" {
-            return Ok(CommandLine::PrintVersion);
-        }
+    if is_asked_for(&arguments, "--version", "-V") {
+        return Ok(CommandLine::PrintVersion);
     }
 
     let mut config_path: Option<PathBuf> = None;
@@ -139,16 +136,7 @@ pub fn parse_command_line(arguments: impl IntoIterator<Item = String>) -> Result
             is_check_only = true;
             continue;
         }
-        let config_value = if argument == "--config" {
-            remaining_arguments.next()
-        } else if let Some(inline_value) = argument.strip_prefix("--config=") {
-            Some(inline_value.to_owned())
-        } else {
-            return Err(UsageError::UnknownArgument { argument });
-        };
-        let Some(config_value) = config_value.filter(|value| !value.is_empty()) else {
-            return Err(UsageError::MissingConfigValue);
-        };
+        let config_value = config_value_of(argument, &mut remaining_arguments)?;
         if config_path.is_some() {
             return Err(UsageError::RepeatedConfigPath);
         }
@@ -158,6 +146,40 @@ pub fn parse_command_line(arguments: impl IntoIterator<Item = String>) -> Result
         Some(config_path) if is_check_only => Ok(CommandLine::CheckConfig { config_path }),
         Some(config_path) => Ok(CommandLine::Run { config_path }),
         None => Err(UsageError::MissingConfigPath),
+    }
+}
+
+/// Whether any argument is the option `long_form` or its abbreviation `short_form`.
+fn is_asked_for(arguments: &[String], long_form: &str, short_form: &str) -> bool {
+    for argument in arguments {
+        if argument == long_form || argument == short_form {
+            return true;
+        }
+    }
+    false
+}
+
+/// Reads the value of a `--config` argument: the next argument for `--config <path>`, or what follows
+/// the equals sign for `--config=<path>`.
+///
+/// # Errors
+///
+/// * [`UsageError::UnknownArgument`] if `argument` is not `--config` in either form.
+/// * [`UsageError::MissingConfigValue`] if no argument follows, or the value is empty.
+fn config_value_of(
+    argument: String,
+    remaining_arguments: &mut impl Iterator<Item = String>,
+) -> Result<String, UsageError> {
+    let config_value = if argument == "--config" {
+        remaining_arguments.next()
+    } else if let Some(inline_value) = argument.strip_prefix("--config=") {
+        Some(inline_value.to_owned())
+    } else {
+        return Err(UsageError::UnknownArgument { argument });
+    };
+    match config_value {
+        Some(config_value) if !config_value.is_empty() => Ok(config_value),
+        _missing_or_empty => Err(UsageError::MissingConfigValue),
     }
 }
 
