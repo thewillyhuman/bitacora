@@ -1,0 +1,25 @@
+load("//src/rust:defs.bzl", "bitacora_binary")
+
+exports_files(["Cargo.toml"])
+
+# The soak tool. Its unit tests run whole rounds against the in-process test
+# cluster under a virtual clock, with a controller and faults of their own.
+bitacora_binary(
+    name = "bita-soak",
+    srcs = glob(["src/**/*.rs"]),
+    # The test of the metrics compares them with the tool's reference page.
+    test_data = ["//docs:soak.md"],
+    test_deps = [
+        "//src/rust/bitacora-controller:bitacora_controller",
+        "//src/rust/bitacora-replica:bitacora_replica",
+        "//src/rust/bitacora-segment:bitacora_segment",
+        "//src/rust/bitacora-testkit:bitacora_testkit",
+    ],
+    deps = [
+        "//src/rust/bitacora",
+        "//src/rust/bitacora-meta:bitacora_meta",
+        "//src/rust/bitacora-process:bitacora_process",
+        "//src/rust/bitacora-sim:bitacora_sim",
+        "//src/rust/bitacora-types:bitacora_types",
+    ],
+)

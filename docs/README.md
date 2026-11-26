@@ -12,6 +12,7 @@ this directory holds what spans them.
 | [clients/c.md](clients/c.md), [clients/go.md](clients/go.md) | Use bitacora from C or from Go |
 | [protocol/README.md](protocol/README.md) | Write a program that talks to a cluster, or read what is on a disk |
 | [benchmark.md](benchmark.md) | Measure a cluster with `bita-bench` |
+| [soak.md](soak.md) | Run a cluster for days with `bita-soak` and have the simulator's checker judge it |
 | [measurements.md](measurements.md) | See what was measured on real machines, and what was not |
 
 ## Reference
@@ -22,9 +23,9 @@ this directory holds what spans them.
 | [operations/alerts.md](operations/alerts.md) | Every default alert, what it means and what to do |
 | [protocol/](protocol/README.md) | The replication rules, the wire protocol, and the formats of segment files, tiered objects, metadata records, checkpoint manifests and metrics blocks |
 
-The command reference, the metrics reference, the page about the alerts and
-the examples of both client pages are compared with the code by tests, so
-they cannot fall behind it.
+The command reference, the metrics reference, the page about the alerts,
+the metrics of the soak tool and the examples of both client pages are
+compared with the code by tests, so they cannot fall behind it.
 
 ## Decision records
 

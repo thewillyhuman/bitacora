@@ -101,6 +101,7 @@ from the rows above its own, except in its tests.
 | Test support | `bitacora-testports` | Loopback ports for tests that start real servers, in blocks that one test owns |
 | Test clusters | `bitacora-testkit`, `bitacora-clusterkit` | A cluster inside one process with switchable faults; a cluster of real processes |
 | Simulation | `bitacora-sim` | The deterministic simulation: a workload, a fault schedule and a checker of the history, all from one seed |
+| Soak | `bita-soak` | The simulation's idea on a real cluster: a workload under faults for days, judged round by round by the simulation's checker |
 
 ## Building and testing
 

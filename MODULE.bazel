@@ -38,6 +38,7 @@ crate.from_cargo(
         "//src/rust/bita-bench:Cargo.toml",
         "//src/rust/bita-controller:Cargo.toml",
         "//src/rust/bita-replica:Cargo.toml",
+        "//src/rust/bita-soak:Cargo.toml",
         "//src/rust/bitacora:Cargo.toml",
         "//src/rust/bitacora-artifact:Cargo.toml",
         "//src/rust/bitacora-artifact-s3:Cargo.toml",

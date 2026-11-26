@@ -237,6 +237,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bita-soak"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bitacora",
+ "bitacora-controller",
+ "bitacora-meta",
+ "bitacora-process",
+ "bitacora-replica",
+ "bitacora-segment",
+ "bitacora-sim",
+ "bitacora-testkit",
+ "bitacora-types",
+ "bytes",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "bitacora"
 version = "0.0.0"
 dependencies = [

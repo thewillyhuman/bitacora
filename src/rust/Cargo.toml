@@ -5,6 +5,7 @@ members = [
     "bita-bench",
     "bita-controller",
     "bita-replica",
+    "bita-soak",
     "bitacora",
     "bitacora-artifact",
     "bitacora-artifact-s3",

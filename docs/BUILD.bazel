@@ -21,13 +21,14 @@ shellcheck_test(
 # and by the tests of the alert rules and of the dashboard, the page about
 # the alerts by the test of the rules, the command reference by the tests
 # of the `bita` tool, the C client's example by the test that compiles and
-# runs it.
+# runs it, the page about the soak tool by the test of that tool's metrics.
 exports_files(
     [
         "cli.md",
         "clients/c.md",
         "operations/alerts.md",
         "operations/metrics.md",
+        "soak.md",
     ],
     visibility = ["//visibility:public"],
 )

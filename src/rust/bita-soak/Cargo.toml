@@ -1,0 +1,42 @@
+[package]
+name = "bita-soak"
+description = "The bitacora soak tool: drives a real cluster with a workload and faults for days, and judges what clients saw with the simulator's checker."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bita-soak"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+bitacora.workspace = true
+bitacora-meta.workspace = true
+bitacora-process.workspace = true
+# The history of what clients saw and the checker that judges it: the one
+# judge the simulator and a soak share.
+bitacora-sim.workspace = true
+bitacora-types.workspace = true
+bytes.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The writers and readers of every stream run side by side, and the metrics
+# are served on a socket.
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+
+[dev-dependencies]
+bitacora-controller.workspace = true
+bitacora-replica.workspace = true
+bitacora-segment.workspace = true
+bitacora-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true
