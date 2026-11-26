@@ -1,0 +1,4 @@
+change_type: enhancement
+component: materializer
+note: "Add read_committed_checkpoint, with which a process that is not the runner reads the checkpoint a materializer last committed and its manifest."
+issues: [6]

@@ -106,6 +106,8 @@ data behind a shared handle in its builder.
   that its writer may still commit.
 - A page read at any sequence from the horizon to the last record applied
   sees exactly the records up to it, whatever was flushed or dropped since.
+- What `read_committed_checkpoint` returns was committed, and reading it
+  writes nothing.
 - An artifact catalog, with the saved pending records after it if there are
   any, covers every record from the first one applied to the last
   checkpoint, without gap or overlap, also across crashes and merges.

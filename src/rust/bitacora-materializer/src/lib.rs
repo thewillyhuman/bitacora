@@ -21,6 +21,8 @@
 //!   [`ArtifactCatalog`], [`CatalogView`], with [`CatalogEntry`], [`ArtifactDescriptor`],
 //!   [`CompactionPolicy`] and [`decode_catalog`].
 //! - The stored form of a manifest: [`encode_manifest`] and [`decode_manifest`].
+//! - What a process that is not the runner reads the committed state with:
+//!   [`read_committed_checkpoint`], with [`CommittedCheckpoint`] and [`CommittedCheckpointError`].
 //!
 //! # How it fits together
 //!
@@ -42,6 +44,7 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 mod artifact_catalog;
+mod committed;
 mod contract;
 mod layer;
 mod manifest;
@@ -57,6 +60,7 @@ pub use artifact_catalog::{
     ArtifactBuilder, ArtifactCatalog, ArtifactDescriptor, CatalogEntry, CatalogView, CompactionPolicy, StoredCatalog,
     decode_catalog,
 };
+pub use committed::{CommittedCheckpoint, CommittedCheckpointError, read_committed_checkpoint};
 pub use contract::{CheckpointManifest, Materializer, MaterializerError};
 pub use manifest::{decode_manifest, encode_manifest};
 pub use namespace::{ArtifactNamespace, namespace_prefix, token_of_artifact};
