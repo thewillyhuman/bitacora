@@ -1,0 +1,4 @@
+change_type: enhancement
+component: docs
+note: "Add an operations guide: what a cluster is made of, what must hold before deploying, the routine procedures, monitoring, what is backed up, and what to do when etcd or replicas are lost."
+issues: [5]

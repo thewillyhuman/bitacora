@@ -15,7 +15,8 @@ derived from it, so a compute node holds no durable state and can be
 replaced, added or failed over without copying data.
 
 The full design is in [docs/spec.md](docs/spec.md). Decisions made while
-implementing it are recorded in [docs/decisions](docs/decisions).
+implementing it are recorded in [docs/decisions](docs/decisions). To run a
+cluster, start with [docs/operations](docs/operations/README.md).
 
 ## Repository layout
 

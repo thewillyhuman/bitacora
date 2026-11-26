@@ -132,6 +132,10 @@ write quorum.
   its unit raises the limit to 1048576.
 - **One replica per machine.** The unit runs one replica with one data directory. Several replicas on
   one machine would share a failure domain, which defeats what they are for.
+- **A new disk is a new replica.** A replica keeps its identity in its data directory. When that
+  directory is lost, give the replacement a `replica_id` that was never used and remove the old one with
+  `bita replica remove`. A replica that starts on an empty disk under its old identity answers for
+  copies it no longer holds; `docs/operations/README.md` says what that can cost.
 
 ## How this directory is tested
 
