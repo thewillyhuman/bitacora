@@ -30,7 +30,8 @@
 //! |--------------------------------|-------------------------------------------------------------------------|
 //! | acknowledged                   | records the replica's local end                                         |
 //! | out of order                   | resumes from the local end the replica reports                          |
-//! | fenced or sealed               | stops the writer: only a newer writer's takeover does that              |
+//! | fenced, or sealed              | stops the writer: a newer writer took the stream                        |
+//! | sealed, while the writer rolls | waits one retry interval: the seal is the roll's own                    |
 //! | unavailable, or no answer      | waits one retry interval and sends again                                |
 //! | any other refusal              | records it, so that the driver rolls away, and waits one retry interval |
 //!
@@ -46,6 +47,12 @@
 //!   say no longer changes anything, and the task ends at its next look.
 //! - A silent replica is not this task's problem to solve: it keeps retrying, and the driver, seeing no contact, rolls
 //!   away from it.
+//! - While the writer rolls, "sealed" is no verdict. The roll seals the open segment in the stream's record, and from
+//!   that moment the controller may tell the segment's replicas, which can be seconds before the writer has opened
+//!   the next segment: the roll reads the metadata store once more in between. A sender that took that seal for a
+//!   takeover stopped a writer nobody had taken the stream from. If it is a takeover after all, the roll finds out:
+//!   its conditional write is refused, or the replicas of the segment it opens are fenced. The Go client has the same
+//!   rule (`src/go/bitacora/writer.go`).
 //!
 //! # See also
 //!
@@ -185,10 +192,17 @@ impl ReplicaSender {
                     sleep(self.shared.settings.retry_interval).await;
                 }
             }
-            // A fence or a seal on the open segment can only come from a newer writer's takeover.
+            // This writer's own roll sealed the segment, and the controller told the replica before the roll finished
+            // here: see the invariants of this file.
+            Ok(Err(ReplicaError::Sealed { .. })) if self.shared.lock().is_rolling() => {
+                sleep(self.shared.settings.retry_interval).await;
+            }
+            // A fence, or a seal this writer did not make, on the open segment can only come from a newer writer's
+            // takeover.
             Ok(Err(ReplicaError::Fenced { .. } | ReplicaError::Sealed { .. })) => {
-                tracing::warn!(stream = %self.shared.stream_name, "lost the stream");
-                self.shared.stop_if_current(self.generation, &AppendError::Fenced);
+                if self.shared.stop_if_current(self.generation, &AppendError::Fenced) {
+                    tracing::warn!(stream = %self.shared.stream_name, "lost the stream");
+                }
                 return ControlFlow::Break(());
             }
             Ok(Err(ReplicaError::Unavailable { .. })) | Err(_) => {

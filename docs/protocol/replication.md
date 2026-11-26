@@ -108,7 +108,7 @@ appending waits.
 | --- | --- |
 | Success, with the local end | Counts the replica as holding the segment up to there |
 | Out of order, with the local end | Sends again from the local end plus one. The replica holds less than the writer assumed, typically after a request whose answer was lost |
-| Fenced, or sealed | Has lost the stream (below) |
+| Fenced, or sealed | Has lost the stream (below). Sealed during the writer's own roll: sends again after a pause |
 | Unavailable, another gRPC status, or nothing in time | Sends the same request again after a pause. Rolls if the replica stays silent |
 | Any other refusal: no capacity, draining, storage, invalid request | Gives up on the replica for this segment and rolls |
 
@@ -143,7 +143,17 @@ A writer that is refused as fenced, or whose conditional update fails
 because the epoch changed, has lost the stream. So has a writer whose open
 segment a replica reports as sealed: only a newer writer's takeover seals a
 segment that its writer has not sealed itself. It fails every pending and
-later append and stops. An append whose outcome it never learned is
+later append and stops.
+
+The writer's own roll is the exception. The roll's update seals the open
+segment in the stream's record, and from then on the controller may tell
+the segment's replicas, before the writer has opened the next segment: it
+reads the metadata store once more in between, which takes seconds when
+that read goes to an etcd member that does not answer. So while a roll is
+under way, a writer does not take "sealed" from the replicas of the segment
+it is leaving as a verdict. If another writer did take the stream
+meanwhile, the roll finds out: its update is refused because the epoch
+changed, or the replicas of the segment it opens are fenced. An append whose outcome it never learned is
 **indeterminate**: the record may or may not be in the stream. The
 application reads the log to find out.
 

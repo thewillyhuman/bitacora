@@ -110,13 +110,18 @@ impl Shared {
 
     /// Stops the writer on behalf of a task working for `generation`, unless the writer has moved on to a newer segment
     /// since: what an old segment's replica says no longer concerns it.
-    fn stop_if_current(&self, generation: u64, error: &AppendError) {
+    ///
+    /// Returns whether this call stopped the writer. It does not if the writer has moved on, or was stopped before,
+    /// which is how a sender's last answer after a close looks.
+    fn stop_if_current(&self, generation: u64, error: &AppendError) -> bool {
         let mut state = self.lock();
-        if state.generation() == generation {
-            state.stop(error);
-            drop(state);
-            self.announce_change();
+        if state.generation() != generation || matches!(state.status(), Status::Stopped(_)) {
+            return false;
         }
+        state.stop(error);
+        drop(state);
+        self.announce_change();
+        true
     }
 }
 

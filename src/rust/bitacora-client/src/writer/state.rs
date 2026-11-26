@@ -512,6 +512,14 @@ impl WriterState {
         self.durable_sequence
     }
 
+    /// Whether a roll is under way: it began and has neither completed nor been abandoned.
+    ///
+    /// A sender asks before it reads a replica's "sealed" as the loss of the stream. During a roll the open segment is
+    /// being sealed by the writer itself, and its replicas may learn that before the writer has moved on.
+    pub(crate) const fn is_rolling(&self) -> bool {
+        self.is_rolling
+    }
+
     /// Resumes committing on the open segment after a roll that did not happen, for example because no standby segment
     /// exists yet. Whatever a write quorum acknowledged in the meantime commits at once.
     pub(crate) fn abandon_roll(&mut self) {

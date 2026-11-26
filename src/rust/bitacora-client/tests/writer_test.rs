@@ -7,7 +7,8 @@
 //!   and that an append does not need the metadata store.
 //! - Replica failures: committing with one replica down, waiting without a quorum, a replica that catches up.
 //! - Rolling: away from a replica that stays down or drains, at the target segment size, with records in flight, and
-//!   staying put when there is no standby segment.
+//!   staying put when there is no standby segment. A roll that is slow between its record and its new segment, during
+//!   which the old segment's replicas are told the seal.
 //! - Failover: sealing the old writer's segment, fencing the old writer, a tail found or not found on a responder, the
 //!   recovery quorum, the lease, the standby segment, and losing to a newer writer.
 //! - Closing: the seal, the lease, the replicas, the next writer, and a writer that was fenced.
@@ -20,6 +21,11 @@
 //!
 //! Scenarios with two outcomes worth a test each (an append that waits and then commits, for example) are run by a
 //! function that returns a small struct, and each test asserts one of its fields.
+//!
+//! `StoreWithASlowRegistry` is the cluster's metadata store with one difference: a test can make a reader of the
+//! replica registry wait. A roll reads the registry between recording itself and opening its new segment, so holding
+//! that read keeps a writer in the middle of a roll for as long as the test needs, as a request to an etcd member that
+//! has fallen silent does on a real cluster.
 
 mod support;
 
@@ -27,14 +33,86 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitacora_client::{AppendError, OpenError, StreamWriter, TakeoverPolicy, WriterSettings};
-use bitacora_types::replica_api::{FenceRequest, ReplicaApi};
+use async_trait::async_trait;
+use bitacora_client::{
+    AppendError, BitacoraClient, ClientSettings, OpenError, StreamWriter, TakeoverPolicy, WriterSettings,
+};
+use bitacora_meta::{
+    Condition, KeyValueStore, MemoryKeyValueStore, MetadataStore, Mutation, StoreUnavailable, TransactionOutcome,
+    VersionedValue,
+};
+use bitacora_types::replica_api::{FenceRequest, ReplicaApi, SealRequest};
 use bitacora_types::{Epoch, MAX_RECORD_PAYLOAD_BYTES, SegmentId, SequenceNumber};
 use bytes::Bytes;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use support::{Cluster, HEARTBEAT_SETTLE, STREAM, append_numbered, open_writer, settle};
+
+/// What the key of every replica registration starts with (`docs/protocol/metadata.md`).
+const REGISTRY_KEY_PREFIX: &str = "replicas/";
+
+/// The cluster's metadata store, except that a reader of the replica registry can be kept waiting.
+struct StoreWithASlowRegistry {
+    /// The cluster's store, which answers everything.
+    cluster_store: MemoryKeyValueStore,
+    /// Whether the registry answers. A listing of it waits for as long as this is `false`.
+    registry_answers: watch::Sender<bool>,
+}
+
+impl StoreWithASlowRegistry {
+    /// Wraps the store of `cluster`, with a registry that answers.
+    fn over(cluster: &Cluster) -> Arc<Self> {
+        Arc::new(Self {
+            cluster_store: cluster.key_value_store().clone(),
+            registry_answers: watch::Sender::new(true),
+        })
+    }
+
+    /// Makes readers of the registry wait from now on, or lets them through again.
+    fn set_registry_answers(&self, answers: bool) {
+        self.registry_answers.send_replace(answers);
+    }
+}
+
+#[async_trait]
+impl KeyValueStore for StoreWithASlowRegistry {
+    async fn get(&self, key: &str) -> Result<Option<VersionedValue>, StoreUnavailable> {
+        self.cluster_store.get(key).await
+    }
+
+    async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
+        if key_prefix == REGISTRY_KEY_PREFIX {
+            let mut registry_answers = self.registry_answers.subscribe();
+            // The sender lives as long as this store, so the wait ends only when the registry answers again.
+            let _answering = registry_answers.wait_for(|answers| *answers).await;
+        }
+        self.cluster_store.list(key_prefix).await
+    }
+
+    async fn transact(
+        &self,
+        conditions: Vec<Condition>,
+        mutations: Vec<Mutation>,
+    ) -> Result<TransactionOutcome, StoreUnavailable> {
+        self.cluster_store.transact(conditions, mutations).await
+    }
+}
+
+/// Opens a writer of [`STREAM`] whose client reads the metadata through `metadata_store`.
+async fn open_writer_over(cluster: &Cluster, metadata_store: Arc<StoreWithASlowRegistry>) -> StreamWriter {
+    let client = BitacoraClient::new(
+        MetadataStore::new(metadata_store),
+        cluster.connector(),
+        cluster.clock(),
+        ClientSettings::default(),
+    );
+    client
+        .open_writer(STREAM, TakeoverPolicy::Force)
+        .await
+        .expect("the stream has a recovery quorum and a segment to open")
+}
 
 /// An append running in its own task, and what it resolves to.
 type BackgroundAppend = JoinHandle<Result<SequenceNumber, AppendError>>;
@@ -423,6 +501,64 @@ async fn writer_rolls_away_from_a_replica_that_stays_down() {
     assert_eq!(stream.segments[0].sealed_end(), Some(SequenceNumber::new(3)));
     assert_eq!(stream.segments[1].first_sequence, SequenceNumber::new(4));
     assert_eq!(next, Ok(SequenceNumber::new(4)));
+}
+
+/// Found on a real cluster with a zone cut off the network, and reproduced on one machine. Once a roll is recorded,
+/// the controller reads the record and tells the old segment's replicas where it was sealed. A writer whose roll is
+/// slow from there on, because its next read went to an etcd member that had fallen silent, still talks to those
+/// replicas, and used to read their answer as another writer's takeover: it stopped with "another writer has taken
+/// the stream" while it was the only writer there was.
+#[tokio::test(start_paused = true)]
+async fn old_segment_sealed_while_the_writer_is_still_rolling_does_not_stop_it() {
+    let cluster = Cluster::start(4).await;
+    let metadata_store = StoreWithASlowRegistry::over(&cluster);
+    let writer = open_writer_over(&cluster, Arc::clone(&metadata_store)).await;
+    cluster.place_standby(&[0, 1, 3]).await;
+    append_numbered(&writer, 3).await;
+    let old_segment = cluster.segment_address(1).await;
+
+    metadata_store.set_registry_answers(false);
+    cluster.nodes()[2].set_reachable(false);
+    settle(WriterSettings::default().replica_failure_timeout + Duration::from_secs(1)).await;
+    // The roll is recorded and the writer waits for the registry. The controller does its part meanwhile.
+    for node_number in [0, 1] {
+        cluster.nodes()[node_number]
+            .replica()
+            .expect("the node is running")
+            .seal(SealRequest {
+                segment: old_segment,
+                sealed_end: SequenceNumber::new(3),
+            })
+            .await
+            .expect("the copy holds the three records and is sealed there");
+    }
+    settle(HEARTBEAT_SETTLE).await;
+    metadata_store.set_registry_answers(true);
+    let next = writer.append(payload("after the roll")).await;
+
+    assert_eq!(next, Ok(SequenceNumber::new(4)));
+}
+
+/// The other half of the rule: a seal that arrives during a roll is no verdict, but a takeover during a roll must
+/// still stop the writer. Here the newer writer claims the stream while the old one waits in its roll, so the old
+/// one learns it from the replicas of the segment it opens.
+#[tokio::test(start_paused = true)]
+async fn takeover_while_the_writer_is_still_rolling_stops_it() {
+    let cluster = Cluster::start(4).await;
+    let metadata_store = StoreWithASlowRegistry::over(&cluster);
+    let writer = open_writer_over(&cluster, Arc::clone(&metadata_store)).await;
+    cluster.place_standby(&[0, 1, 3]).await;
+    append_numbered(&writer, 3).await;
+
+    metadata_store.set_registry_answers(false);
+    cluster.nodes()[2].set_reachable(false);
+    settle(WriterSettings::default().replica_failure_timeout + Duration::from_secs(1)).await;
+    cluster.place_standby(&[0, 1, 3]).await;
+    let _newer_writer = open_writer(&cluster, "compute-2").await;
+    metadata_store.set_registry_answers(true);
+    let too_late = writer.append(payload("after the takeover")).await;
+
+    assert_eq!(too_late, Err(AppendError::Fenced));
 }
 
 #[tokio::test(start_paused = true)]

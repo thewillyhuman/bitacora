@@ -653,6 +653,47 @@ async fn nothing_commits_while_a_roll_is_in_flight() {
     assert_eq!(receivers[2].try_recv(), Err(TryRecvError::Empty));
 }
 
+#[test]
+fn state_is_not_rolling_before_a_roll_begins() {
+    let state = new_state();
+
+    assert!(!state.is_rolling());
+}
+
+#[tokio::test]
+async fn state_is_rolling_from_the_beginning_of_a_roll() {
+    let RollingState {
+        state,
+        receivers: _receivers,
+    } = state_rolling_at_101();
+
+    assert!(state.is_rolling());
+}
+
+#[tokio::test]
+async fn state_is_no_longer_rolling_once_the_roll_completed() {
+    let RollingState {
+        mut state,
+        receivers: _receivers,
+    } = state_rolling_at_101();
+
+    complete_roll_into_segment_4(&mut state);
+
+    assert!(!state.is_rolling());
+}
+
+#[tokio::test]
+async fn state_is_no_longer_rolling_once_the_roll_was_abandoned() {
+    let RollingState {
+        mut state,
+        receivers: _receivers,
+    } = state_rolling_at_101();
+
+    state.abandon_roll();
+
+    assert!(!state.is_rolling());
+}
+
 #[tokio::test]
 async fn abandoned_roll_commits_what_was_acknowledged_meanwhile() {
     let RollingState {

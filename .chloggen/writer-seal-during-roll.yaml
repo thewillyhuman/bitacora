@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: client
+note: "A writer no longer stops with \"another writer has taken the stream\" when nobody took it. Once a roll is recorded, the controller tells the old segment's replicas the seal; a writer whose roll was slow from there on, because its next read went to an etcd member that did not answer, took that seal for a takeover. The Go client was not affected."
+issues: [5]
