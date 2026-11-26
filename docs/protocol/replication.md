@@ -108,7 +108,9 @@ The writer rolls to a new segment when a replica has not answered for a
 while, is too far behind the durable sequence, is full or is draining, or
 when the segment has reached its size or age limit.
 
-1. Stop sending records to the current segment.
+1. Stop committing on the current segment: the durable sequence stays at D
+   until the roll is over. Appends are still accepted, and records may still
+   reach the old replicas, but none above D is reported as committed there.
 2. Write one conditional update to the stream record: "the last segment is
    sealed at the durable sequence D, and a new segment starts at D + 1 on the
    standby replica set". It is conditional on the writer's epoch.
@@ -117,12 +119,16 @@ when the segment has reached its size or age limit.
    numbers, encoded for the new segment.
 
 Step 4 is safe because no record above D was reported as committed and the
-writer still holds them all.
+writer still holds them all. Steps 3 and 4 do not depend on each other. The
+client library does step 4 first, because appends are waiting for it; step 3
+is best effort, and the controller tells a replica that missed it.
 
 ### Losing the stream
 
 A writer that is refused as fenced, or whose conditional update fails
-because the epoch changed, has lost the stream. It fails every pending and
+because the epoch changed, has lost the stream. So has a writer whose open
+segment a replica reports as sealed: only a newer writer's takeover seals a
+segment that its writer has not sealed itself. It fails every pending and
 later append and stops. An append whose outcome it never learned is
 **indeterminate**: the record may or may not be in the stream. The
 application reads the log to find out.
@@ -141,7 +147,9 @@ By default it first waits for the previous writer's lease to lapse.
    local end one below the segment's first sequence number. A copy that
    reports itself damaged does not count.
 5. **Choose the end.** The recovery end is the highest local end among the
-   answers.
+   answers. If an answer carries the segment's sealed end, left by an
+   earlier recovery that was interrupted, that is the recovery end instead: a
+   seal is never changed.
 6. **Repair the tail.** Read the records the shorter responders lack from the
    longest one and append them to the others, under epoch E + 1, until every
    responder holds S up to the recovery end.

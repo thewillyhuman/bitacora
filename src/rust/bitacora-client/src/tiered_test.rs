@@ -8,9 +8,8 @@
 //!
 //! # How the fixtures work
 //!
-//! `store_with_segment` builds the tiered object of a segment of 40 batches of about 10 KiB (several
-//! blocks), sequences 100 to 299, and stores it in an in-memory artifact store. Faults are injected with
-//! the store's own switches.
+//! `store_with_segment` builds the tiered object of a segment of 40 batches of about 10 KiB (several blocks), sequences
+//! 100 to 299, and stores it in an in-memory artifact store. Faults are injected with the store's own switches.
 
 use bitacora_artifact::MemoryArtifactStore;
 use bitacora_segment::format::{Batch, SegmentHeader};
@@ -50,20 +49,30 @@ fn segment_frames() -> Bytes {
             payload.resize(2_000, b'.');
             payloads.push(Bytes::from(payload));
         }
-        let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads).expect("valid batch");
+        let batch = Batch::encode(SEGMENT, SequenceNumber::new(first_sequence), &payloads)
+            .expect("the payloads make a valid batch");
         frames.put_slice(batch.frame());
     }
     frames.freeze()
 }
 
-/// Stores the segment's tiered object and returns the store and the record the metadata store would hold.
-async fn store_with_segment() -> (MemoryArtifactStore, TieredRecord) {
+/// An object store that holds the segment's tiered object, with what the metadata store would record about it.
+struct StoredSegment {
+    /// The object store, whose switches inject faults.
+    artifact_store: MemoryArtifactStore,
+    /// The object's key and size, as the metadata store would hold them.
+    tiered: TieredRecord,
+}
+
+/// Encodes the segment's tiered object and stores it under [`OBJECT_KEY`].
+async fn store_with_segment() -> StoredSegment {
     let segment_header = SegmentHeader {
         address: SEGMENT,
         epoch: Epoch::new(5),
         first_sequence: SequenceNumber::new(FIRST_SEQUENCE),
     };
-    let object = encode_tiered_segment(segment_header, SEALED_END, &segment_frames()).expect("valid segment");
+    let object =
+        encode_tiered_segment(segment_header, SEALED_END, &segment_frames()).expect("the frames make a valid segment");
     let tiered = TieredRecord {
         object_key: OBJECT_KEY.to_owned(),
         size_bytes: object.len() as u64,
@@ -71,8 +80,11 @@ async fn store_with_segment() -> (MemoryArtifactStore, TieredRecord) {
         are_local_copies_dropped: true,
     };
     let artifact_store = MemoryArtifactStore::new();
-    artifact_store.put_object(OBJECT_KEY, object).await.expect("put");
-    (artifact_store, tiered)
+    artifact_store
+        .put_object(OBJECT_KEY, object)
+        .await
+        .expect("the in-memory store accepts the object");
+    StoredSegment { artifact_store, tiered }
 }
 
 /// Opens the stored object as the segment it really is.
@@ -94,35 +106,41 @@ fn sequences_of(records: &[LogRecord]) -> Vec<u64> {
 
 #[tokio::test]
 async fn read_starts_exactly_at_the_requested_sequence() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
     let middle_of_a_batch = SequenceNumber::new(FIRST_SEQUENCE + 7);
 
     let records = segment
         .read_from(&artifact_store, middle_of_a_batch, ONE_BLOCK)
         .await
-        .expect("read");
+        .expect("the blocks are intact");
 
     assert_eq!(records[0].sequence, middle_of_a_batch);
 }
 
 #[tokio::test]
 async fn read_returns_the_payloads_that_were_written() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
 
     let records = segment
         .read_from(&artifact_store, SequenceNumber::new(FIRST_SEQUENCE), ONE_BLOCK)
         .await
-        .expect("read");
+        .expect("the blocks are intact");
 
     assert!(records[0].payload.starts_with(b"record-100."));
 }
 
 #[tokio::test]
 async fn reads_block_by_block_reach_every_record_once() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
     let mut next_sequence = SequenceNumber::new(FIRST_SEQUENCE);
     let mut read_sequences = Vec::new();
     let mut read_count = 0;
@@ -131,9 +149,9 @@ async fn reads_block_by_block_reach_every_record_once() {
         let records = segment
             .read_from(&artifact_store, next_sequence, ONE_BLOCK)
             .await
-            .expect("read");
+            .expect("the blocks are intact");
         read_sequences.extend(sequences_of(&records));
-        next_sequence = records.last().expect("records").sequence.next();
+        next_sequence = records.last().expect("the read returned records").sequence.next();
         read_count += 1;
     }
 
@@ -144,33 +162,37 @@ async fn reads_block_by_block_reach_every_record_once() {
 
 #[tokio::test]
 async fn byte_limit_larger_than_the_segment_reads_it_in_one_request() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
 
     let records = segment
         .read_from(&artifact_store, SequenceNumber::new(FIRST_SEQUENCE), usize::MAX)
         .await
-        .expect("read");
+        .expect("the blocks are intact");
 
-    assert_eq!(records.last().expect("records").sequence, SEALED_END);
+    assert_eq!(records.last().expect("the read returned records").sequence, SEALED_END);
 }
 
 #[tokio::test]
 async fn read_past_the_sealed_end_returns_nothing() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
 
     let records = segment
         .read_from(&artifact_store, SEALED_END.next(), ONE_BLOCK)
         .await
-        .expect("read");
+        .expect("the blocks are intact");
 
     assert_eq!(records, Vec::new());
 }
 
 #[tokio::test]
 async fn object_of_another_segment_is_refused() {
-    let (artifact_store, tiered) = store_with_segment().await;
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
 
     let refused = TieredSegment::open(&artifact_store, OTHER_SEGMENT, SEALED_END, &tiered, REQUEST_TIMEOUT).await;
 
@@ -179,7 +201,7 @@ async fn object_of_another_segment_is_refused() {
 
 #[tokio::test]
 async fn object_sealed_elsewhere_than_the_metadata_says_is_refused() {
-    let (artifact_store, tiered) = store_with_segment().await;
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
 
     let refused = TieredSegment::open(&artifact_store, SEGMENT, SEALED_END.next(), &tiered, REQUEST_TIMEOUT).await;
 
@@ -188,7 +210,10 @@ async fn object_sealed_elsewhere_than_the_metadata_says_is_refused() {
 
 #[tokio::test]
 async fn recorded_size_smaller_than_a_footer_is_refused() {
-    let (artifact_store, mut tiered) = store_with_segment().await;
+    let StoredSegment {
+        artifact_store,
+        mut tiered,
+    } = store_with_segment().await;
     tiered.size_bytes = TIERED_FOOTER_BYTES as u64 - 1;
 
     let refused = open_segment(&artifact_store, &tiered).await;
@@ -198,7 +223,10 @@ async fn recorded_size_smaller_than_a_footer_is_refused() {
 
 #[tokio::test]
 async fn recorded_size_that_misses_the_footer_is_refused() {
-    let (artifact_store, mut tiered) = store_with_segment().await;
+    let StoredSegment {
+        artifact_store,
+        mut tiered,
+    } = store_with_segment().await;
     tiered.size_bytes -= 1;
 
     let refused = open_segment(&artifact_store, &tiered).await;
@@ -208,8 +236,9 @@ async fn recorded_size_that_misses_the_footer_is_refused() {
 
 #[tokio::test]
 async fn damaged_footer_is_refused() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let offset_inside_the_footer = usize::try_from(tiered.size_bytes).expect("small object") - 20;
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let offset_inside_the_footer =
+        usize::try_from(tiered.size_bytes).expect("the object is far smaller than the address space") - 20;
     artifact_store.corrupt_byte(OBJECT_KEY, offset_inside_the_footer, 0x01);
 
     let refused = open_segment(&artifact_store, &tiered).await;
@@ -219,7 +248,7 @@ async fn damaged_footer_is_refused() {
 
 #[tokio::test]
 async fn damaged_index_is_refused() {
-    let (artifact_store, tiered) = store_with_segment().await;
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
     let offset_inside_the_index = segment_frames().len() + 3;
     artifact_store.corrupt_byte(OBJECT_KEY, offset_inside_the_index, 0x01);
 
@@ -230,8 +259,10 @@ async fn damaged_index_is_refused() {
 
 #[tokio::test]
 async fn damaged_batch_is_refused_when_it_is_read() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
     let offset_inside_the_first_batch = 30;
     artifact_store.corrupt_byte(OBJECT_KEY, offset_inside_the_first_batch, 0x01);
 
@@ -244,8 +275,10 @@ async fn damaged_batch_is_refused_when_it_is_read() {
 
 #[tokio::test]
 async fn damage_in_one_block_leaves_the_other_blocks_readable() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
     let offset_inside_the_first_batch = 30;
     artifact_store.corrupt_byte(OBJECT_KEY, offset_inside_the_first_batch, 0x01);
 
@@ -259,8 +292,11 @@ async fn damage_in_one_block_leaves_the_other_blocks_readable() {
 
 #[tokio::test]
 async fn missing_object_is_reported_as_a_store_failure() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    artifact_store.delete_object(OBJECT_KEY).await.expect("delete");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    artifact_store
+        .delete_object(OBJECT_KEY)
+        .await
+        .expect("the in-memory store deletes the object");
 
     let failed = open_segment(&artifact_store, &tiered).await;
 
@@ -275,8 +311,10 @@ async fn missing_object_is_reported_as_a_store_failure() {
 
 #[tokio::test]
 async fn object_store_outage_is_reported_as_a_store_failure() {
-    let (artifact_store, tiered) = store_with_segment().await;
-    let segment = open_segment(&artifact_store, &tiered).await.expect("opens");
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    let segment = open_segment(&artifact_store, &tiered)
+        .await
+        .expect("the object is the expected segment");
     artifact_store.set_unavailable(true);
 
     let failed = segment
@@ -288,12 +326,21 @@ async fn object_store_outage_is_reported_as_a_store_failure() {
 
 #[tokio::test(start_paused = true)]
 async fn object_store_that_never_answers_times_out() {
-    let (artifact_store, tiered) = store_with_segment().await;
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
     artifact_store.set_unresponsive(true);
-    let asked_at = tokio::time::Instant::now();
 
     let failed = open_segment(&artifact_store, &tiered).await;
 
     assert!(matches!(failed, Err(TieredReadError::TimedOut { .. })));
+}
+
+#[tokio::test(start_paused = true)]
+async fn request_to_an_object_store_that_never_answers_is_given_up_after_the_request_timeout() {
+    let StoredSegment { artifact_store, tiered } = store_with_segment().await;
+    artifact_store.set_unresponsive(true);
+    let asked_at = tokio::time::Instant::now();
+
+    let _timed_out = open_segment(&artifact_store, &tiered).await;
+
     assert_eq!(asked_at.elapsed(), REQUEST_TIMEOUT);
 }

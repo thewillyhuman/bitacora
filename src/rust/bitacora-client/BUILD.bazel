@@ -1,9 +1,11 @@
-load("//src/rust:defs.bzl", "bitacora_library")
+load("//src/rust:defs.bzl", "bitacora_integration_test", "bitacora_library")
 
 exports_files(["Cargo.toml"])
 
 bitacora_library(
     name = "bitacora_client",
+    # The examples in the documentation run against the test kit's
+    # in-process cluster. The unit tests do not need it.
     test_deps = ["//src/rust/bitacora-testkit:bitacora_testkit"],
     deps = [
         "//src/rust/bitacora-artifact:bitacora_artifact",
@@ -11,4 +13,58 @@ bitacora_library(
         "//src/rust/bitacora-segment:bitacora_segment",
         "//src/rust/bitacora-types:bitacora_types",
     ],
+)
+
+# The end-to-end tests below use the library only through its public
+# interface, against real replicas on in-memory disks. They share the fixtures
+# in tests/support.
+_END_TO_END_DEPS = [
+    ":bitacora_client",
+    "//src/rust/bitacora-meta:bitacora_meta",
+    "//src/rust/bitacora-testkit:bitacora_testkit",
+    "//src/rust/bitacora-types:bitacora_types",
+]
+
+# The write path and the failover protocol.
+bitacora_integration_test(
+    name = "writer_test",
+    srcs = [
+        "tests/support/mod.rs",
+        "tests/writer_test.rs",
+    ],
+    crate_root = "tests/writer_test.rs",
+    deps = _END_TO_END_DEPS,
+)
+
+# The read path: range reads and followers.
+bitacora_integration_test(
+    name = "reader_test",
+    srcs = [
+        "tests/reader_test.rs",
+        "tests/support/mod.rs",
+    ],
+    crate_root = "tests/reader_test.rs",
+    deps = _END_TO_END_DEPS,
+)
+
+# Reading segments that were uploaded to the object store.
+bitacora_integration_test(
+    name = "tiered_read_test",
+    srcs = [
+        "tests/support/mod.rs",
+        "tests/tiered_read_test.rs",
+    ],
+    crate_root = "tests/tiered_read_test.rs",
+    deps = _END_TO_END_DEPS,
+)
+
+# Stream administration.
+bitacora_integration_test(
+    name = "admin_test",
+    srcs = [
+        "tests/admin_test.rs",
+        "tests/support/mod.rs",
+    ],
+    crate_root = "tests/admin_test.rs",
+    deps = _END_TO_END_DEPS,
 )

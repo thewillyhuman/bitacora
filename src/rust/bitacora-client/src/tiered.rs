@@ -2,11 +2,10 @@
 //!
 //! # Why this file exists
 //!
-//! Some time after a segment is sealed, a replica uploads it to the object store, and later the replicas
-//! drop their copies (design, section 10, "Tiering"). From then on the object is the only place the
-//! segment's records can be read from. A reader must not notice, apart from latency (design, section 6,
-//! "Reading tiered segments"). This file is the part of the read path that fetches records from that
-//! object instead of from a replica.
+//! Some time after a segment is sealed, a replica uploads it to the object store, and later the replicas drop their
+//! copies (design, section 10, "Tiering"). From then on the object is the only place the segment's records can be read
+//! from. A reader must not notice, apart from latency (design, section 6, "Reading tiered segments"). This file is the
+//! part of the read path that fetches records from that object instead of from a replica.
 //!
 //! # What it contains
 //!
@@ -15,14 +14,14 @@
 //!
 //! # How it works
 //!
-//! Opening an object costs two range requests: one for the footer, whose position follows from the object
-//! size recorded in the metadata store, and one for the block index the footer points at. The footer must
-//! describe exactly the segment the metadata store says the object holds; anything else is refused, so a
-//! wrong key or a replaced object cannot feed a reader records of another segment.
+//! Opening an object costs two range requests: one for the footer, whose position follows from the object size recorded
+//! in the metadata store, and one for the block index the footer points at. The footer must describe exactly the
+//! segment the metadata store says the object holds; anything else is refused, so a wrong key or a replaced object
+//! cannot feed a reader records of another segment.
 //!
-//! Reading costs one range request per call: the block that holds the requested sequence number and as
-//! many following blocks as fit in the caller's byte limit. Every batch in the fetched bytes is verified
-//! against its checksum before a record is handed out, exactly as for bytes that come from a replica.
+//! Reading costs one range request per call: the block that holds the requested sequence number and as many following
+//! blocks as fit in the caller's byte limit. Every batch in the fetched bytes is verified against its checksum before a
+//! record is handed out, exactly as for bytes that come from a replica.
 //!
 //! Every request to the object store has a timeout.
 //!
@@ -30,11 +29,13 @@
 //!
 //! - A record is returned only from a batch that passed its checksum for this segment.
 //! - A [`TieredSegment`] never changes after it is opened: tiered objects are immutable.
+//! - This is the reader's fallback, not its common path: it is used for segments the replicas no longer serve. It still
+//!   copies no payload: records are slices of the fetched blocks.
 //!
 //! # See also
 //!
 //! - `bitacora-segment/src/tiered.rs`: the layout of the object.
-//! - `reader.rs`: the cursor that decides when to read from the object store.
+//! - `reader/cursor.rs`: the cursor that decides when to read from the object store.
 
 use std::ops::Range;
 use std::time::Duration;
@@ -121,13 +122,17 @@ impl TieredSegment {
     /// * `tiered` - The object's key and size, as recorded in the metadata store.
     /// * `request_timeout` - How long each request to the object store may take, now and in later reads.
     ///
+    /// # Returns
+    ///
+    /// The opened object, which holds the block index and serves any number of reads without fetching it again.
+    ///
     /// # Errors
     ///
-    /// * [`TieredReadError::StoreFailed`] or [`TieredReadError::TimedOut`] if the object store fails or is
-    ///   too slow. Trying again later may work.
+    /// * [`TieredReadError::StoreFailed`] or [`TieredReadError::TimedOut`] if the object store fails or is too slow.
+    ///   Trying again later may work.
     /// * [`TieredReadError::Damaged`] if the footer or the index is damaged.
-    /// * [`TieredReadError::WrongSegment`] if the object is another segment, ends elsewhere, or has another
-    ///   size than recorded.
+    /// * [`TieredReadError::WrongSegment`] if the object is another segment, ends elsewhere, or has another size than
+    ///   recorded.
     pub(crate) async fn open(
         artifact_store: &dyn ArtifactStore,
         address: SegmentAddress,
@@ -135,37 +140,13 @@ impl TieredSegment {
         tiered: &TieredRecord,
         request_timeout: Duration,
     ) -> Result<Self, TieredReadError> {
+        let footer = fetch_expected_footer(artifact_store, address, sealed_end, tiered, request_timeout).await?;
         let object_key = tiered.object_key.clone();
-        let wrong_segment = || TieredReadError::WrongSegment {
-            object_key: object_key.clone(),
-            expected_segment: address,
-            expected_sealed_end: sealed_end,
-        };
-        let damaged = |reason| TieredReadError::Damaged {
-            object_key: object_key.clone(),
-            reason,
-        };
-
-        let Some(footer_start) = tiered.size_bytes.checked_sub(TIERED_FOOTER_BYTES as u64) else {
-            return Err(wrong_segment());
-        };
-        let footer_bytes = fetch(
-            artifact_store,
-            &object_key,
-            footer_start..tiered.size_bytes,
-            request_timeout,
-        )
-        .await?;
-        let footer = TieredFooter::decode(&footer_bytes).map_err(damaged)?;
-        let is_the_expected_segment = footer.segment.address == address
-            && footer.sealed_end == sealed_end
-            && footer.object_bytes() == tiered.size_bytes;
-        if !is_the_expected_segment {
-            return Err(wrong_segment());
-        }
-
         let index_bytes = fetch(artifact_store, &object_key, footer.index_range(), request_timeout).await?;
-        let index = TieredIndex::decode(&footer, &index_bytes).map_err(damaged)?;
+        let index = match TieredIndex::decode(&footer, &index_bytes) {
+            Ok(index) => index,
+            Err(reason) => return Err(TieredReadError::Damaged { object_key, reason }),
+        };
         Ok(Self {
             object_key,
             address,
@@ -176,8 +157,8 @@ impl TieredSegment {
 
     /// Reads records of the segment starting at `from_sequence`.
     ///
-    /// Makes one range request for the block that holds `from_sequence` and as many of the following
-    /// blocks as fit in `max_bytes`, and verifies every batch in them.
+    /// Makes one range request for the block that holds `from_sequence` and as many of the following blocks as fit in
+    /// `max_bytes`, and verifies every batch in them.
     ///
     /// # Arguments
     ///
@@ -187,13 +168,12 @@ impl TieredSegment {
     ///
     /// # Returns
     ///
-    /// The records from `from_sequence` to the end of the fetched blocks, in order. Empty if the segment
-    /// holds nothing at or after `from_sequence`.
+    /// The records from `from_sequence` to the end of the fetched blocks, in order. Empty if the segment holds nothing
+    /// at or after `from_sequence`.
     ///
     /// # Errors
     ///
-    /// * [`TieredReadError::StoreFailed`] or [`TieredReadError::TimedOut`] if the object store fails or is
-    ///   too slow.
+    /// * [`TieredReadError::StoreFailed`] or [`TieredReadError::TimedOut`] if the object store fails or is too slow.
     /// * [`TieredReadError::InvalidBatches`] if a fetched batch fails its checksum.
     pub(crate) async fn read_from(
         &self,
@@ -225,6 +205,46 @@ impl TieredSegment {
         }
         Ok(records)
     }
+}
+
+/// Fetches the footer of a tiered object and checks that it describes exactly the segment the metadata store says the
+/// object holds: its address, its sealed end, and the size of the object.
+///
+/// The footer's position follows from the recorded size, so an object recorded as smaller than a footer is refused
+/// without a request.
+async fn fetch_expected_footer(
+    artifact_store: &dyn ArtifactStore,
+    address: SegmentAddress,
+    sealed_end: SequenceNumber,
+    tiered: &TieredRecord,
+    request_timeout: Duration,
+) -> Result<TieredFooter, TieredReadError> {
+    let wrong_segment = || TieredReadError::WrongSegment {
+        object_key: tiered.object_key.clone(),
+        expected_segment: address,
+        expected_sealed_end: sealed_end,
+    };
+    let Some(footer_start) = tiered.size_bytes.checked_sub(TIERED_FOOTER_BYTES as u64) else {
+        return Err(wrong_segment());
+    };
+    let footer_range = footer_start..tiered.size_bytes;
+    let footer_bytes = fetch(artifact_store, &tiered.object_key, footer_range, request_timeout).await?;
+    let footer = match TieredFooter::decode(&footer_bytes) {
+        Ok(footer) => footer,
+        Err(reason) => {
+            return Err(TieredReadError::Damaged {
+                object_key: tiered.object_key.clone(),
+                reason,
+            });
+        }
+    };
+    let is_the_expected_segment = footer.segment.address == address
+        && footer.sealed_end == sealed_end
+        && footer.object_bytes() == tiered.size_bytes;
+    if !is_the_expected_segment {
+        return Err(wrong_segment());
+    }
+    Ok(footer)
 }
 
 /// Fetches one byte range of an object, waiting no longer than `request_timeout`.
