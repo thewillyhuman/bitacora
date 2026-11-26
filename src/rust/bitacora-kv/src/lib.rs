@@ -28,7 +28,11 @@
 //!
 //! The `README.md` of this crate, and `docs/decisions/0004-materializer-framework.md` for how reads are
 //! made linearizable.
+
+#![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 mod pages;
 mod record;
