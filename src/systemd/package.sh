@@ -44,7 +44,8 @@ done
 file_list="${staging}.files"
 trap 'rm -rf "${staging}" "${file_list}"' EXIT
 (cd "${staging}" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) >"${file_list}"
-if tar --version 2>/dev/null | grep -q "GNU tar"; then
+tar_version="$(tar --version 2>/dev/null || true)"
+if [[ "${tar_version}" == *"GNU tar"* ]]; then
     root_owner=(--owner=0 --group=0 --numeric-owner)
 else
     root_owner=(--uid 0 --gid 0 --uname root --gname root)
