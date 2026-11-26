@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "The container images of every tagged version are published at ghcr.io/thewillyhuman/bitacora, which is now the default image.repository of the chart. A tag vX.Y.Z-rc.N is a release candidate: it gets the images and no release."
+issues: [5]

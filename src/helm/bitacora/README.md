@@ -18,9 +18,11 @@ place, repair and tier it.
 
 The chart deliberately runs bitacora and nothing else.
 
-1. **The images, in a registry your cluster pulls from.** None is published. Build
-   `bita-replica`, `bita-controller` and `bita` with `hack/build_images.sh <version>`, push them, and set
-   `image.repository` to what comes before the image name.
+1. **The images, in a registry your cluster pulls from.** Those of every tagged version, release
+   candidates included, are published at `ghcr.io/thewillyhuman/bitacora`, which is the default of
+   `image.repository`; set `image.tag` to the version, such as `0.1.0-rc.1`. For a build of your own, run
+   `hack/build_images.sh <version>`, push the images, and set `image.repository` to what comes before the
+   image name.
 2. **An etcd cluster** (`etcd.endpoints`). It holds the metadata: which segments make up each stream and
    which replicas exist. Give it three or five members across zones and its own backups. Two releases
    that share an etcd need different `etcd.keyPrefix`.

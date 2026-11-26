@@ -10,10 +10,11 @@ fullnameOverride: ""
 
 image:
   # What comes before the image name. The chart pulls
-  # `<repository>/bita-replica` and `<repository>/bita-controller`. No public
-  # registry has these images: build them with hack/build_images.sh and push
-  # them to the registry your cluster pulls from.
-  repository: bitacora
+  # `<repository>/bita-replica` and `<repository>/bita-controller`. The
+  # default is where the images of every tagged version are published. For a
+  # build of your own, use hack/build_images.sh, push the images to the
+  # registry your cluster pulls from, and name it here.
+  repository: ghcr.io/thewillyhuman/bitacora
   # The tag of both images. Empty means the version of the chart.
   tag: ""
   # When the kubelet pulls an image: IfNotPresent, Always or Never.

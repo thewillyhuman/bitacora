@@ -269,10 +269,10 @@ case_defaults() {
     check_always
     chart_version="$(sed -n -E 's/^appVersion: "(.*)"$/\1/p' "${CHART}")"
     expect replica-statefulset.yaml "replicas: 3" "podManagementPolicy: Parallel" "storage: 100Gi" \
-        "image: \"bitacora/bita-replica:${chart_version}\"" \
+        "image: \"ghcr.io/thewillyhuman/bitacora/bita-replica:${chart_version}\"" \
         "topologyKey: topology.kubernetes.io/zone" "whenUnsatisfiable: DoNotSchedule" \
         "fieldPath: metadata.labels['topology.kubernetes.io/zone']" "fieldPath: spec.nodeName"
-    expect controller-deployment.yaml "replicas: 2" "image: \"bitacora/bita-controller:${chart_version}\""
+    expect controller-deployment.yaml "replicas: 2" "image: \"ghcr.io/thewillyhuman/bitacora/bita-controller:${chart_version}\""
     expect replica-configmap.yaml 'failure_domains = ["${BITA_ZONE}", "${BITA_NODE_NAME}"]' \
         'etcd_endpoints = ["http://etcd:2379"]'
     expect_absent replica-configmap.yaml "object_store"

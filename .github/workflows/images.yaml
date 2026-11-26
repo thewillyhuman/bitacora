@@ -1,0 +1,55 @@
+# Builds the container images of a tagged version and pushes them to the
+# GitHub container registry, where a cluster pulls them from:
+#
+#   ghcr.io/<owner>/<repository>/<image>:<version>
+#
+# A tag vX.Y.Z is a release, made by hack/create_release.sh. A tag
+# vX.Y.Z-rc.N is a release candidate: images to try out on a cluster before
+# X.Y.Z is released. It is pushed by hand, and nothing but the images comes of
+# it: no release, no release notes, no changelog section.
+name: images
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    name: build and push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      # The images are a release build of everything, inside the builder of
+      # the container runtime: it needs more room than the runner starts
+      # with. See ci.yaml for what each of these directories costs and gives.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/.ghcup /usr/share/dotnet
+          df -h /
+      - name: Log in to the registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "${REGISTRY_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+      # The script refuses a version it does not know the form of, so a tag
+      # that slipped through the filter above builds nothing.
+      - name: Build the images
+        run: |
+          BITA_IMAGE_REPOSITORY="ghcr.io/${GITHUB_REPOSITORY,,}" BITA_IMAGE_PLATFORM=linux/amd64 \
+              hack/build_images.sh "${GITHUB_REF_NAME#v}" >images.txt
+          cat images.txt
+      - name: Push the images
+        run: |
+          while read -r image; do
+            docker push "${image}"
+          done <images.txt
+      - name: Report disk usage
+        if: always()
+        run: df -h /

@@ -131,6 +131,11 @@ the version, tags, pushes and publishes the release with those notes. The
 release commit is tagged twice: `vX.Y.Z`, and `src/go/vX.Y.Z` for the Go
 module.
 
+Every tag `vX.Y.Z` also gets its container images, published at
+`ghcr.io/thewillyhuman/bitacora`. To try a build on a cluster before it is
+released, push a tag `vX.Y.Z-rc.N` by hand: a release candidate gets the
+images and nothing else, no release and no notes.
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).

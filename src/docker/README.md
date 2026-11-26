@@ -24,8 +24,12 @@ hack/build_images.sh 0.1.0
 builds `bitacora/bita-replica:0.1.0`, `bitacora/bita-controller:0.1.0`, `bitacora/bita:0.1.0` and
 `bitacora/bita-bench:0.1.0` for the machine's platform and prints the four tags. `BITA_IMAGE_REPOSITORY` changes what comes before the
 image name, `BITA_IMAGE_PLATFORM` the platform (`linux/amd64` or `linux/arm64`), and
-`BITA_CONTAINER_TOOL` the program that builds. Nothing is pushed, and no registry has these images
-yet: push the tags to the registry your cluster pulls from.
+`BITA_CONTAINER_TOOL` the program that builds. Nothing is pushed: push the tags to the registry your
+cluster pulls from.
+
+The images of every tagged version are built this way by `.github/workflows/images.yaml`, for
+`linux/amd64`, and published as `ghcr.io/thewillyhuman/bitacora/<image>:<version>`. That covers releases
+(`vX.Y.Z`) and release candidates (`vX.Y.Z-rc.N`).
 
 The first build downloads the Rust toolchain and compiles everything: about four minutes on a recent
 laptop. Bazel's caches live in a BuildKit cache mount, so later builds compile only what changed. The
