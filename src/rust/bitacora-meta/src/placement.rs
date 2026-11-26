@@ -12,6 +12,8 @@
 //!
 //! - [`choose_replica_set`]: the replicas for a new segment.
 //! - [`choose_additional_replica`]: one more replica for a segment that keeps some of its copies.
+//! - [`spread_of`]: how widely a replica set is spread, to tell whether a set chosen earlier is still as good as one
+//!   chosen now.
 //! - [`PlacementPolicy`]: which replicas may receive new segments at all.
 //! - [`PlacementError`]: why no choice could be made.
 //!
@@ -382,6 +384,76 @@ fn shared_domains(candidate: &ReplicaRecord, chosen: &[&ReplicaRecord]) -> Vec<u
         shared_per_level.push(sharing_replicas);
     }
     shared_per_level
+}
+
+/// Says how widely a replica set is spread over failure domains, so that two sets can be compared.
+///
+/// Counts, for each level of failure domain, how many different domains the replicas are in. A replica with fewer
+/// labels than a level is counted as a domain of its own at that level, like a replica without labels everywhere.
+///
+/// # Arguments
+///
+/// * `replicas` - The registrations of the replicas of the set.
+///
+/// # Returns
+///
+/// One number per level, widest first: with zones and hosts, how many zones and how many hosts. A list that compares
+/// greater is a wider spread, the widest level deciding first: three zones beat two, and with as many zones, three
+/// hosts beat two. Empty for a set without replicas.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_meta::{RECORD_SCHEMA_VERSION, ReplicaRecord, spread_of};
+/// use bitacora_types::{ReplicaId, Timestamp};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let replica_in = |name: &str, zone: &str| -> Result<ReplicaRecord, Box<dyn std::error::Error>> {
+///     Ok(ReplicaRecord {
+///         schema_version: RECORD_SCHEMA_VERSION,
+///         replica_id: ReplicaId::new(name)?,
+///         address: format!("{name}:7000"),
+///         failure_domains: vec![zone.to_owned(), format!("host-{name}")],
+///         capacity_bytes: 1_000,
+///         free_bytes: 900,
+///         is_draining: false,
+///         heartbeat_at: Timestamp::from_unix_millis(0),
+///     })
+/// };
+/// let first = replica_in("first", "zone-a")?;
+/// let second = replica_in("second", "zone-a")?;
+/// let third = replica_in("third", "zone-c")?;
+///
+/// // Two zones, three hosts.
+/// assert_eq!(spread_of(&[&first, &second, &third]), [2, 3]);
+/// # Ok(())
+/// # }
+/// ```
+#[must_use]
+pub fn spread_of(replicas: &[&ReplicaRecord]) -> Vec<usize> {
+    let mut level_count = 0;
+    for replica in replicas {
+        level_count = level_count.max(replica.failure_domains.len());
+    }
+    // A set without labels still has one level: every replica is a domain of its own.
+    if !replicas.is_empty() {
+        level_count = level_count.max(1);
+    }
+    let mut domains_per_level = Vec::with_capacity(level_count);
+    for depth in 1..=level_count {
+        let mut labelled_domains: BTreeSet<&[String]> = BTreeSet::new();
+        let mut replicas_of_their_own = 0;
+        for replica in replicas {
+            match replica.failure_domains.get(..depth) {
+                Some(domain) => {
+                    labelled_domains.insert(domain);
+                }
+                None => replicas_of_their_own += 1,
+            }
+        }
+        domains_per_level.push(labelled_domains.len() + replicas_of_their_own);
+    }
+    domains_per_level
 }
 
 /// Checks that no two of the placed replicas share their narrowest failure domain.

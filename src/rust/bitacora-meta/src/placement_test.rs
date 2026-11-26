@@ -345,3 +345,68 @@ fn default_policy_is_the_one_of_the_design() {
     assert_eq!(policy.liveness_window, Duration::from_secs(15));
     assert_eq!(policy.refuse_at_used_percent, 85);
 }
+
+/// The spread of the replicas with the given names and failure domains.
+fn spread(replicas: &[ReplicaRecord]) -> Vec<usize> {
+    let mut borrowed = Vec::new();
+    for replica in replicas {
+        borrowed.push(replica);
+    }
+    spread_of(&borrowed)
+}
+
+#[test]
+fn spread_counts_the_domains_of_each_level_widest_first() {
+    let replicas = [
+        replica("a1", &["zone-a", "host-a1"]),
+        replica("a2", &["zone-a", "host-a2"]),
+        replica("c1", &["zone-c", "host-c1"]),
+    ];
+
+    assert_eq!(spread(&replicas), [2, 3]);
+}
+
+/// The comparison a controller makes when a zone has come back: the set placed without it is the narrower one.
+#[test]
+fn set_in_three_zones_is_spread_wider_than_one_in_two() {
+    let in_two_zones = [
+        replica("a1", &["zone-a", "host-a1"]),
+        replica("a2", &["zone-a", "host-a2"]),
+        replica("c1", &["zone-c", "host-c1"]),
+    ];
+    let in_three_zones = [
+        replica("a1", &["zone-a", "host-a1"]),
+        replica("b1", &["zone-b", "host-b1"]),
+        replica("c1", &["zone-c", "host-c1"]),
+    ];
+
+    assert!(spread(&in_three_zones) > spread(&in_two_zones));
+}
+
+#[test]
+fn sets_in_the_same_zones_on_different_hosts_are_spread_equally() {
+    let on_the_first_hosts = [
+        replica("a1", &["zone-a", "host-a1"]),
+        replica("b1", &["zone-b", "host-b1"]),
+        replica("c1", &["zone-c", "host-c1"]),
+    ];
+    let on_the_second_hosts = [
+        replica("a2", &["zone-a", "host-a2"]),
+        replica("b2", &["zone-b", "host-b2"]),
+        replica("c2", &["zone-c", "host-c2"]),
+    ];
+
+    assert_eq!(spread(&on_the_first_hosts), spread(&on_the_second_hosts));
+}
+
+#[test]
+fn unlabelled_replicas_are_spread_as_one_domain_each() {
+    let replicas = [replica("one", &[]), replica("two", &[]), replica("three", &[])];
+
+    assert_eq!(spread(&replicas), [3]);
+}
+
+#[test]
+fn no_replicas_have_no_spread() {
+    assert_eq!(spread(&[]), Vec::<usize>::new());
+}

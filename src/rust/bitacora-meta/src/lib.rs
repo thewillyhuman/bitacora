@@ -63,7 +63,7 @@ pub use key_value::{
 };
 pub use keys::MAX_NAME_LENGTH_BYTES;
 pub use memory_store::MemoryKeyValueStore;
-pub use placement::{PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set};
+pub use placement::{PlacementError, PlacementPolicy, choose_additional_replica, choose_replica_set, spread_of};
 pub use records::{
     CheckpointRecord, CopyRecord, CopyState, DeletedStreamRecord, LeaderRecord, RECORD_SCHEMA_VERSION, ReplicaRecord,
     RetentionPolicy, SealRecord, SegmentRecord, StreamRecord, TieredRecord, WriterLease,

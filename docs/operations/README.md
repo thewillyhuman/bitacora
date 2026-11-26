@@ -121,8 +121,17 @@ two, the second one stops every stream that had its open segment on both.
 Controllers first, then replicas one failure domain at a time as above, then the applications. On
 Kubernetes `helm upgrade` restarts one replica at a time and waits for each to be ready.
 
-This order is the design's. No test of this repository upgrades a cluster from one version to another
-yet, because there is only one version: read the changelog of a release before you apply it.
+This order is the design's. No test of this repository upgrades a cluster from one version to another:
+it was done by hand once, between two release candidates on a five-replica cluster, while a writer
+appended; the writer never stopped and no record was lost. Read the changelog of a release before you
+apply it.
+
+A segment that is opened while a whole failure domain is away is placed in the domains that are left,
+with two copies in one of them, and keeps that placement: the controller does not move the copies of a
+segment to widen its spread. It does replace the standby of a stream, the replica set of its next
+segment, as soon as a wider spread is possible, so only the segments opened during the outage are
+affected. A zone with a single replica is away whenever that replica restarts: run at least two
+replicas per zone if a restart must not narrow any segment.
 
 Do not skip a release that the changelog marks as raising the schema version of the metadata records. A
 program refuses a record of a version it does not read (`cannot be decoded: schema version … is newer than

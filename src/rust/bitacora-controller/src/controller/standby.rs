@@ -11,15 +11,25 @@
 //! # What it contains
 //!
 //! - `Controller::ensure_standby`: the step, for one stream, and `Controller::choose_standby`, which asks placement.
-//! - `is_standby_usable`, `can_take_segments`: the rule that decides whether the standby a stream has may stay.
+//! - `is_standby_usable`, `can_take_segments`: the rule that decides whether the standby a stream has can be used.
+//! - `is_spread_wider`: the rule that decides whether a set chosen now would be better than the standby.
 //!
 //! # How it works
 //!
-//! A standby may stay if it names as many replicas as the stream's replication asks for, and each of them could
+//! A standby can be used if it names as many replicas as the stream's replication asks for, and each of them could
 //! take a new segment right now: registered, alive within the liveness window, not draining, and not too full.
-//! Otherwise the step asks placement for a fresh set and writes it, on the condition that the standby in the record
-//! is still the one the step looked at. If a writer consumed the standby in between, or another controller placed
-//! one, the write changes nothing, and the next pass looks again.
+//!
+//! A standby that can be used may still not be the one to keep. A set is chosen from the replicas that are eligible
+//! at that moment, so one placed while a zone was away covers the zones that were left, and two of its replicas
+//! share a zone. When the zone returns, nothing about that standby is wrong, and the stream's next segment would have
+//! two of its three copies in one zone: a write quorum that one zone can take away. So every pass asks placement
+//! what it would choose now, and replaces a standby that is spread over fewer failure domains than that. A standby
+//! that is spread as widely stays, whichever replicas placement would name: only a wider spread is a reason to
+//! change it.
+//!
+//! In both cases the step writes the fresh set on the condition that the standby in the record is still the one the
+//! step looked at. If a writer consumed the standby in between, or another controller placed one, the write changes
+//! nothing, and the next pass looks again.
 //!
 //! When too few replicas are eligible, no standby is placed. That is not an error of the pass: it is logged, the
 //! stream keeps the standby it has or none, and the next pass tries again.
@@ -28,6 +38,10 @@
 //!
 //! - A standby is only ever replaced as a whole, and only if it is still the one that was judged.
 //! - Placement is a pure function of the registry as surveyed; this step adds no randomness of its own.
+//! - A standby is never replaced by a set of the same spread, so two passes over the same registry agree and the
+//!   standby does not move back and forth.
+//! - Placement is asked once per stream and pass. That is a few comparisons per registered replica; its cost on a
+//!   cluster with many thousands of streams was not measured.
 //!
 //! # See also
 //!
@@ -37,7 +51,7 @@
 
 use std::collections::BTreeSet;
 
-use bitacora_meta::{MetaError, PlacementPolicy, ReplicaRecord, StreamRecord, choose_replica_set};
+use bitacora_meta::{MetaError, PlacementPolicy, ReplicaRecord, StreamRecord, choose_replica_set, spread_of};
 use bitacora_types::{ReplicaId, Timestamp};
 
 use super::{Controller, PassReport, Survey};
@@ -45,8 +59,9 @@ use super::{Controller, PassReport, Survey};
 impl Controller {
     /// Keeps one standby replica set placed for `stream`, so that a roll never waits on placement.
     ///
-    /// Does nothing if the stream's standby is usable. Otherwise chooses a new one from the surveyed registry and
-    /// writes it, unless the standby changed since the pass listed the stream.
+    /// Does nothing if the stream's standby can be used and is spread as widely as a set chosen now would be.
+    /// Otherwise writes the set placement chooses from the surveyed registry, unless the standby changed since the
+    /// pass listed the stream.
     ///
     /// # Arguments
     ///
@@ -64,12 +79,13 @@ impl Controller {
         survey: &Survey,
         report: &mut PassReport,
     ) -> Result<(), MetaError> {
-        if is_standby_usable(stream, survey, self.settings.placement) {
-            return Ok(());
-        }
-        let Some(chosen) = self.choose_standby(stream, survey) else {
+        let is_usable = is_standby_usable(stream, survey, self.settings.placement);
+        let Some(chosen) = self.choose_standby(stream, survey, is_usable) else {
             return Ok(());
         };
+        if is_usable && !is_spread_wider(&chosen, stream.standby_replicas.as_deref().unwrap_or_default(), survey) {
+            return Ok(());
+        }
         let (updated, ()) = self
             .metadata
             .update_stream(&stream.name, |record| {
@@ -90,10 +106,22 @@ impl Controller {
 
     /// Asks placement for a replica set for the next segment of `stream`, from the surveyed registry.
     ///
+    /// # Arguments
+    ///
+    /// * `stream` - The stream to place a segment for.
+    /// * `survey` - The registry of replicas as surveyed, and the time of the pass.
+    /// * `has_usable_standby` - Whether the stream has a standby it can roll to. A stream that has one loses nothing
+    ///   when placement fails, so nothing is logged for it.
+    ///
     /// # Returns
     ///
-    /// The chosen replicas, or `None` if too few replicas are eligible, which is logged.
-    fn choose_standby(&self, stream: &StreamRecord, survey: &Survey) -> Option<Vec<ReplicaId>> {
+    /// The chosen replicas, or `None` if too few replicas are eligible.
+    fn choose_standby(
+        &self,
+        stream: &StreamRecord,
+        survey: &Survey,
+        has_usable_standby: bool,
+    ) -> Option<Vec<ReplicaId>> {
         let no_replica_excluded = BTreeSet::new();
         let placed = choose_replica_set(
             &survey.registered_replicas,
@@ -105,7 +133,9 @@ impl Controller {
         match placed {
             Ok(chosen) => Some(chosen),
             Err(placement_error) => {
-                tracing::warn!(stream = %stream.name, %placement_error, "cannot place a standby");
+                if !has_usable_standby {
+                    tracing::warn!(stream = %stream.name, %placement_error, "cannot place a standby");
+                }
                 None
             }
         }
@@ -135,6 +165,33 @@ fn is_standby_usable(stream: &StreamRecord, survey: &Survey, policy: PlacementPo
     standby
         .iter()
         .all(|replica_id| can_take_segments(survey.registration(replica_id), survey.now, policy))
+}
+
+/// Whether the replica set `chosen` is spread over more failure domains than the set `standby`.
+///
+/// # Arguments
+///
+/// * `chosen` - What placement chooses from the surveyed registry.
+/// * `standby` - The standby a stream has.
+/// * `survey` - The registry both sets are looked up in. A replica that is not registered counts for nothing.
+///
+/// # Returns
+///
+/// `true` only if `chosen` covers more domains at some level and no fewer at every wider one; sets of the same
+/// spread are not better than each other.
+fn is_spread_wider(chosen: &[ReplicaId], standby: &[ReplicaId], survey: &Survey) -> bool {
+    spread_of(&registrations_of(chosen, survey)) > spread_of(&registrations_of(standby, survey))
+}
+
+/// The registrations of the replicas of a set that are registered.
+fn registrations_of<'survey>(replica_ids: &[ReplicaId], survey: &'survey Survey) -> Vec<&'survey ReplicaRecord> {
+    let mut registrations = Vec::with_capacity(replica_ids.len());
+    for replica_id in replica_ids {
+        if let Some(registration) = survey.registration(replica_id) {
+            registrations.push(registration);
+        }
+    }
+    registrations
 }
 
 /// Whether a replica could be given a new segment right now.

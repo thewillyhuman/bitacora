@@ -6,6 +6,8 @@
 //! - The step against a cluster: a stream without a standby gets one; a usable standby is left alone; a consumed
 //!   standby is placed again; a standby that names a dead replica is replaced; too few replicas place nothing and
 //!   are not an error.
+//! - Spread: a standby that was placed while a zone was down is replaced once the zone is back, and a standby that
+//!   is as widely spread as the cluster allows is left alone.
 //! - The reason for all of it: a writer keeps rolling while a controller runs.
 //!
 //! # How the fixtures work
@@ -18,7 +20,8 @@ use std::time::Duration;
 
 use bitacora_client::{TakeoverPolicy, WriterSettings};
 use bitacora_meta::RECORD_SCHEMA_VERSION;
-use bitacora_testkit::Cluster;
+use bitacora_replica::ReplicaSettings;
+use bitacora_testkit::{Cluster, FailureDomainLayout};
 use bytes::Bytes;
 
 use super::super::test_support::{
@@ -152,6 +155,64 @@ async fn standby_naming_a_dead_replica_is_replaced() {
         stream(&cluster).await.standby_replicas,
         Some(cluster.replica_ids(&[0, 2, 3]))
     );
+}
+
+/// Four nodes in three zones: nodes 0 and 3 share zone 0, node 1 is all of zone 1, node 2 all of zone 2.
+async fn cluster_with_one_node_in_zone_1() -> Cluster {
+    let three_zones = FailureDomainLayout::HostsInZones { zone_count: 3 };
+    Cluster::start_with(4, ReplicaSettings::default(), three_zones).await
+}
+
+/// What a rolling upgrade does to a cluster in which one zone has a single replica: the standby is placed while
+/// that replica is away, in two zones, and nothing made it right again when the replica returned. The next segment
+/// of the stream then had two of its three copies in one zone.
+#[tokio::test(start_paused = true)]
+async fn standby_placed_while_a_zone_was_down_is_replaced_when_the_zone_is_back() {
+    let cluster = cluster_with_one_node_in_zone_1().await;
+    create_stream(&cluster).await;
+    cluster.nodes()[1].crash();
+    let longer_than_the_liveness_window = Duration::from_secs(30);
+    tokio::time::advance(longer_than_the_liveness_window).await;
+    renew_registrations(&cluster).await;
+    run_pass(&cluster).await;
+    cluster.nodes()[1].restart().await;
+    renew_registrations(&cluster).await;
+
+    run_pass(&cluster).await;
+
+    let standby = stream(&cluster).await.standby_replicas.expect("a standby is placed");
+    let node_of_zone_1 = cluster.replica_ids(&[1])[0].clone();
+    assert!(standby.contains(&node_of_zone_1), "{standby:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn standby_placed_while_a_zone_was_down_spans_the_zones_that_were_up() {
+    let cluster = cluster_with_one_node_in_zone_1().await;
+    create_stream(&cluster).await;
+    cluster.nodes()[1].crash();
+    let longer_than_the_liveness_window = Duration::from_secs(30);
+    tokio::time::advance(longer_than_the_liveness_window).await;
+    renew_registrations(&cluster).await;
+
+    run_pass(&cluster).await;
+
+    assert_eq!(
+        stream(&cluster).await.standby_replicas,
+        Some(cluster.replica_ids(&[0, 2, 3]))
+    );
+}
+
+/// The standby is replaced for a wider spread only: a set that is spread as widely as the cluster allows stays,
+/// pass after pass.
+#[tokio::test(start_paused = true)]
+async fn standby_spread_over_every_zone_is_left_alone() {
+    let cluster = cluster_with_one_node_in_zone_1().await;
+    create_stream(&cluster).await;
+    run_pass(&cluster).await;
+
+    let second_pass = run_pass(&cluster).await;
+
+    assert_eq!(second_pass.standbys_placed, 0);
 }
 
 #[tokio::test(start_paused = true)]

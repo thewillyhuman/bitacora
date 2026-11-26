@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: controller
+note: "The controller replaces a stream's standby replica set when a set chosen now would span more failure domains. A standby placed while a zone was away used to stay as it was after the zone returned, so the stream's next segment had two of its three copies in one zone."
+issues: [3]
