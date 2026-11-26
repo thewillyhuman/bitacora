@@ -7,6 +7,8 @@
 //! - Refreshing: a later checkpoint is seen once the reader looks again.
 //! - Blocks that are merged and deleted under a reader.
 //! - Streams a reader cannot be opened on.
+//! - A checkpoint a reader cannot read: the metadata store is down, the manifest is damaged or stays
+//!   gone. The reader says which, and keeps what it knew.
 //! - A reader writes nothing.
 //!
 //! # How the fixtures work
@@ -50,6 +52,40 @@ async fn append_and_checkpoint<P: BlockPolicy>(store: &MetricsStore<P>, samples:
 /// Everything the reader answers.
 async fn everything(reader: &mut BlockReader) -> QueryResult {
     reader.query(&Selector::all(), TimeRange::ALL).await.expect("an answer")
+}
+
+/// A reader on a stream whose store committed one checkpoint and was then closed, so that nothing commits
+/// another one behind the test's back.
+async fn reader_after_the_only_checkpoint(harness: &Harness) -> BlockReader {
+    let store = harness.open().await;
+    append_and_checkpoint(&store, &batch("api", &[10, 20])).await;
+    let reader = open_reader(harness).await;
+    drop(store);
+    reader
+}
+
+/// The key, in the object store, of the manifest the store last committed.
+async fn committed_manifest_object_key(harness: &Harness) -> String {
+    let stream_id = harness.stream_id().await;
+    let committed = harness
+        .cluster
+        .metadata()
+        .get_checkpoint(stream_id, METRICS_MATERIALIZER)
+        .await
+        .expect("a metrics store was prepared on the stream");
+    let manifest_key = committed.manifest.expect("a checkpoint was committed");
+    let prefix = bitacora_materializer::namespace_prefix(stream_id, METRICS_MATERIALIZER);
+    format!("{prefix}{manifest_key}")
+}
+
+/// Deletes the committed manifest from the object store, as nothing in the system ever does.
+async fn delete_the_committed_manifest(harness: &Harness) {
+    let manifest_object_key = committed_manifest_object_key(harness).await;
+    harness
+        .artifact_store
+        .delete_object(&manifest_object_key)
+        .await
+        .expect("the manifest is deleted behind the reader's back");
 }
 
 #[tokio::test(start_paused = true)]
@@ -232,6 +268,75 @@ async fn reader_does_not_open_on_a_stream_without_a_metrics_store() {
     .await;
 
     assert!(matches!(opened, Err(BlockReaderError::Metadata(_))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_reports_a_metadata_store_that_is_down() {
+    let harness = Harness::start().await;
+    let mut reader = reader_after_the_only_checkpoint(&harness).await;
+    harness.cluster.key_value_store().set_unavailable(true);
+
+    let refreshed = reader.refresh().await;
+
+    assert!(matches!(refreshed, Err(BlockReaderError::Metadata(_))), "{refreshed:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_reports_a_damaged_manifest() {
+    let harness = Harness::start().await;
+    let mut reader = reader_after_the_only_checkpoint(&harness).await;
+    let manifest_object_key = committed_manifest_object_key(&harness).await;
+    harness.artifact_store.corrupt_byte(&manifest_object_key, 14, 0x01);
+
+    let refreshed = reader.refresh().await;
+
+    assert!(
+        matches!(
+            refreshed,
+            Err(BlockReaderError::Block(MaterializerError::InvalidManifest { .. }))
+        ),
+        "{refreshed:?}"
+    );
+}
+
+/// The store deletes a manifest only after it committed a newer one, so a reader that finds its manifest
+/// gone looks again. A manifest that is gone every time is something else, and the reader must stop.
+#[tokio::test(start_paused = true)]
+async fn refresh_gives_up_when_the_committed_manifest_stays_gone() {
+    let harness = Harness::start().await;
+    let mut reader = reader_after_the_only_checkpoint(&harness).await;
+    delete_the_committed_manifest(&harness).await;
+
+    let refreshed = reader.refresh().await;
+
+    assert_eq!(refreshed, Err(BlockReaderError::CheckpointKeptChanging));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reader_keeps_the_blocks_it_knew_when_a_refresh_fails() {
+    let harness = Harness::start().await;
+    let mut reader = reader_after_the_only_checkpoint(&harness).await;
+    let checkpoint_before = reader.checkpoint();
+    let blocks_before = reader.blocks().to_vec();
+    delete_the_committed_manifest(&harness).await;
+
+    reader.refresh().await.expect_err("the manifest is gone");
+
+    assert_eq!(reader.checkpoint(), checkpoint_before);
+    assert_eq!(reader.blocks(), blocks_before);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reader_still_answers_from_its_blocks_after_a_refresh_failed() {
+    let harness = Harness::start().await;
+    let mut reader = reader_after_the_only_checkpoint(&harness).await;
+    let answer_before = everything(&mut reader).await;
+    delete_the_committed_manifest(&harness).await;
+    reader.refresh().await.expect_err("the manifest is gone");
+
+    let answer_after = everything(&mut reader).await;
+
+    assert_eq!(answer_after, answer_before);
 }
 
 #[tokio::test(start_paused = true)]
