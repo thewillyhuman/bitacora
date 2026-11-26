@@ -79,6 +79,11 @@ checkpoint. Merging reads the files, never the log, because the log below the
 checkpoint may be gone. Files a merge replaced are dropped from the manifest
 and deleted by the sweep after the commit.
 
+The records not sealed yet are in the builder only. `ArtifactCatalog::builder`
+gives the builder, so that a front end can take from it whatever it shares
+with readers: a workload that serves its newest data from memory keeps that
+data behind a shared handle in its builder.
+
 ## Invariants
 
 - A checkpoint is committed only after its artifacts and manifest are stored.

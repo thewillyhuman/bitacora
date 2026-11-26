@@ -1,0 +1,4 @@
+change_type: enhancement
+component: materializer
+note: "An artifact catalog shows its builder, so that a workload can serve the records it has not sealed yet from the builder's own memory."
+issues: [6]

@@ -17,6 +17,7 @@
 //! records, writes checkpoints, and restarts from a chosen manifest, which is how a crash is staged.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bitacora_artifact::MemoryArtifactStore;
@@ -44,6 +45,15 @@ const SMALL_PAYLOAD_BYTES: usize = 30;
 struct Sequencer {
     /// The records added since the last seal, already in artifact form.
     pending: BytesMut,
+    /// How many records were added since the last seal, where other tasks can read it.
+    pending_records: Arc<AtomicU64>,
+}
+
+impl Sequencer {
+    /// A handle on the number of records added since the last seal.
+    fn pending_records(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.pending_records)
+    }
 }
 
 #[async_trait]
@@ -55,6 +65,8 @@ impl ArtifactBuilder for Sequencer {
                 .put_u32_le(u32::try_from(record.payload.len()).expect("test payloads are small"));
             self.pending.put_slice(&record.payload);
         }
+        self.pending_records
+            .fetch_add(committed_records.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -71,6 +83,7 @@ impl ArtifactBuilder for Sequencer {
         let size_bytes = contents.len() as u64;
         let artifact_key = artifacts.put_artifact("sealed", contents).await?;
         self.pending.clear();
+        self.pending_records.store(0, Ordering::Relaxed);
         Ok(ArtifactDescriptor {
             artifact_key,
             size_bytes,
@@ -509,6 +522,27 @@ async fn catalog_stays_gapless_through_many_checkpoints_and_merges() {
 }
 
 // ---- the view and the stored catalog ----
+
+#[tokio::test]
+async fn builder_shows_what_it_shares_about_the_records_not_sealed_yet() {
+    let mut fixture = Fixture::new().await;
+    let pending_records = fixture.catalog.builder().pending_records();
+
+    fixture.apply(5, 0);
+
+    assert_eq!(pending_records.load(Ordering::Relaxed), 5);
+}
+
+#[tokio::test]
+async fn what_the_builder_shares_follows_a_seal() {
+    let mut fixture = Fixture::new().await;
+    let pending_records = fixture.catalog.builder().pending_records();
+    fixture.apply(5, 0);
+
+    fixture.checkpoint().await;
+
+    assert_eq!(pending_records.load(Ordering::Relaxed), 0);
+}
 
 #[tokio::test]
 async fn view_finds_the_artifact_that_covers_a_record() {

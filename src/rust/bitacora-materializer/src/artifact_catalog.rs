@@ -34,6 +34,16 @@
 //!   per checkpoint, which bounds the work a checkpoint does. The merged artifact is larger, lands in a
 //!   higher tier, and is merged again once enough peers exist: size-tiered compaction.
 //!
+//! **What is not sealed yet.** The records applied since the last seal are in the builder and nowhere
+//! else. A workload that answers queries needs them: the newest data is the data most asked for. The
+//! adapter therefore shows its builder ([`ArtifactCatalog::builder`]), and a builder that wants to be
+//! read while the runner works keeps what it holds behind a shared handle of its own and gives that
+//! handle out. The adapter adds an artifact to the catalog right after [`ArtifactBuilder::seal_artifact`]
+//! returns, with nothing awaited in between. A reader on another thread can still look between the two
+//! steps; a builder that drops what it sealed inside `seal_artifact` lets its readers tell, for example
+//! by remembering the last record it sealed, so that a reader who finds the catalog short of that record
+//! looks again.
+//!
 //! Compaction is a merge of existing artifacts, not a rebuild from the log. It cannot be a rebuild: the
 //! log below the committed checkpoint may already be truncated, and the artifacts are then the only copy.
 //!
@@ -285,8 +295,10 @@ impl CatalogView {
 
 /// The adapter that turns an [`ArtifactBuilder`] into a [`Materializer`] with a catalog of artifacts.
 ///
-/// The runner owns the adapter. Take a [`CatalogView`] from it with [`ArtifactCatalog::view`] before
-/// handing it to the runner. See [`ArtifactBuilder`] for an example of a builder.
+/// The runner owns the adapter. Take a [`CatalogView`] from it with [`ArtifactCatalog::view`], and
+/// whatever the builder shares of itself through [`ArtifactCatalog::builder`], before the runner starts
+/// to run; `MaterializerRunner::materializer` gives the adapter. See [`ArtifactBuilder`] for an example
+/// of a builder.
 pub struct ArtifactCatalog<B: ArtifactBuilder> {
     /// The workload's builder.
     builder: B,
@@ -305,6 +317,73 @@ impl<B: ArtifactBuilder> ArtifactCatalog<B> {
         CatalogView {
             shared: Arc::clone(&self.shared),
         }
+    }
+
+    /// The workload's builder, to take from it whatever it shares with its readers.
+    ///
+    /// The adapter keeps changing the builder for as long as the runner works, so there is nothing to
+    /// change through this reference. A builder whose unsealed records must be readable from other
+    /// tasks holds them behind a shared handle and has a method that clones the handle; this is where a
+    /// front end calls that method. See the file documentation for what such a reader must mind.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use async_trait::async_trait;
+    /// # use bitacora_materializer::{
+    /// #     ArtifactBuilder, ArtifactCatalog, ArtifactDescriptor, ArtifactNamespace, CatalogEntry, Materializer,
+    /// #     MaterializerError,
+    /// # };
+    /// # use bitacora_types::{LogRecord, SequenceRange};
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    ///
+    /// /// A builder that lets others see how many records it holds.
+    /// #[derive(Default)]
+    /// struct Counting {
+    ///     pending_records: Arc<AtomicU64>,
+    /// }
+    ///
+    /// impl Counting {
+    ///     fn pending_records(&self) -> Arc<AtomicU64> {
+    ///         Arc::clone(&self.pending_records)
+    ///     }
+    /// }
+    /// # #[async_trait]
+    /// # impl ArtifactBuilder for Counting {
+    /// #     fn add_records(&mut self, committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
+    /// #         self.pending_records.fetch_add(committed_records.len() as u64, Ordering::Relaxed);
+    /// #         Ok(())
+    /// #     }
+    /// #     fn should_seal(&self) -> bool {
+    /// #         false
+    /// #     }
+    /// #     async fn seal_artifact(
+    /// #         &mut self,
+    /// #         _covered_range: SequenceRange,
+    /// #         _artifacts: &ArtifactNamespace,
+    /// #     ) -> Result<ArtifactDescriptor, MaterializerError> {
+    /// #         unimplemented!("not sealed in this example")
+    /// #     }
+    /// #     async fn merge_artifacts(
+    /// #         &mut self,
+    /// #         _inputs: &[CatalogEntry],
+    /// #         _artifacts: &ArtifactNamespace,
+    /// #     ) -> Result<ArtifactDescriptor, MaterializerError> {
+    /// #         unimplemented!("not merged in this example")
+    /// #     }
+    /// # }
+    ///
+    /// # async fn example(artifacts: &ArtifactNamespace) -> Result<(), MaterializerError> {
+    /// let catalog = ArtifactCatalog::<Counting>::restore_from_checkpoint(None, artifacts).await?;
+    /// let pending_records = catalog.builder().pending_records();
+    /// assert_eq!(pending_records.load(Ordering::Relaxed), 0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub const fn builder(&self) -> &B {
+        &self.builder
     }
 
     /// Seals what the builder holds into one more catalog entry, if it holds anything.
