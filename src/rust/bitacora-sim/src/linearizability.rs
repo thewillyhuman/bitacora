@@ -2,12 +2,12 @@
 //!
 //! # Why this file exists
 //!
-//! The log checker in `checker.rs` proves that the log kept its promises. A key-value store built on the
-//! log makes a stronger one: every call appears to take effect at a single moment between its start and
-//! its end, and every read returns what the calls before that moment left behind. That is
-//! linearizability, and it is what "bitacora-kv histories are linearizable under the fault matrix"
-//! (design, section 18, the exit gate of M4) asks to be checked. A store can break it without breaking
-//! the log: by answering a read from a replaced writer, from pages that lag, or from a checkpoint.
+//! The log checker in `checker.rs` proves that the log kept its promises. A key-value store built on the log makes a
+//! stronger one: every call appears to take effect at a single moment between its start and its end, and every read
+//! returns what the calls before that moment left behind. That is linearizability, and it is what "bitacora-kv
+//! histories are linearizable under the fault matrix" (design, section 18, the exit gate of M4) asks to be checked. A
+//! store can break it without breaking the log: by answering a read from a replaced writer, from pages that lag, or
+//! from a checkpoint.
 //!
 //! # What it contains
 //!
@@ -15,48 +15,51 @@
 //!
 //! # How it works
 //!
-//! Like the log checker, it sees only what clients saw: the calls and what they returned, in the order
-//! the simulation recorded them. Keys are independent registers, so each key is judged on its own, which
-//! keeps the search small.
+//! Like the log checker, it sees only what clients saw: the calls and what they returned, in the order the simulation
+//! recorded them. Keys are independent registers, so each key is judged on its own, which keeps the search small.
 //!
 //! For one key, the question is whether its calls can be put in an order such that
 //!
 //! 1. a call that finished before another began comes first, and
-//! 2. every read returns the value of the last write before it, or "absent" if there is none or it was
-//!    a delete.
+//! 2. every read returns the value of the last write before it, or "absent" if there is none or it was a delete.
 //!
-//! The search is the one of Wing and Gong, with the memory of Lowe: it builds the order one call at a
-//! time. At each step it may pick any remaining call that began before the earliest remaining finished
-//! call returned; nothing else could come next without breaking rule 1. A read may only be picked if it
-//! returned the current value. A dead end is abandoned, and every state reached (which calls are placed,
-//! what the value is) is remembered so that it is never explored twice.
+//! The search is the one of Wing and Gong, with the memory of Lowe: it builds the order one call at a time. At each
+//! step it may pick any remaining call that began before the earliest remaining finished call returned; nothing else
+//! could come next without breaking rule 1. A read may only be picked if it returned the current value. A dead end is
+//! abandoned, and every state reached (which calls are placed, what the value is) is remembered so that it is never
+//! explored twice.
 //!
 //! Three kinds of calls need care:
 //!
-//! - A write whose outcome its caller never learned, because the store said so or the client crashed.
-//!   It may take effect at any moment after it began, even long after its caller gave up, or never. It
-//!   is optional: the search may place it anywhere after its start, or leave it out.
-//! - A write the store refused, and a read that gave no answer. They are left out: they promise nothing.
-//!   If a refused write shows up in a later read, that read has no write to explain it and the search
-//!   fails, as it should.
-//! - An optional put whose value no read ever returned is dropped before the search. Leaving it out of
-//!   an order never breaks the order, since no read stood on it, so dropping it loses nothing; and it
-//!   removes most of the optional calls, which are what makes the search expensive. This relies on every
-//!   put of a simulation writing a value of its own.
+//! - A write whose outcome its caller never learned, because the store said so or the client crashed. It may take
+//!   effect at any moment after it began, even long after its caller gave up, or never. It is optional: the search may
+//!   place it anywhere after its start, or leave it out.
+//! - A write the store refused, and a read that gave no answer. They are left out: they promise nothing. If a refused
+//!   write shows up in a later read, that read has no write to explain it and the search fails, as it should.
+//! - An optional put whose value no read ever returned is dropped before the search. Leaving it out of an order never
+//!   breaks the order, since no read stood on it, so dropping it loses nothing; and it removes most of the optional
+//!   calls, which are what makes the search expensive. This relies on every put of a simulation writing a value of its
+//!   own.
 //!
-//! The search is given a budget of states. If it runs out, the key is reported as undecided, which is a
-//! failure too: a history that cannot be judged is not known to be correct.
+//! The search is given a budget of states. If it runs out, the key is reported as undecided, which is a failure too: a
+//! history that cannot be judged is not known to be correct.
 //!
 //! # Invariants
 //!
 //! - A history is reported as not linearizable only if no order exists. There are no false alarms.
 //! - A history is passed only if an order was found. There is no "probably fine".
 //! - The verdict depends only on the events, so a seed that fails keeps failing.
+//! - `judge_key` is one function of some seventy lines. It is the loop the whole check spends its time in, and its
+//!   state (what is placed, the value, the steps taken, the states seen) is changed and undone together; split over
+//!   several functions, each would need all of it.
+//! - The search works on small numbers, not on values: a value is numbered once per key, and a state of the search is a
+//!   bit set and a number. Nothing is allocated per step but the remembered state.
 //!
 //! # See also
 //!
 //! - `history.rs`: the events judged here.
 //! - `checker.rs`: the invariants of the log itself.
+//! - `linearizability_test.rs`: histories that must pass, histories that must fail, and the cost of the search.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,8 +68,8 @@ use bytes::Bytes;
 use crate::checker::Violation;
 use crate::history::{Event, KvCall, KvOutcome, TimedEvent};
 
-/// How many states the search for one key may reach before it gives up. A clean run of the simulator
-/// stays three orders of magnitude below it.
+/// How many states the search for one key may reach before it gives up. A clean run of the simulator stays three orders
+/// of magnitude below it.
 const MAX_STATES_PER_KEY: usize = 400_000;
 
 /// What a call did to the value of its key, or learned about it.
@@ -85,8 +88,8 @@ struct Call {
     operation: u64,
     /// The position in the history at which the call began.
     invoked_at: usize,
-    /// The position at which the call returned with a result that binds it: a write reported as done, or
-    /// a read with a value. `None` for a write that may take effect at any later moment, or never.
+    /// The position at which the call returned with a result that binds it: a write reported as done, or a read with a
+    /// value. `None` for a write that may take effect at any later moment, or never.
     returned_at: Option<usize>,
     /// What the call did or saw.
     effect: Effect,
@@ -110,14 +113,13 @@ enum Verdict {
 ///
 /// # Arguments
 ///
-/// * `events` - A whole history, in the order it was recorded. Events that are not key-value calls are
-///   ignored.
+/// * `events` - A whole history, in the order it was recorded. Events that are not key-value calls are ignored.
 ///
 /// # Returns
 ///
 /// One [`Violation::NotLinearizable`] for every key whose calls have no valid order, and one
-/// [`Violation::LinearizabilityUndecided`] for every key whose search was given up; in key order. Empty
-/// if every key is linearizable.
+/// [`Violation::LinearizabilityUndecided`] for every key whose search was given up; in key order. Empty if every key is
+/// linearizable.
 ///
 /// # Examples
 ///
@@ -157,45 +159,69 @@ pub fn check_linearizability(events: &[TimedEvent]) -> Vec<Violation> {
     violations
 }
 
-/// Reads the key-value calls out of a history and groups them by key, each group in the order the
-/// calls began.
+/// A call that has begun and not returned yet.
+struct InFlightCall {
+    /// The position in the history at which the call began.
+    invoked_at: usize,
+    /// What was called.
+    call: KvCall,
+}
+
+/// What a call contributes to the search, given how it ended.
+struct Contribution {
+    /// What the call did or saw.
+    effect: Effect,
+    /// Whether the moment the call returned bounds the moment it took effect: true for a write reported as done and for
+    /// a read with a value, false for a write that may take effect at any later moment.
+    binds_at_return: bool,
+}
+
+/// Reads the key-value calls out of a history and groups them by key, each group in the order the calls began.
 fn calls_by_key(events: &[TimedEvent]) -> BTreeMap<Bytes, Vec<Call>> {
     let mut calls_by_key: BTreeMap<Bytes, Vec<Call>> = BTreeMap::new();
-    // The calls that have begun and not returned yet: where they began and what they are.
-    let mut in_flight: BTreeMap<u64, (usize, KvCall)> = BTreeMap::new();
+    let mut in_flight: BTreeMap<u64, InFlightCall> = BTreeMap::new();
     for (position, timed) in events.iter().enumerate() {
         match &timed.event {
             Event::KvInvoked { operation, call } => {
-                in_flight.insert(*operation, (position, call.clone()));
+                in_flight.insert(
+                    *operation,
+                    InFlightCall {
+                        invoked_at: position,
+                        call: call.clone(),
+                    },
+                );
             }
             Event::KvReturned { operation, outcome } => {
-                let Some((invoked_at, call)) = in_flight.remove(operation) else {
+                let Some(returned) = in_flight.remove(operation) else {
                     continue;
                 };
-                let Some((effect, binds_at_return)) = effect_of(&call, Some(outcome)) else {
+                let Some(contribution) = contribution_of(&returned.call, Some(outcome)) else {
                     continue;
                 };
-                calls_by_key.entry(call.key().clone()).or_default().push(Call {
+                calls_by_key.entry(returned.call.key().clone()).or_default().push(Call {
                     operation: *operation,
-                    invoked_at,
-                    returned_at: binds_at_return.then_some(position),
-                    effect,
+                    invoked_at: returned.invoked_at,
+                    returned_at: contribution.binds_at_return.then_some(position),
+                    effect: contribution.effect,
                 });
             }
             _other => {}
         }
     }
     // What never returned belongs to clients that crashed.
-    for (operation, (invoked_at, call)) in in_flight {
-        let Some((effect, _binds_at_return)) = effect_of(&call, None) else {
+    for (operation, never_returned) in in_flight {
+        let Some(contribution) = contribution_of(&never_returned.call, None) else {
             continue;
         };
-        calls_by_key.entry(call.key().clone()).or_default().push(Call {
-            operation,
-            invoked_at,
-            returned_at: None,
-            effect,
-        });
+        calls_by_key
+            .entry(never_returned.call.key().clone())
+            .or_default()
+            .push(Call {
+                operation,
+                invoked_at: never_returned.invoked_at,
+                returned_at: None,
+                effect: contribution.effect,
+            });
     }
     for calls in calls_by_key.values_mut() {
         calls.sort_by_key(|call| call.invoked_at);
@@ -203,8 +229,8 @@ fn calls_by_key(events: &[TimedEvent]) -> BTreeMap<Bytes, Vec<Call>> {
     calls_by_key
 }
 
-/// What a call contributes to the search, given how it ended: its effect, and whether the moment it
-/// returned bounds the moment it took effect.
+/// Works out what a call contributes to the search, given how it ended: its effect, and whether the moment it returned
+/// bounds the moment it took effect.
 ///
 /// # Arguments
 ///
@@ -214,22 +240,30 @@ fn calls_by_key(events: &[TimedEvent]) -> BTreeMap<Bytes, Vec<Call>> {
 /// # Returns
 ///
 /// `None` for a call that promises nothing and is left out: a refused write, a read without an answer.
-fn effect_of(call: &KvCall, outcome: Option<&KvOutcome>) -> Option<(Effect, bool)> {
+fn contribution_of(call: &KvCall, outcome: Option<&KvOutcome>) -> Option<Contribution> {
     let written_value = match call {
         KvCall::Put { value, .. } => Some(Some(value.clone())),
         KvCall::Delete { .. } => Some(None),
         KvCall::Get { .. } => None,
     };
     match (written_value, outcome) {
-        (Some(value), Some(KvOutcome::Written)) => Some((Effect::Write(value), true)),
-        (Some(value), Some(KvOutcome::WriteUnknown) | None) => Some((Effect::Write(value), false)),
-        (None, Some(KvOutcome::Read { value })) => Some((Effect::Read(value.clone()), true)),
+        (Some(value), Some(KvOutcome::Written)) => Some(Contribution {
+            effect: Effect::Write(value),
+            binds_at_return: true,
+        }),
+        (Some(value), Some(KvOutcome::WriteUnknown) | None) => Some(Contribution {
+            effect: Effect::Write(value),
+            binds_at_return: false,
+        }),
+        (None, Some(KvOutcome::Read { value })) => Some(Contribution {
+            effect: Effect::Read(value.clone()),
+            binds_at_return: true,
+        }),
         _promises_nothing => None,
     }
 }
 
-/// Drops the optional puts whose value no read returned. See the file documentation for why that
-/// changes no verdict.
+/// Drops the optional puts whose value no read returned. See the file documentation for why that changes no verdict.
 fn without_puts_nobody_observed(calls: Vec<Call>) -> Vec<Call> {
     let mut observed_values = BTreeSet::new();
     for call in &calls {
@@ -256,8 +290,8 @@ struct Register {
     calls: Vec<Call>,
     /// For each call, the number of the value it wrote or read. Zero stands for "absent".
     value_of_call: Vec<u32>,
-    /// The order in which candidates are tried: calls that must take effect first, then optional ones.
-    /// Trying the certain before the speculative is what finds the order of a correct history fast.
+    /// The order in which candidates are tried: calls that must take effect first, then optional ones. Trying the
+    /// certain before the speculative is what finds the order of a correct history fast.
     candidate_order: Vec<usize>,
     /// How many calls must take effect.
     required_count: usize,
@@ -422,8 +456,8 @@ fn judge_key(calls: &[Call], max_states: usize) -> Verdict {
     }
 }
 
-/// The position in the history at which the first unplaced call that must take effect returned. A call
-/// may only be placed next if it began before that. Without such a call nothing bounds the choice.
+/// The position in the history at which the first unplaced call that must take effect returned. A call may only be
+/// placed next if it began before that. Without such a call nothing bounds the choice.
 fn earliest_return_of_unplaced(register: &Register, placed: &Placed) -> usize {
     let mut earliest_return = usize::MAX;
     for (position, call) in register.calls.iter().enumerate() {
@@ -436,8 +470,8 @@ fn earliest_return_of_unplaced(register: &Register, placed: &Placed) -> usize {
     earliest_return
 }
 
-/// The identifier of the unplaced call that must take effect and returned first, if there is one: the
-/// call an attempt that got this far could not get past.
+/// The identifier of the unplaced call that must take effect and returned first, if there is one: the call an attempt
+/// that got this far could not get past.
 fn first_to_return(register: &Register, placed: &Placed) -> Option<u64> {
     let mut first: Option<(usize, u64)> = None;
     for (position, call) in register.calls.iter().enumerate() {

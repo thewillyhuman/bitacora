@@ -2,19 +2,19 @@
 //!
 //! # What is covered
 //!
-//! - Histories that are linearizable and must pass: sequential ones, concurrent ones in either order,
-//!   and ones with writes of unknown outcome that took effect late or never.
-//! - Histories that are not and must fail: stale reads, lost writes, invented values, values going back
-//!   in time, effects before their cause.
+//! - Histories that are linearizable and must pass: sequential ones, concurrent ones in either order, and ones with
+//!   writes of unknown outcome that took effect late or never.
+//! - Histories that are not and must fail: stale reads, lost writes, invented values, values going back in time,
+//!   effects before their cause.
 //! - Calls that promise nothing, and that the check must ignore.
 //! - The cost of the search on long and on tangled histories, and what happens when its budget runs out.
 //!
 //! # How the fixtures work
 //!
-//! [`Script`] writes a history by hand, one event at a time, the way a broken store would produce it.
-//! `begin_*` starts a call and returns its identifier; `end` finishes it. The shorthand methods `put`,
-//! `delete` and `get` do both at once, for calls that do not overlap anything. Every put in a script
-//! writes a value of its own, as every put of a simulation does.
+//! [`Script`] writes a history by hand, one event at a time, the way a broken store would produce it. `begin_*` starts
+//! a call and returns its identifier; `end` finishes it. The shorthand methods `put`, `delete` and `get` do both at
+//! once, for calls that do not overlap anything. Every put in a script writes a value of its own, as every put of a
+//! simulation does.
 
 use std::time::Duration;
 

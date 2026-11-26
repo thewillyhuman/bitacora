@@ -2,46 +2,56 @@
 //!
 //! # Why this file exists
 //!
-//! A simulation needs clients that do something whose result can be judged. Until the materializer
-//! framework existed, they appended opaque records, and only the log could be judged. Now each compute
-//! node is a bitacora-kv front end: it becomes the writer of the stream, runs the materializer, and
-//! serves puts, deletes and linearizable reads. Every call is recorded twice: as a call to the store, for
-//! the linearizability check, and, for puts, as an append to the log, for the log checker. One workload
-//! thereby exercises the log, the materializer runner, the page adapter, checkpoints, truncation and
-//! failover together (design, section 18, the exit gate of M4).
+//! A simulation needs clients that do something whose result can be judged. Until the materializer framework existed,
+//! they appended opaque records, and only the log could be judged. Now each compute node is a bitacora-kv front end: it
+//! becomes the writer of the stream, runs the materializer, and serves puts, deletes and linearizable reads. Every call
+//! is recorded twice: as a call to the store, for the linearizability check, and, for puts, as an append to the log,
+//! for the log checker. One workload thereby exercises the log, the materializer runner, the page adapter, checkpoints,
+//! truncation and failover together (design, section 18, the exit gate of M4).
 //!
 //! # What it contains
 //!
-//! - [`ComputeNode`]: one compute node, which opens a store whenever it is the designated writer and
-//!   keeps a few client calls in flight on it.
+//! - [`ComputeNode`]: one compute node, which opens a store whenever it is the designated writer and keeps a few client
+//!   calls in flight on it.
 //! - [`InjectedBug`]: deliberate mistakes in how the node uses the store, to prove the checks catch them.
 //! - [`commit_final_record`] and [`read_every_key`]: what the audit does through a store after healing.
-//! - [`declare_fillers`], [`store_settings`]: setup shared with `simulation.rs`.
+//! - [`declare_fillers`], [`store_settings`]: setup shared with `world.rs` and `audit.rs`.
 //!
 //! # How it works
 //!
-//! All compute nodes work on the same few keys, so that their calls collide. A put writes a value no
-//! other put writes; that is what lets the checks tell which write a read saw. The node draws its calls
-//! from its own seeded random source, so a seed replays the same calls.
+//! All compute nodes work on the same few keys, so that their calls collide. A put writes a value no other put writes;
+//! that is what lets the checks tell which write a read saw. The node draws its calls from its own seeded random
+//! source, so a seed replays the same calls.
 //!
-//! A put is one log record whose payload the node can compute beforehand, so it is recorded as an append
-//! too. A delete of a key, and the barrier a read appends, have the same payload every time; they are
-//! declared to the history as fillers, which the log checker does not try to attribute to an append.
+//! A put is one log record whose payload the node can compute beforehand, so it is recorded as an append too. A delete
+//! of a key, and the barrier a read appends, have the same payload every time; they are declared to the history as
+//! fillers, which the log checker does not try to attribute to an append.
 //!
-//! A node stops using its store, and opens a new one if it is still the designated writer, when a call
-//! shows that the store was replaced: a write that was not made or whose outcome is unknown, or a read
-//! that could not be proven current. A node that is told to crash drops everything in flight; the history
-//! then never learns how those calls ended, exactly as a real client would not.
+//! A node stops using its store, and opens a new one if it is still the designated writer, when a call shows that the
+//! store was replaced: a write that was not made or whose outcome is unknown, or a read that could not be proven
+//! current. A node that is told to crash drops everything in flight; the history then never learns how those calls
+//! ended, exactly as a real client would not.
 //!
 //! # Invariants
 //!
 //! - Every call is recorded before it is made and after it returns, never the other way round.
 //! - The node reports to the history what the store told it. Only an [`InjectedBug`] makes it lie.
+//! - A put is recorded as an append first and as a call second, and finished in the same order. The order of the events
+//!   is part of the fingerprint of a run.
+//! - A node draws its random numbers in a fixed order: the takeover policy when it opens a store; per call the key,
+//!   then the kind; the pause after a call; the delay before it starts over. That order, and every number in this file,
+//!   is part of what a seed means.
+//! - The values written are `compute-N-value-M` and `final-record-A`, the keys `key-K` and `audit`. They are in the
+//!   history, and so in the fingerprint.
+//! - `ComputeNode::run` and `ComputeNode::serve_clients` are each one loop of some thirty lines: their awaits, their
+//!   draws and the spawning of calls must stay in this order, and splitting a loop would hide it.
 //!
 //! # See also
 //!
-//! - `simulation.rs`: the run these nodes are part of.
+//! - `simulation.rs`: starts the compute nodes. `audit.rs`: uses the final record and the read of every key.
 //! - `linearizability.rs`: the check of the calls recorded here.
+//! - `tests/fault_matrix_test.rs`: where the workload is tested, under faults. `kv_workload_test.rs` covers the
+//!   decisions that need no store.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,9 +73,9 @@ const KEY_COUNT: u64 = 6;
 /// How many client calls a compute node keeps in flight.
 const CALLS_IN_FLIGHT: usize = 4;
 
-/// The longest pause, in milliseconds, a compute node makes after a call returned before it starts the
-/// next ones. It sets how many calls fit in a run, and with that how long a run takes to simulate: a
-/// run makes a few thousand calls, which is plenty for the checks and keeps a seed to a few seconds.
+/// The longest pause, in milliseconds, a compute node makes after a call returned before it starts the next ones. It
+/// sets how many calls fit in a run, and with that how long a run takes to simulate: a run makes a few thousand calls,
+/// which is plenty for the checks and keeps a seed to a few seconds.
 const LONGEST_PAUSE_BETWEEN_CALLS_MILLIS: u64 = 20;
 
 /// The key the audit writes its final record under. No compute node writes it.
@@ -74,51 +84,116 @@ const AUDIT_KEY: &[u8] = b"audit";
 /// How long the audit waits for its final record to commit before it tries with a new store.
 const FINAL_RECORD_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Out of a hundred calls, how many are puts.
+const PUTS_PER_HUNDRED_CALLS: u64 = 45;
+
+/// Out of a hundred calls, how many are puts or deletes. The rest are reads.
+const WRITES_PER_HUNDRED_CALLS: u64 = 55;
+
+/// A node that becomes the writer takes the stream by force once in this many times, and waits for the lease of its
+/// predecessor to expire otherwise.
+const OPENS_PER_FORCED_TAKEOVER: u64 = 2;
+
+/// The shortest time, in milliseconds, a node waits after its store failed to open.
+const SHORTEST_OPEN_RETRY_MILLIS: u64 = 100;
+
+/// The longest time, in milliseconds, a node waits after its store failed to open.
+const LONGEST_OPEN_RETRY_MILLIS: u64 = 1_000;
+
+/// The shortest time, in milliseconds, a crashed node stays away.
+const SHORTEST_CRASH_MILLIS: u64 = 100;
+
+/// The longest time, in milliseconds, a crashed node stays away.
+const LONGEST_CRASH_MILLIS: u64 = 5_000;
+
+/// The shortest time, in milliseconds, before a node whose store was replaced tries to open a new one.
+const SHORTEST_REOPEN_MILLIS: u64 = 10;
+
+/// The longest time, in milliseconds, before a node whose store was replaced tries to open a new one.
+const LONGEST_REOPEN_MILLIS: u64 = 300;
+
+/// How long a simulated store goes without a checkpoint. Short, so that checkpoints, and the truncation they allow,
+/// happen many times in a run.
+const CHECKPOINT_AFTER: Duration = Duration::from_secs(2);
+
+/// How long a simulated store waits before it retries what failed.
+const STORE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long a read of a simulated store waits to be proven current before it gives up.
+const READ_WAIT: Duration = Duration::from_secs(5);
+
 /// A deliberate mistake in how the simulated compute nodes use the store.
 ///
-/// A correct run uses [`InjectedBug::None`]. The others exist so that the simulator's own tests can show
-/// that a store used wrongly produces a history the checks reject.
+/// A correct run uses [`InjectedBug::None`]. The others exist so that the simulator's own tests can show that a store
+/// used wrongly produces a history the checks reject.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_sim::{InjectedBug, SimulationConfig};
+///
+/// let with_stale_reads = SimulationConfig {
+///     injected_bug: InjectedBug::ReadsSkipTheBarrier,
+///     ..SimulationConfig::with_seed(1)
+/// };
+///
+/// assert_ne!(with_stale_reads.injected_bug, InjectedBug::default());
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InjectedBug {
     /// The nodes use the store as documented.
     #[default]
     None,
-    /// Reads return what the node's pages hold right now, without first proving that the node is still
-    /// the writer and has caught up with the log. A node that was replaced, or has just started, then
-    /// serves stale values.
+    /// Reads return what the node's pages hold right now, without first proving that the node is still the writer and
+    /// has caught up with the log. A node that was replaced, or has just started, then serves stale values.
     ReadsSkipTheBarrier,
-    /// A write whose outcome the store does not know is reported to its caller as done. If it then
-    /// never takes effect, a write the caller counts on is lost.
+    /// A write whose outcome the store does not know is reported to its caller as done. If it then never takes effect,
+    /// a write the caller counts on is lost.
     UnknownWritesReportedDone,
 }
 
-/// The key number `key_number` of the simulated key space.
-fn key(key_number: u64) -> Bytes {
+/// Names the key number `key_number` of the simulated key space.
+fn name_key(key_number: u64) -> Bytes {
     Bytes::from(format!("key-{key_number}"))
 }
 
-/// Tells the history which records of the stream nobody will be recorded as appending: the barrier of
-/// a read, and the delete of each key, which have the same payload every time they are written.
+/// Tells the history which records of the stream nobody will be recorded as appending: the barrier of a read, and the
+/// delete of each key, which have the same payload every time they are written.
+///
+/// # Arguments
+///
+/// * `history` - The history of the run. One filler is declared for the barrier and one per key.
 pub(crate) fn declare_fillers(history: &History) {
     history.declare_filler(KvRecord::barrier().encode());
     for key_number in 0..KEY_COUNT {
-        history.declare_filler(KvRecord::delete(key(key_number)).encode());
+        history.declare_filler(KvRecord::delete(name_key(key_number)).encode());
     }
 }
 
-/// The settings of every store a simulation opens: checkpoints and timeouts far shorter than in
-/// production, so that checkpoints, truncation and read timeouts all happen many times in a minute.
+/// Builds the settings of every store a simulation opens: checkpoints and timeouts far shorter than in production, so
+/// that checkpoints, truncation and read timeouts all happen many times in a minute.
+///
+/// # Arguments
+///
+/// * `takeover` - Whether the store's writer takes the stream by force or waits for the lease to expire.
+///
+/// # Returns
+///
+/// The settings, with the production defaults for everything a simulation does not shorten.
 pub(crate) fn store_settings(takeover: TakeoverPolicy) -> KvSettings {
     KvSettings {
         takeover,
-        checkpoint_after: Duration::from_secs(2),
-        retry_interval: Duration::from_millis(500),
-        read_wait: Duration::from_secs(5),
+        checkpoint_after: CHECKPOINT_AFTER,
+        retry_interval: STORE_RETRY_INTERVAL,
+        read_wait: READ_WAIT,
         ..KvSettings::default()
     }
 }
 
 /// One simulated compute node.
+///
+/// The simulation builds one per compute node and spawns [`ComputeNode::run`]. The fields are the node's whole state;
+/// nothing else survives a crash of the node.
 pub(crate) struct ComputeNode {
     /// Which compute node this is. It is the writer while the nemesis designates this number.
     pub(crate) node_number: usize,
@@ -137,13 +212,13 @@ pub(crate) struct ComputeNode {
 }
 
 impl ComputeNode {
-    /// Runs the node until the simulation ends: while it is the designated writer it keeps a store open
-    /// and client calls in flight; when it is told to crash it drops everything and starts over.
+    /// Runs the node until the simulation ends: while it is the designated writer it keeps a store open and client
+    /// calls in flight; when it is told to crash it drops everything and starts over.
     ///
     /// # Arguments
     ///
-    /// * `designated_writer` - Which compute node should be the writer. A node that loses the
-    ///   designation is not told: it finds out by being replaced.
+    /// * `designated_writer` - Which compute node should be the writer. A node that loses the designation is not told:
+    ///   it finds out by being replaced.
     /// * `crashes` - Changes whenever this node must crash.
     pub(crate) async fn run(
         mut self,
@@ -156,30 +231,33 @@ impl ComputeNode {
                     return;
                 }
             }
-            let takeover = if self.random.chance(1, 2) {
+            let takeover = if self.random.chance(1, OPENS_PER_FORCED_TAKEOVER) {
                 TakeoverPolicy::Force
             } else {
                 TakeoverPolicy::WaitForLeaseExpiry
             };
             let opened = KvStore::open(self.dependencies.clone(), self.stream, store_settings(takeover)).await;
             let Ok(store) = opened else {
-                sleep(Duration::from_millis(self.random.between(100, 1_000))).await;
+                let retry_millis = self
+                    .random
+                    .between(SHORTEST_OPEN_RETRY_MILLIS, LONGEST_OPEN_RETRY_MILLIS);
+                sleep(Duration::from_millis(retry_millis)).await;
                 continue;
             };
             crashes.borrow_and_update();
 
             let was_crashed = self.serve_clients(Arc::new(store), &mut crashes).await;
-            let restart_delay = if was_crashed {
-                self.random.between(100, 5_000)
+            let restart_delay_millis = if was_crashed {
+                self.random.between(SHORTEST_CRASH_MILLIS, LONGEST_CRASH_MILLIS)
             } else {
-                self.random.between(10, 300)
+                self.random.between(SHORTEST_REOPEN_MILLIS, LONGEST_REOPEN_MILLIS)
             };
-            sleep(Duration::from_millis(restart_delay)).await;
+            sleep(Duration::from_millis(restart_delay_millis)).await;
         }
     }
 
-    /// Keeps client calls in flight on `store` until the node crashes or a call shows that the store
-    /// can no longer be used. The calls still in flight are then dropped: nobody learns how they ended.
+    /// Keeps client calls in flight on `store` until the node crashes or a call shows that the store can no longer be
+    /// used. The calls still in flight are then dropped: nobody learns how they ended.
     ///
     /// # Returns
     ///
@@ -206,10 +284,8 @@ impl ComputeNode {
                     }
                 }
             }
-            sleep(Duration::from_millis(
-                self.random.between(0, LONGEST_PAUSE_BETWEEN_CALLS_MILLIS),
-            ))
-            .await;
+            let pause_millis = self.random.between(0, LONGEST_PAUSE_BETWEEN_CALLS_MILLIS);
+            sleep(Duration::from_millis(pause_millis)).await;
         };
         calls.abort_all();
         while calls.join_next().await.is_some() {}
@@ -218,14 +294,14 @@ impl ComputeNode {
 
     /// Draws the next client call: mostly puts and reads, some deletes, on a random key.
     fn next_call(&mut self) -> KvCall {
-        let key = key(self.random.between(0, KEY_COUNT - 1));
+        let key = name_key(self.random.between(0, KEY_COUNT - 1));
         let kind = self.random.between(0, 99);
-        if kind < 45 {
+        if kind < PUTS_PER_HUNDRED_CALLS {
             self.puts_made += 1;
             let value = Bytes::from(format!("compute-{}-value-{}", self.node_number, self.puts_made));
             return KvCall::Put { key, value };
         }
-        if kind < 55 {
+        if kind < WRITES_PER_HUNDRED_CALLS {
             return KvCall::Delete { key };
         }
         KvCall::Get { key }
@@ -246,62 +322,112 @@ async fn next_crash(crashes: &mut watch::Receiver<u64>) {
 /// Whether the store can still be used: `false` once a call shows that it was replaced or stopped.
 async fn make_call(store: Arc<KvStore>, history: History, call: KvCall, injected_bug: InjectedBug) -> bool {
     match &call {
-        KvCall::Put { key, value } => {
-            let payload = KvRecord::put(key.clone(), value.clone()).encode();
-            let append = history.append_invoked(payload);
-            let operation = history.kv_invoked(call.clone());
-            let written = store.put(key.clone(), value.clone()).await;
-            let append_outcome = match &written {
-                Ok(sequence) => AppendOutcome::Committed {
-                    sequence: *sequence,
-                    epoch: store.writer_epoch(),
-                },
-                Err(KvError::NotWritten { .. }) => AppendOutcome::NotAppended,
-                Err(_outcome_unknown) => AppendOutcome::Unknown,
-            };
-            history.append_finished(append, append_outcome);
-            history.kv_returned(operation, outcome_of_a_write(&written, injected_bug));
-            written.is_ok()
-        }
-        KvCall::Delete { key } => {
-            let operation = history.kv_invoked(call.clone());
-            let written = store.delete(key.clone()).await;
-            history.kv_returned(operation, outcome_of_a_write(&written, injected_bug));
-            written.is_ok()
-        }
-        KvCall::Get { key } => {
-            let operation = history.kv_invoked(call.clone());
-            let read = if injected_bug == InjectedBug::ReadsSkipTheBarrier {
-                store.get_as_of(key, store.applied_sequence()).await
-            } else {
-                store.get(key).await
-            };
-            let can_go_on = match &read {
-                Ok(_value) => true,
-                Err(KvError::Materializer(RunnerError::LogTruncated {
-                    next_sequence,
-                    low_water_mark,
-                })) => {
-                    // The log only promises to keep what lies above the committed checkpoint. A
-                    // materializer that holds the token and finds its next record gone was betrayed.
-                    history.truncated_past_checkpoint(next_sequence.preceding(), *low_water_mark);
-                    false
-                }
-                Err(KvError::NotCurrent { .. } | KvError::Materializer(_)) => false,
-                // The materializer is behind, or a layer could not be fetched: the next read may work.
-                Err(_no_answer_this_time) => true,
-            };
-            let outcome = match read {
-                Ok(value) => KvOutcome::Read { value },
-                Err(_no_answer) => KvOutcome::ReadFailed,
-            };
-            history.kv_returned(operation, outcome);
-            can_go_on
-        }
+        KvCall::Put { key, value } => make_put(&store, &history, &call, key, value, injected_bug).await,
+        KvCall::Delete { key } => make_delete(&store, &history, &call, key, injected_bug).await,
+        KvCall::Get { key } => make_get(&store, &history, &call, key, injected_bug).await,
     }
 }
 
-/// What the history is told about a write, given what the store returned.
+/// Makes the put `call` of `value` under `key` and records it, as an append to the log and as a call to the store.
+///
+/// # Returns
+///
+/// Whether the write was made, which is also whether the store can still be used.
+async fn make_put(
+    store: &KvStore,
+    history: &History,
+    call: &KvCall,
+    key: &Bytes,
+    value: &Bytes,
+    injected_bug: InjectedBug,
+) -> bool {
+    let payload = KvRecord::put(key.clone(), value.clone()).encode();
+    let append = history.append_invoked(payload);
+    let operation = history.kv_invoked(call.clone());
+    let written = store.put(key.clone(), value.clone()).await;
+    let append_outcome = match &written {
+        Ok(sequence) => AppendOutcome::Committed {
+            sequence: *sequence,
+            epoch: store.writer_epoch(),
+        },
+        Err(KvError::NotWritten { .. }) => AppendOutcome::NotAppended,
+        Err(_outcome_unknown) => AppendOutcome::Unknown,
+    };
+    history.append_finished(append, append_outcome);
+    history.kv_returned(operation, outcome_of_a_write(&written, injected_bug));
+    written.is_ok()
+}
+
+/// Makes the delete `call` of `key` and records it. The record a delete appends is a filler, so only the call is
+/// recorded.
+///
+/// # Returns
+///
+/// Whether the write was made, which is also whether the store can still be used.
+async fn make_delete(
+    store: &KvStore,
+    history: &History,
+    call: &KvCall,
+    key: &Bytes,
+    injected_bug: InjectedBug,
+) -> bool {
+    let operation = history.kv_invoked(call.clone());
+    let written = store.delete(key.clone()).await;
+    history.kv_returned(operation, outcome_of_a_write(&written, injected_bug));
+    written.is_ok()
+}
+
+/// Makes the read `call` of `key` and records it.
+///
+/// With [`InjectedBug::ReadsSkipTheBarrier`] the read is answered from what the node's pages hold right now, which is
+/// the mistake the linearizability check must catch.
+///
+/// # Returns
+///
+/// Whether the store can still be used after what the read returned.
+async fn make_get(store: &KvStore, history: &History, call: &KvCall, key: &Bytes, injected_bug: InjectedBug) -> bool {
+    let operation = history.kv_invoked(call.clone());
+    let read = if injected_bug == InjectedBug::ReadsSkipTheBarrier {
+        store.get_as_of(key, store.applied_sequence()).await
+    } else {
+        store.get(key).await
+    };
+    let can_go_on = can_go_on_after_a_read(&read, history);
+    let outcome = match read {
+        Ok(value) => KvOutcome::Read { value },
+        Err(_no_answer) => KvOutcome::ReadFailed,
+    };
+    history.kv_returned(operation, outcome);
+    can_go_on
+}
+
+/// Decides whether a store can still be used after a read returned `read`, and records in `history` a read that found
+/// the log truncated above the store's checkpoint.
+///
+/// # Returns
+///
+/// `false` if the read shows that the store was replaced or its materializer stopped; `true` if it was answered, or
+/// failed for a reason the next read may not meet.
+fn can_go_on_after_a_read(read: &Result<Option<Bytes>, KvError>, history: &History) -> bool {
+    match read {
+        Ok(_value) => true,
+        Err(KvError::Materializer(RunnerError::LogTruncated {
+            next_sequence,
+            low_water_mark,
+        })) => {
+            // The log only promises to keep what lies above the committed checkpoint. A materializer that holds the
+            // token and finds its next record gone was betrayed.
+            history.truncated_past_checkpoint(next_sequence.preceding(), *low_water_mark);
+            false
+        }
+        Err(KvError::NotCurrent { .. } | KvError::Materializer(_)) => false,
+        // The materializer is behind, or a layer could not be fetched: the next read may work.
+        Err(_no_answer_this_time) => true,
+    }
+}
+
+/// Translates what the store returned for a write into what the history is told about it. Only
+/// [`InjectedBug::UnknownWritesReportedDone`] makes the two differ.
 fn outcome_of_a_write(written: &Result<SequenceNumber, KvError>, injected_bug: InjectedBug) -> KvOutcome {
     match written {
         Ok(_sequence) => KvOutcome::Written,
@@ -313,6 +439,9 @@ fn outcome_of_a_write(written: &Result<SequenceNumber, KvError>, injected_bug: I
 
 /// Writes the final record of a run through `store`: a put under a key of its own.
 ///
+/// The put is recorded as an append and as a call, before it is made and after it returned or timed out. It waits up to
+/// twenty seconds of simulated time for the commit.
+///
 /// # Arguments
 ///
 /// * `store` - The auditor's store, opened after healing.
@@ -321,8 +450,8 @@ fn outcome_of_a_write(written: &Result<SequenceNumber, KvError>, injected_bug: I
 ///
 /// # Returns
 ///
-/// The sequence number of the final record, or `None` if it could not be committed in time; the audit
-/// then tries again with a new store.
+/// The sequence number of the final record, or `None` if it could not be committed in time; the audit then tries again
+/// with a new store.
 pub(crate) async fn commit_final_record(store: &KvStore, history: &History, attempt: u64) -> Option<SequenceNumber> {
     let key = Bytes::from_static(AUDIT_KEY);
     let value = Bytes::from(format!("final-record-{attempt}"));
@@ -348,9 +477,15 @@ pub(crate) async fn commit_final_record(store: &KvStore, history: &History, atte
     None
 }
 
-/// Reads every key of the simulated key space, and the audit's own, through `store`, and records what
-/// it saw. These reads come after every write of the run, so they pin down which of the writes of
-/// unknown outcome took effect.
+/// Reads every key of the simulated key space, and the audit's own, through `store`, and records what it saw.
+///
+/// These reads come after every write of the run, so they pin down which of the writes of unknown outcome took effect.
+/// The keys are read in a fixed order, the audit's first, and the reading stops at the first read that gives no answer.
+///
+/// # Arguments
+///
+/// * `store` - The auditor's store.
+/// * `history` - Where each read is recorded.
 ///
 /// # Returns
 ///
@@ -358,7 +493,7 @@ pub(crate) async fn commit_final_record(store: &KvStore, history: &History, atte
 pub(crate) async fn read_every_key(store: &KvStore, history: &History) -> bool {
     let mut keys = vec![Bytes::from_static(AUDIT_KEY)];
     for key_number in 0..KEY_COUNT {
-        keys.push(key(key_number));
+        keys.push(name_key(key_number));
     }
     for key in keys {
         let operation = history.kv_invoked(KvCall::Get { key: key.clone() });
@@ -372,3 +507,7 @@ pub(crate) async fn read_every_key(store: &KvStore, history: &History) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+#[path = "kv_workload_test.rs"]
+mod tests;

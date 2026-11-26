@@ -26,6 +26,6 @@ bitacora_library(
 bitacora_integration_test(
     name = "fault_matrix_test",
     size = "medium",
-    srcs = ["tests/fault_matrix.rs"],
+    srcs = ["tests/fault_matrix_test.rs"],
     deps = SIMULATION_DEPS + [":bitacora_sim"],
 )
