@@ -26,13 +26,17 @@ jobs:
       # uses. What is left was once not enough for the Bazel caches, the
       # toolchains Bazel downloads and the outputs of a build: a link step
       # failed with nothing but an exit status, and only the upload of the
-      # cache afterwards said that the disk was full. Removing the largest of
-      # those toolchains takes seconds.
+      # cache afterwards said that the disk was full. Each line this step
+      # prints says what removing one of those toolchains cost and what it
+      # left free, so the list can be kept to what pays for its time.
       - name: Free disk space
         run: |
           df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h /
+          for directory in /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android; do
+            started_at="$(date +%s)"
+            sudo rm -rf "${directory}"
+            echo "removed ${directory} in $(($(date +%s) - started_at))s, $(df --output=avail -h / | tail -n 1 | tr -d ' ') free"
+          done
       # Restores Bazel itself, the downloaded dependencies and the action
       # cache, so an unchanged crate is neither rebuilt nor retested.
       - uses: bazel-contrib/setup-bazel@0.19.2
