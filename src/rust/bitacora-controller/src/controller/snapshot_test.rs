@@ -11,50 +11,29 @@
 //! # How the fixtures work
 //!
 //! A real controller runs against the testkit cluster and its in-memory object store. Time is virtual:
-//! `tokio::time::advance` moves it, and the replicas' registrations are renewed by hand so that the
-//! replicas stay alive across the jump.
+//! `let_pass` from the controller's shared test support moves it and renews the replicas' registrations,
+//! so that the replicas stay alive across the jump.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use bitacora_artifact::MemoryArtifactStore;
-use bitacora_meta::{MetadataSnapshot, RetentionPolicy};
+use bitacora_meta::MetadataSnapshot;
 use bitacora_testkit::Cluster;
-use bitacora_types::ReplicationSettings;
 use bytes::Bytes;
 
+use super::super::test_support::{controller_with_object_store, create_stream, let_pass};
 use super::*;
 use crate::ControllerSettings;
 
 /// A cluster of three replicas with one stream, so that the metadata store is not empty.
 async fn cluster_with_a_stream() -> Cluster {
     let cluster = Cluster::start(3).await;
+    create_stream(&cluster).await;
     cluster
-        .metadata()
-        .create_stream("orders", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
-        .await
-        .expect("the stream is created");
-    cluster
-}
-
-/// A controller over the cluster that snapshots to `artifact_store`.
-fn controller_with(
-    cluster: &Cluster,
-    settings: ControllerSettings,
-    artifact_store: &MemoryArtifactStore,
-) -> Controller {
-    Controller::new(
-        cluster.metadata().clone(),
-        cluster.connector(),
-        cluster.clock(),
-        settings,
-    )
-    .with_artifact_store(Arc::new(artifact_store.clone()))
 }
 
 /// A controller with the default settings that snapshots to the cluster's object store.
 fn controller(cluster: &Cluster) -> Controller {
-    controller_with(cluster, ControllerSettings::default(), cluster.artifact_store())
+    controller_with_object_store(cluster, ControllerSettings::default(), cluster.artifact_store())
 }
 
 /// Runs one pass and returns how many snapshots it wrote.
@@ -64,12 +43,6 @@ async fn snapshots_written_by_a_pass(controller: &Controller) -> usize {
         .await
         .expect("the pass runs")
         .metadata_snapshots_written
-}
-
-/// Lets `duration` pass for the cluster.
-async fn let_pass(cluster: &Cluster, duration: Duration) {
-    tokio::time::advance(duration).await;
-    cluster.renew_registrations().await.expect("registrations are renewed");
 }
 
 /// The keys of the snapshot objects in the cluster's object store, oldest first.
@@ -201,7 +174,7 @@ async fn only_the_newest_snapshots_are_kept() {
         ..ControllerSettings::default()
     };
     let interval = keep_two.metadata_snapshot_interval;
-    let controller = controller_with(&cluster, keep_two, cluster.artifact_store());
+    let controller = controller_with_object_store(&cluster, keep_two, cluster.artifact_store());
     let mut times_of_the_passes = Vec::new();
     for _pass in 0..4 {
         times_of_the_passes.push(cluster.clock().now());
@@ -227,7 +200,7 @@ async fn newest_snapshot_is_kept_even_if_none_is_to_be_kept() {
         metadata_snapshots_kept: 0,
         ..ControllerSettings::default()
     };
-    let controller = controller_with(&cluster, keep_none, cluster.artifact_store());
+    let controller = controller_with_object_store(&cluster, keep_none, cluster.artifact_store());
 
     snapshots_written_by_a_pass(&controller).await;
 
@@ -248,7 +221,7 @@ async fn objects_that_are_no_snapshots_are_left_alone_by_pruning() {
         ..ControllerSettings::default()
     };
     let interval = keep_one.metadata_snapshot_interval;
-    let controller = controller_with(&cluster, keep_one, cluster.artifact_store());
+    let controller = controller_with_object_store(&cluster, keep_one, cluster.artifact_store());
     snapshots_written_by_a_pass(&controller).await;
     let_pass(&cluster, interval).await;
 

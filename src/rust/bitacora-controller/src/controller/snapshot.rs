@@ -12,6 +12,10 @@
 //! # What it contains
 //!
 //! - `Controller::snapshot_metadata`: writes a snapshot when one is due, and prunes old ones.
+//! - `Controller::newest_snapshot_time`, `is_snapshot_due`, `write_snapshot`, `prune_snapshots`: the steps
+//!   below, one function each.
+//! - `StoredSnapshot`: one snapshot object as the object store lists it.
+//! - `SnapshotFailure`: why a snapshot could not be listed or written.
 //!
 //! # How it works
 //!
@@ -40,14 +44,41 @@
 //! - `../controller.rs`: the pass this step ends.
 //! - `bita metadata restore`: what reads the snapshots back.
 
+use std::fmt;
 use std::sync::PoisonError;
 
 use bitacora_artifact::ArtifactStore;
-use bitacora_meta::{SNAPSHOT_KEY_PREFIX, snapshot_object_key, snapshot_time_of};
+use bitacora_meta::{MetaError, SNAPSHOT_KEY_PREFIX, snapshot_object_key, snapshot_time_of};
 use bitacora_types::Timestamp;
-use tokio::time::timeout;
 
-use super::{Controller, PassReport};
+use super::{Controller, ObjectStoreFailure, PassReport, object_store_answer_within};
+
+/// Why a metadata snapshot could not be listed or written.
+#[derive(Debug)]
+enum SnapshotFailure {
+    /// The metadata store could not be read.
+    MetadataStore(MetaError),
+    /// The object store failed or did not answer in time.
+    ObjectStore(ObjectStoreFailure),
+}
+
+impl fmt::Display for SnapshotFailure {
+    /// Writes the error of the store that failed.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MetadataStore(meta_error) => write!(formatter, "{meta_error}"),
+            Self::ObjectStore(failure) => write!(formatter, "{failure}"),
+        }
+    }
+}
+
+/// One snapshot object in the object store.
+struct StoredSnapshot {
+    /// The object's key.
+    object_key: String,
+    /// When the snapshot was taken, as its key says.
+    taken_at: Timestamp,
+}
 
 impl Controller {
     /// Writes a snapshot of the metadata store to the object store if one is due, then deletes the
@@ -64,19 +95,14 @@ impl Controller {
         let Some(artifact_store) = self.artifact_store.clone() else {
             return;
         };
-        let newest_snapshot_at = match self.remembered_newest_snapshot() {
-            Some(remembered) => Some(remembered),
-            None => match self.find_newest_snapshot(artifact_store.as_ref()).await {
-                Ok(found) => found,
-                Err(reason) => {
-                    tracing::warn!(%reason, "cannot list metadata snapshots; none is taken this pass");
-                    return;
-                }
-            },
+        let newest_snapshot_at = match self.newest_snapshot_time(artifact_store.as_ref()).await {
+            Ok(newest_snapshot_at) => newest_snapshot_at,
+            Err(reason) => {
+                tracing::warn!(%reason, "cannot list metadata snapshots; none is taken this pass");
+                return;
+            }
         };
-        let is_due = newest_snapshot_at
-            .is_none_or(|newest| now.duration_since(newest) >= self.settings.metadata_snapshot_interval);
-        if !is_due {
+        if !self.is_snapshot_due(newest_snapshot_at, now) {
             self.remember_newest_snapshot(newest_snapshot_at);
             return;
         }
@@ -88,6 +114,15 @@ impl Controller {
         self.remember_newest_snapshot(Some(now));
         report.metadata_snapshots_written += 1;
         self.prune_snapshots(artifact_store.as_ref()).await;
+    }
+
+    /// Whether a snapshot should be taken now: there is none yet, or the newest is at least one snapshot
+    /// interval old.
+    fn is_snapshot_due(&self, newest_snapshot_at: Option<Timestamp>, now: Timestamp) -> bool {
+        match newest_snapshot_at {
+            Some(newest) => now.duration_since(newest) >= self.settings.metadata_snapshot_interval,
+            None => true,
+        }
     }
 
     /// When the newest snapshot was taken, if this instance already knows.
@@ -107,14 +142,21 @@ impl Controller {
             .unwrap_or_else(PoisonError::into_inner) = taken_at;
     }
 
-    /// Lists the snapshot objects and returns when the newest was taken, or `None` if there are none.
+    /// When the newest snapshot was taken: what this instance remembers, or else what the object store lists.
+    /// `None` if the object store holds no snapshot.
     ///
     /// # Errors
     ///
     /// Returns why the object store could not be listed.
-    async fn find_newest_snapshot(&self, artifact_store: &dyn ArtifactStore) -> Result<Option<Timestamp>, String> {
-        let snapshot_times = self.list_snapshot_times(artifact_store).await?;
-        Ok(snapshot_times.last().map(|(_object_key, taken_at)| *taken_at))
+    async fn newest_snapshot_time(
+        &self,
+        artifact_store: &dyn ArtifactStore,
+    ) -> Result<Option<Timestamp>, SnapshotFailure> {
+        if let Some(remembered) = self.remembered_newest_snapshot() {
+            return Ok(Some(remembered));
+        }
+        let stored_snapshots = self.list_snapshots(artifact_store).await?;
+        Ok(stored_snapshots.last().map(|newest| newest.taken_at))
     }
 
     /// Lists the snapshot objects with the time each was taken, oldest first. Objects under the snapshot
@@ -123,27 +165,22 @@ impl Controller {
     /// # Errors
     ///
     /// Returns why the object store could not be listed.
-    async fn list_snapshot_times(
-        &self,
-        artifact_store: &dyn ArtifactStore,
-    ) -> Result<Vec<(String, Timestamp)>, String> {
-        let listing = timeout(
+    async fn list_snapshots(&self, artifact_store: &dyn ArtifactStore) -> Result<Vec<StoredSnapshot>, SnapshotFailure> {
+        let listing = object_store_answer_within(
             self.settings.request_timeout,
             artifact_store.list_prefix(SNAPSHOT_KEY_PREFIX),
-        )
-        .await;
-        let objects = match listing {
-            Ok(Ok(objects)) => objects,
-            Ok(Err(artifact_error)) => return Err(artifact_error.to_string()),
-            Err(_elapsed) => return Err("the object store did not answer in time".to_owned()),
-        };
-        let mut snapshot_times = Vec::with_capacity(objects.len());
+        );
+        let objects = listing.await.map_err(SnapshotFailure::ObjectStore)?;
+        let mut stored_snapshots = Vec::with_capacity(objects.len());
         for object in objects {
             if let Some(taken_at) = snapshot_time_of(&object.object_key) {
-                snapshot_times.push((object.object_key, taken_at));
+                stored_snapshots.push(StoredSnapshot {
+                    object_key: object.object_key,
+                    taken_at,
+                });
             }
         }
-        Ok(snapshot_times)
+        Ok(stored_snapshots)
     }
 
     /// Reads the whole metadata store and stores it as the snapshot taken at `now`.
@@ -151,33 +188,28 @@ impl Controller {
     /// # Errors
     ///
     /// Returns why the metadata store could not be read or the object could not be stored.
-    async fn write_snapshot(&self, artifact_store: &dyn ArtifactStore, now: Timestamp) -> Result<(), String> {
-        let snapshot = match self.metadata.snapshot(now).await {
-            Ok(snapshot) => snapshot,
-            Err(meta_error) => return Err(meta_error.to_string()),
-        };
+    async fn write_snapshot(&self, artifact_store: &dyn ArtifactStore, now: Timestamp) -> Result<(), SnapshotFailure> {
+        let snapshot = self
+            .metadata
+            .snapshot(now)
+            .await
+            .map_err(SnapshotFailure::MetadataStore)?;
         let entry_count = snapshot.entries.len();
         let object_key = snapshot_object_key(now);
-        let stored = timeout(
+        let storing = object_store_answer_within(
             self.settings.request_timeout,
             artifact_store.put_object(&object_key, snapshot.encode()),
-        )
-        .await;
-        match stored {
-            Ok(Ok(())) => {
-                tracing::info!(%object_key, entry_count, "wrote a metadata snapshot");
-                Ok(())
-            }
-            Ok(Err(artifact_error)) => Err(artifact_error.to_string()),
-            Err(_elapsed) => Err("the object store did not answer in time".to_owned()),
-        }
+        );
+        storing.await.map_err(SnapshotFailure::ObjectStore)?;
+        tracing::info!(%object_key, entry_count, "wrote a metadata snapshot");
+        Ok(())
     }
 
     /// Deletes every snapshot but the newest `metadata_snapshots_kept`. A snapshot that cannot be
     /// deleted is logged and tried again after the next snapshot.
     async fn prune_snapshots(&self, artifact_store: &dyn ArtifactStore) {
-        let snapshot_times = match self.list_snapshot_times(artifact_store).await {
-            Ok(snapshot_times) => snapshot_times,
+        let stored_snapshots = match self.list_snapshots(artifact_store).await {
+            Ok(stored_snapshots) => stored_snapshots,
             Err(reason) => {
                 tracing::warn!(%reason, "cannot list metadata snapshots to prune them");
                 return;
@@ -185,16 +217,15 @@ impl Controller {
         };
         // Never delete the newest snapshot, whatever the setting says.
         let kept_count = self.settings.metadata_snapshots_kept.max(1);
-        let outdated_count = snapshot_times.len().saturating_sub(kept_count);
-        for (object_key, _taken_at) in &snapshot_times[..outdated_count] {
-            let deleted = timeout(self.settings.request_timeout, artifact_store.delete_object(object_key)).await;
-            match deleted {
-                Ok(Ok(())) => tracing::debug!(%object_key, "deleted an old metadata snapshot"),
-                Ok(Err(artifact_error)) => {
-                    tracing::warn!(%object_key, %artifact_error, "cannot delete an old metadata snapshot");
-                }
-                Err(_elapsed) => {
-                    tracing::warn!(%object_key, "deleting an old metadata snapshot timed out");
+        let outdated_count = stored_snapshots.len().saturating_sub(kept_count);
+        for outdated in &stored_snapshots[..outdated_count] {
+            let object_key = &outdated.object_key;
+            let deletion =
+                object_store_answer_within(self.settings.request_timeout, artifact_store.delete_object(object_key));
+            match deletion.await {
+                Ok(()) => tracing::debug!(%object_key, "deleted an old metadata snapshot"),
+                Err(reason) => {
+                    tracing::warn!(%object_key, %reason, "cannot delete an old metadata snapshot");
                 }
             }
         }

@@ -18,6 +18,8 @@
 //!   their records.
 //! - `Controller::delete_objects_of_stream`: deletes what a deleted stream left in the object store.
 //! - [`tiered_object_key`]: where a segment's object lives.
+//! - `is_ready_to_tier`, `is_release_due`: the rules that decide when a segment is uploaded and when its
+//!   local copies go, as pure functions.
 //!
 //! # How it works
 //!
@@ -46,19 +48,23 @@
 //!
 //! # See also
 //!
-//! - `../controller.rs`: the pass these steps are part of, and truncation, which advances the mark.
+//! - `../controller.rs`: the pass these steps are part of.
+//! - `truncation.rs`: advances the mark, and leaves tiered segments below it for this file to delete.
+//! - `leftovers.rs`: removes the local copies of a released segment, and calls `delete_objects_of_stream`.
+//! - `survey.rs`: `holder_of_a_good_copy`, which picks the replica that uploads.
 //! - `bitacora-replica/src/upload.rs`: what a replica does when asked to upload.
 //! - `bitacora-client/src/tiered.rs`: how readers use the object.
 
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
-use bitacora_meta::{CopyState, MetaError, ReplicaRecord, SegmentRecord, StreamRecord, TieredRecord};
+use bitacora_meta::{MetaError, ReplicaRecord, SegmentRecord, StreamRecord, TieredRecord};
 use bitacora_types::replica_api::UploadRequest;
-use bitacora_types::{SegmentId, SequenceNumber, StreamId, Timestamp};
-use tokio::time::timeout;
+use bitacora_types::{SegmentId, StreamId, Timestamp};
 
-use super::{Controller, PassReport, Survey};
+use super::report::good_copy_count;
+use super::truncation::is_below_the_mark;
+use super::{Controller, PassReport, Survey, object_store_answer_within, replica_answer_within};
 
 /// The key of the object that holds a tiered segment.
 ///
@@ -93,6 +99,18 @@ fn materializer_objects_prefix(stream_id: StreamId) -> String {
 ///
 /// A segment is uploaded once it is sealed, holds records, is still above the low-water mark, has a full
 /// set of good copies, and has been sealed for at least `tiering_delay`.
+///
+/// # Arguments
+///
+/// * `stream` - The stream's record: its replication and its low-water mark.
+/// * `segment` - The segment in question.
+/// * `now` - The time of the pass.
+/// * `tiering_delay` - How long a segment waits after its seal before it is uploaded.
+///
+/// # Returns
+///
+/// `true` only if all of the above hold. A segment that was sealed empty is never ready: there is nothing in it
+/// to read.
 fn is_ready_to_tier(stream: &StreamRecord, segment: &SegmentRecord, now: Timestamp, tiering_delay: Duration) -> bool {
     let Some(seal) = segment.sealed else {
         return false;
@@ -102,15 +120,25 @@ fn is_ready_to_tier(stream: &StreamRecord, segment: &SegmentRecord, now: Timesta
     }
     let holds_records = seal.end >= segment.first_sequence;
     let is_above_the_mark = seal.end >= stream.low_water_mark;
-    let mut good_copies = 0;
-    for copy in &segment.copies {
-        if copy.state == CopyState::Good {
-            good_copies += 1;
-        }
-    }
-    let is_fully_replicated = good_copies == stream.replication.replica_count();
+    let is_fully_replicated = good_copy_count(segment) == stream.replication.replica_count();
     let has_waited = now.duration_since(seal.at) >= tiering_delay;
     holds_records && is_above_the_mark && is_fully_replicated && has_waited
+}
+
+/// Whether the local copies of a tiered segment should be released now.
+///
+/// # Arguments
+///
+/// * `tiered` - What the segment's record says about its object.
+/// * `now` - The time of the pass.
+/// * `hot_read_window` - How long local copies stay after the upload.
+///
+/// # Returns
+///
+/// `true` once the hot-read window has passed since the upload, unless the copies were released already.
+fn is_release_due(tiered: &TieredRecord, now: Timestamp, hot_read_window: Duration) -> bool {
+    let is_window_over = now.duration_since(tiered.uploaded_at) >= hot_read_window;
+    is_window_over && !tiered.are_local_copies_dropped
 }
 
 impl Controller {
@@ -118,6 +146,13 @@ impl Controller {
     ///
     /// Does nothing without an object store. Stops once the pass has uploaded
     /// `max_uploads_per_pass` segments; the rest wait for the next pass.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream_name` - The stream. Its record is read again, because reconciliation and repair before this
+    ///   may have changed which copies are good.
+    /// * `survey` - Which replicas answered, to choose the one that uploads, and the time of the pass.
+    /// * `report` - Counts the segments uploaded, over the whole pass.
     ///
     /// # Errors
     ///
@@ -132,7 +167,6 @@ impl Controller {
         let Some(artifact_store) = self.artifact_store.clone() else {
             return Ok(());
         };
-        // Read again: reconciliation and repair before this may have changed which copies are good.
         let stream = self.metadata.get_stream(stream_name).await?;
         for segment in &stream.segments {
             if report.segments_tiered >= self.settings.max_uploads_per_pass {
@@ -141,7 +175,7 @@ impl Controller {
             if !is_ready_to_tier(&stream, segment, survey.now, self.settings.tiering_delay) {
                 continue;
             }
-            let Some(source_replica) = source_replica_of(segment, survey) else {
+            let Some(source_replica) = survey.holder_of_a_good_copy(segment) else {
                 continue;
             };
             let uploaded = self
@@ -152,19 +186,19 @@ impl Controller {
             };
             self.record_tiered_segment(stream_name, segment.segment_id, &tiered)
                 .await?;
-            tracing::info!(
-                stream = stream_name,
-                segment = %segment.segment_id,
-                object_key = %tiered.object_key,
-                size_bytes = tiered.size_bytes,
-                "tiered a segment to the object store"
-            );
             report.segments_tiered += 1;
         }
         Ok(())
     }
 
     /// Has `source_replica` upload its copy of `segment` and confirms that the object is in the store.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The stream the segment belongs to.
+    /// * `segment` - The sealed segment to upload.
+    /// * `source_replica` - A replica that holds a good copy of it.
+    /// * `artifact_store` - The controller's own view of the object store.
     ///
     /// # Returns
     ///
@@ -177,34 +211,16 @@ impl Controller {
         source_replica: &ReplicaRecord,
         artifact_store: &dyn ArtifactStore,
     ) -> Option<TieredRecord> {
-        let sealed_end = segment.sealed_end()?;
         let object_key = tiered_object_key(stream.stream_id, segment.segment_id);
         let request = UploadRequest {
             segment: segment.descriptor(stream.stream_id),
-            sealed_end,
+            sealed_end: segment.sealed_end()?,
             object_key: object_key.clone(),
         };
-        let client = self
-            .connector
-            .connect(&source_replica.replica_id, &source_replica.address);
-        let answer = timeout(self.settings.upload_timeout, client.upload_segment(request)).await;
-        let uploaded = match answer {
-            Ok(Ok(uploaded)) => uploaded,
-            Ok(Err(replica_error)) => {
-                tracing::warn!(replica = %source_replica.replica_id, %object_key, %replica_error, "upload failed");
-                return None;
-            }
-            Err(_elapsed) => {
-                tracing::warn!(replica = %source_replica.replica_id, %object_key, "upload timed out");
-                return None;
-            }
-        };
+        let size_bytes = self.ask_to_upload(source_replica, request).await?;
         // The replica verified the object against its own view of the store. Make sure this controller,
         // which will later have to delete the object, sees the same store.
-        if !self
-            .is_object_stored(artifact_store, &object_key, uploaded.size_bytes)
-            .await
-        {
+        if !self.is_object_stored(artifact_store, &object_key, size_bytes).await {
             tracing::error!(
                 replica = %source_replica.replica_id,
                 %object_key,
@@ -215,10 +231,28 @@ impl Controller {
         }
         Some(TieredRecord {
             object_key,
-            size_bytes: uploaded.size_bytes,
+            size_bytes,
             uploaded_at: self.clock.now(),
             are_local_copies_dropped: false,
         })
+    }
+
+    /// Asks `source_replica` to upload the segment that `request` names, and waits for it up to the upload timeout.
+    ///
+    /// # Returns
+    ///
+    /// The size of the object the replica wrote, in bytes, or `None` if the replica refused or did not finish in
+    /// time, which is logged.
+    async fn ask_to_upload(&self, source_replica: &ReplicaRecord, request: UploadRequest) -> Option<u64> {
+        let object_key = request.object_key.clone();
+        let client = self.connect_to(source_replica);
+        match replica_answer_within(self.settings.upload_timeout, client.upload_segment(request)).await {
+            Ok(uploaded) => Some(uploaded.size_bytes),
+            Err(failure) => {
+                tracing::warn!(replica = %source_replica.replica_id, %object_key, reason = %failure, "upload failed");
+                None
+            }
+        }
     }
 
     /// Records in the metadata store that `segment_id` now also lives in the object store, unless the
@@ -239,6 +273,13 @@ impl Controller {
                 Ok(())
             })
             .await?;
+        tracing::info!(
+            stream = stream_name,
+            segment = %segment_id,
+            object_key = %tiered.object_key,
+            size_bytes = tiered.size_bytes,
+            "tiered a segment to the object store"
+        );
         Ok(())
     }
 
@@ -248,6 +289,12 @@ impl Controller {
     /// The segment's replica set is emptied in the metadata store; the leftover sweep at the end of the
     /// pass removes the copies from the replicas. A segment whose object is missing or has another size
     /// keeps its copies, and the problem is logged.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream_name` - The stream. Its record is read here.
+    /// * `now` - The time of the pass, to tell whether a hot-read window is over.
+    /// * `report` - Counts the segments released.
     ///
     /// # Errors
     ///
@@ -266,14 +313,13 @@ impl Controller {
             let Some(tiered) = &segment.tiered else {
                 continue;
             };
-            let is_window_over = now.duration_since(tiered.uploaded_at) >= self.settings.hot_read_window;
-            if tiered.are_local_copies_dropped || !is_window_over {
+            if !is_release_due(tiered, now, self.settings.hot_read_window) {
                 continue;
             }
-            if !self
+            let is_object_confirmed = self
                 .is_object_stored(artifact_store.as_ref(), &tiered.object_key, tiered.size_bytes)
-                .await
-            {
+                .await;
+            if !is_object_confirmed {
                 tracing::error!(
                     stream = stream_name,
                     segment = %segment.segment_id,
@@ -282,31 +328,45 @@ impl Controller {
                 );
                 continue;
             }
-            let seen_tiered = tiered.clone();
-            self.metadata
-                .update_stream(stream_name, |record| {
-                    for listed_segment in &mut record.segments {
-                        // Release only the upload that was just confirmed.
-                        if listed_segment.segment_id == segment.segment_id
-                            && listed_segment.tiered.as_ref() == Some(&seen_tiered)
-                        {
-                            listed_segment.copies.clear();
-                            listed_segment.tiered = Some(TieredRecord {
-                                are_local_copies_dropped: true,
-                                ..seen_tiered.clone()
-                            });
-                        }
-                    }
-                    Ok(())
-                })
+            self.record_released_segment(stream_name, segment.segment_id, tiered)
                 .await?;
-            tracing::info!(
-                stream = stream_name,
-                segment = %segment.segment_id,
-                "released the local copies of a tiered segment"
-            );
             report.segments_released += 1;
         }
+        Ok(())
+    }
+
+    /// Empties the replica set of `segment_id` in the metadata store and marks its local copies as dropped, unless
+    /// the segment was deleted or uploaded again since the pass read `seen_tiered`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the metadata store cannot be written.
+    async fn record_released_segment(
+        &self,
+        stream_name: &str,
+        segment_id: SegmentId,
+        seen_tiered: &TieredRecord,
+    ) -> Result<(), MetaError> {
+        self.metadata
+            .update_stream(stream_name, |record| {
+                for listed_segment in &mut record.segments {
+                    // Release only the upload that was just confirmed.
+                    if listed_segment.segment_id == segment_id && listed_segment.tiered.as_ref() == Some(seen_tiered) {
+                        listed_segment.copies.clear();
+                        listed_segment.tiered = Some(TieredRecord {
+                            are_local_copies_dropped: true,
+                            ..seen_tiered.clone()
+                        });
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        tracing::info!(
+            stream = stream_name,
+            segment = %segment_id,
+            "released the local copies of a tiered segment"
+        );
         Ok(())
     }
 
@@ -315,6 +375,11 @@ impl Controller {
     ///
     /// Truncation leaves such segments listed for this step. Without an object store nothing can be
     /// deleted; the segments stay listed and the problem is logged.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream_name` - The stream. Its record is read here, after truncation has advanced the mark.
+    /// * `report` - Counts the segments deleted.
     ///
     /// # Errors
     ///
@@ -344,25 +409,39 @@ impl Controller {
             if !self.delete_object(artifact_store.as_ref(), &tiered.object_key).await {
                 continue;
             }
-            let deleted_segment_id = segment.segment_id;
-            self.metadata
-                .update_stream(stream_name, |record| {
-                    let low_water_mark = record.low_water_mark;
-                    record.segments.retain(|listed_segment| {
-                        listed_segment.segment_id != deleted_segment_id
-                            || !is_below_the_mark(listed_segment, low_water_mark)
-                    });
-                    Ok(())
-                })
-                .await?;
-            tracing::info!(stream = stream_name, segment = %segment.segment_id, "deleted a tiered segment");
+            self.forget_deleted_segment(stream_name, segment.segment_id).await?;
             report.segments_deleted += 1;
         }
         Ok(())
     }
 
+    /// Removes the record of `deleted_segment_id`, whose object is gone, from the stream, unless the segment is no
+    /// longer below the low-water mark that the record has now.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the metadata store cannot be written.
+    async fn forget_deleted_segment(&self, stream_name: &str, deleted_segment_id: SegmentId) -> Result<(), MetaError> {
+        self.metadata
+            .update_stream(stream_name, |record| {
+                let low_water_mark = record.low_water_mark;
+                record.segments.retain(|listed_segment| {
+                    listed_segment.segment_id != deleted_segment_id
+                        || !is_below_the_mark(listed_segment, low_water_mark)
+                });
+                Ok(())
+            })
+            .await?;
+        tracing::info!(stream = stream_name, segment = %deleted_segment_id, "deleted a tiered segment");
+        Ok(())
+    }
+
     /// Deletes everything a deleted stream left in the object store: its tiered segments and what its
     /// materializers wrote.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream_id` - The deleted stream. Identifiers are never reused, so nothing of another stream is touched.
     ///
     /// # Returns
     ///
@@ -385,8 +464,8 @@ impl Controller {
     /// Deletes every object whose key starts with `key_prefix`. Returns whether none is left; `false` if
     /// the store could not be listed or an object could not be deleted, both of which are logged.
     async fn delete_objects_under(&self, artifact_store: &dyn ArtifactStore, key_prefix: &str) -> bool {
-        let listing = timeout(self.settings.request_timeout, artifact_store.list_prefix(key_prefix)).await;
-        let Ok(Ok(objects)) = listing else {
+        let listing = object_store_answer_within(self.settings.request_timeout, artifact_store.list_prefix(key_prefix));
+        let Ok(objects) = listing.await else {
             tracing::warn!(%key_prefix, "cannot list the objects of a deleted stream");
             return false;
         };
@@ -402,8 +481,8 @@ impl Controller {
     /// Whether the object store holds `object_key` with exactly `size_bytes`. `false` also if the store
     /// could not be asked in time.
     async fn is_object_stored(&self, artifact_store: &dyn ArtifactStore, object_key: &str, size_bytes: u64) -> bool {
-        let listing = timeout(self.settings.request_timeout, artifact_store.list_prefix(object_key)).await;
-        let Ok(Ok(objects)) = listing else {
+        let listing = object_store_answer_within(self.settings.request_timeout, artifact_store.list_prefix(object_key));
+        let Ok(objects) = listing.await else {
             return false;
         };
         for object in &objects {
@@ -416,42 +495,16 @@ impl Controller {
 
     /// Deletes one object. Returns whether it is gone; a failure is logged.
     async fn delete_object(&self, artifact_store: &dyn ArtifactStore, object_key: &str) -> bool {
-        let deleted = timeout(self.settings.request_timeout, artifact_store.delete_object(object_key)).await;
-        match deleted {
-            Ok(Ok(())) => true,
-            Ok(Err(artifact_error)) => {
-                tracing::warn!(%object_key, %artifact_error, "cannot delete an object");
-                false
-            }
-            Err(_elapsed) => {
-                tracing::warn!(%object_key, "deleting an object timed out");
+        let deletion =
+            object_store_answer_within(self.settings.request_timeout, artifact_store.delete_object(object_key));
+        match deletion.await {
+            Ok(()) => true,
+            Err(failure) => {
+                tracing::warn!(%object_key, reason = %failure, "cannot delete an object");
                 false
             }
         }
     }
-}
-
-/// Whether a sealed segment lies entirely below `low_water_mark`.
-fn is_below_the_mark(segment: &SegmentRecord, low_water_mark: SequenceNumber) -> bool {
-    match segment.sealed_end() {
-        Some(sealed_end) => sealed_end < low_water_mark,
-        None => false,
-    }
-}
-
-/// Picks the replica that uploads `segment`: the first one that holds a good copy and answered this
-/// pass's survey. `None` if no such replica is registered.
-fn source_replica_of<'survey>(segment: &SegmentRecord, survey: &'survey Survey) -> Option<&'survey ReplicaRecord> {
-    for copy in &segment.copies {
-        let answered_the_survey = survey.copies_by_replica.contains_key(&copy.replica_id);
-        if copy.state != CopyState::Good || !answered_the_survey {
-            continue;
-        }
-        if let Some(registration) = survey.registration(&copy.replica_id) {
-            return Some(registration);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //!
 //! # What is covered
 //!
-//! - The rule that decides when a segment is uploaded, as a pure function.
+//! - The rules that decide when a segment is uploaded and when its local copies go, as pure functions.
 //! - Upload: after the delay, only with a full set of good copies, retried after a failure, limited per
 //!   pass, and never recorded for an object the controller cannot see.
 //! - Release: local copies stay through the hot-read window, go after it, and stay if the object is gone.
@@ -18,28 +18,32 @@
 //! would. A jump of hours makes the helper's writer, which is left running, take its replicas for silent and
 //! roll to a new segment, so tests that jump look at the sealed segments by number and not at the whole list.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bitacora_artifact::MemoryArtifactStore;
 use bitacora_client::{ReadError, StreamReader};
-use bitacora_meta::{CopyRecord, RECORD_SCHEMA_VERSION, RetentionPolicy, SealRecord};
+use bitacora_meta::{CopyRecord, CopyState, SealRecord};
 use bitacora_testkit::Cluster;
-use bitacora_types::{Epoch, ReplicaId, ReplicationSettings, SequenceRange};
+use bitacora_types::{Epoch, SequenceNumber, SequenceRange};
 
+use super::super::test_support::{
+    STREAM, checkpoint_at, client, cluster_with_segments, controller_with_object_store, held_segments, let_pass,
+    listed_segments, renew_registrations, replica_id, stream, stream_record,
+};
 use super::*;
 use crate::ControllerSettings;
-use crate::tests::{STREAM, checkpoint_at, client, cluster_with_segments, held_segments, listed_segments, stream};
 
 /// The moment the pure tests are evaluated at.
 const NOW: Timestamp = Timestamp::from_unix_millis(100_000_000);
 /// The tiering delay the pure tests use.
 const DELAY: Duration = Duration::from_mins(15);
+/// The hot-read window the pure tests use.
+const HOT_READ_WINDOW: Duration = Duration::from_hours(24);
 
 /// A copy on replica `name` in `state`.
 fn copy(name: &str, state: CopyState) -> CopyRecord {
     CopyRecord {
-        replica_id: ReplicaId::new(name).expect("valid identifier"),
+        replica_id: replica_id(name),
         state,
     }
 }
@@ -67,21 +71,9 @@ fn sealed_segment(sealed_for: Duration) -> SegmentRecord {
 /// A stream replicated three times whose low-water mark is at `low_water_mark`. The pure rule looks at
 /// nothing else in it.
 fn stream_with_mark_at(low_water_mark: u64) -> StreamRecord {
-    StreamRecord {
-        schema_version: RECORD_SCHEMA_VERSION,
-        stream_id: StreamId::new(7),
-        name: "orders".to_owned(),
-        replication: ReplicationSettings::DEFAULT,
-        retention: RetentionPolicy::default(),
-        epoch: Epoch::new(1),
-        writer: None,
-        segments: Vec::new(),
-        next_segment_id: SegmentId::new(3),
-        standby_replicas: None,
-        truncate_before: None,
-        low_water_mark: SequenceNumber::new(low_water_mark),
-        materializers: BTreeSet::new(),
-    }
+    let mut stream = stream_record();
+    stream.low_water_mark = SequenceNumber::new(low_water_mark);
+    stream
 }
 
 #[test]
@@ -168,33 +160,46 @@ fn segment_that_the_low_water_mark_has_entered_is_still_ready() {
     assert!(is_ready_to_tier(&stream_with_mark_at(15), &segment, NOW, DELAY));
 }
 
-/// A controller that tiers to `artifact_store`.
-fn controller_with(
-    cluster: &Cluster,
-    settings: ControllerSettings,
-    artifact_store: &MemoryArtifactStore,
-) -> Controller {
-    Controller::new(
-        cluster.metadata().clone(),
-        cluster.connector(),
-        cluster.clock(),
-        settings,
-    )
-    .with_artifact_store(Arc::new(artifact_store.clone()))
+/// The record of an object that was uploaded `uploaded_for` before [`NOW`] and whose local copies are still there.
+fn tiered_for(uploaded_for: Duration) -> TieredRecord {
+    let uploaded_at_millis = NOW.unix_millis() - u64::try_from(uploaded_for.as_millis()).expect("small");
+    TieredRecord {
+        object_key: "streams/7/segments/00000000000000000002".to_owned(),
+        size_bytes: 100,
+        uploaded_at: Timestamp::from_unix_millis(uploaded_at_millis),
+        are_local_copies_dropped: false,
+    }
+}
+
+#[test]
+fn local_copies_are_released_once_the_hot_read_window_is_over() {
+    let tiered = tiered_for(HOT_READ_WINDOW);
+
+    assert!(is_release_due(&tiered, NOW, HOT_READ_WINDOW));
+}
+
+#[test]
+fn local_copies_stay_through_the_hot_read_window() {
+    let one_second_short_of_the_window = Duration::from_secs(HOT_READ_WINDOW.as_secs() - 1);
+    let tiered = tiered_for(one_second_short_of_the_window);
+
+    assert!(!is_release_due(&tiered, NOW, HOT_READ_WINDOW));
+}
+
+#[test]
+fn local_copies_that_were_released_are_not_released_again() {
+    let mut tiered = tiered_for(HOT_READ_WINDOW);
+    tiered.are_local_copies_dropped = true;
+
+    assert!(!is_release_due(&tiered, NOW, HOT_READ_WINDOW));
 }
 
 /// Runs one pass of a controller that tiers to the cluster's object store with the default settings.
 async fn run_tiering_pass(cluster: &Cluster) -> PassReport {
-    controller_with(cluster, ControllerSettings::default(), cluster.artifact_store())
+    controller_with_object_store(cluster, ControllerSettings::default(), cluster.artifact_store())
         .run_pass()
         .await
         .expect("the pass runs")
-}
-
-/// Lets `duration` pass for the cluster.
-async fn let_pass(cluster: &Cluster, duration: Duration) {
-    tokio::time::advance(duration).await;
-    cluster.renew_registrations().await.expect("registrations are renewed");
 }
 
 /// A cluster with `sealed_segment_count` sealed segments that have been sealed for the tiering delay.
@@ -405,7 +410,7 @@ async fn one_pass_uploads_no_more_segments_than_its_limit() {
         max_uploads_per_pass: 2,
         ..ControllerSettings::default()
     };
-    let controller = controller_with(&cluster, two_uploads_per_pass, cluster.artifact_store());
+    let controller = controller_with_object_store(&cluster, two_uploads_per_pass, cluster.artifact_store());
 
     let first_pass = controller.run_pass().await.expect("the pass runs");
     let second_pass = controller.run_pass().await.expect("the pass runs");
@@ -420,7 +425,7 @@ async fn one_pass_uploads_no_more_segments_than_its_limit() {
 async fn upload_that_the_controller_cannot_see_is_not_recorded() {
     let cluster = cluster_ready_to_tier(2).await;
     let another_bucket = MemoryArtifactStore::new();
-    let controller = controller_with(&cluster, ControllerSettings::default(), &another_bucket);
+    let controller = controller_with_object_store(&cluster, ControllerSettings::default(), &another_bucket);
 
     let report = controller.run_pass().await.expect("the pass runs");
 
@@ -552,7 +557,7 @@ async fn copies_of_a_deleted_segment_are_removed_while_an_older_tiered_one_await
         max_uploads_per_pass: 1,
         ..ControllerSettings::default()
     };
-    let controller = controller_with(&cluster, one_upload_per_pass, cluster.artifact_store());
+    let controller = controller_with_object_store(&cluster, one_upload_per_pass, cluster.artifact_store());
     controller.run_pass().await.expect("the pass runs");
     checkpoint_at(&cluster, "pages", 2).await;
     cluster.artifact_store().set_unavailable(true);
@@ -650,7 +655,7 @@ async fn records_survive_the_loss_of_every_replica_disk() {
         node.lose_disk();
         node.restart().await;
     }
-    cluster.renew_registrations().await.expect("registrations are renewed");
+    renew_registrations(&cluster).await;
 
     let records = reader(&cluster).read_range(range(1, 2)).await.expect("reads");
 
