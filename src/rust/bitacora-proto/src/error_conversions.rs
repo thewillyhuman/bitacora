@@ -12,7 +12,7 @@
 //!
 //! # What it contains
 //!
-//! - `From<ReplicaError> for wire::ReplicaError`: what a server sends.
+//! - `From<ReplicaError> for wire::ReplicaError`: what a server sends. `kind_of` is its table.
 //! - `TryFrom<wire::ReplicaError> for ReplicaError`: what a client reads.
 //!
 //! # How it works
@@ -34,6 +34,9 @@
 //! - `ReplicaError -> message -> ReplicaError` is the identity, for every
 //!   variant and every field value.
 //! - An error that cannot be read is never read as another error.
+//! - The two `match` expressions are tables with one arm per variant and nothing else. They are as long
+//!   as the error has variants, and are kept whole so that a variant and its message can be compared at
+//!   a glance.
 //!
 //! # See also
 //!
@@ -49,47 +52,51 @@ use crate::v1::replica_error as wire_error;
 impl From<ReplicaError> for wire::ReplicaError {
     /// Writes a replica's error as its message, keeping every field.
     fn from(error: ReplicaError) -> Self {
-        let kind = match error {
-            ReplicaError::Fenced {
-                request_epoch,
-                fenced_epoch,
-            } => wire_error::Kind::Fenced(wire_error::Fenced {
-                request_epoch: request_epoch.get(),
-                fenced_epoch: fenced_epoch.get(),
-            }),
-            ReplicaError::Sealed { sealed_end } => wire_error::Kind::Sealed(wire_error::Sealed {
-                sealed_end: sealed_end.get(),
-            }),
-            ReplicaError::OutOfOrder {
-                first_sequence,
-                local_end,
-            } => wire_error::Kind::OutOfOrder(wire_error::OutOfOrder {
-                first_sequence: first_sequence.get(),
-                local_end: local_end.get(),
-            }),
-            ReplicaError::ConflictingSeal {
-                existing_sealed_end,
-                requested_sealed_end,
-            } => wire_error::Kind::ConflictingSeal(wire_error::ConflictingSeal {
-                existing_sealed_end: existing_sealed_end.get(),
-                requested_sealed_end: requested_sealed_end.get(),
-            }),
-            ReplicaError::SegmentNotFound { segment } => {
-                wire_error::Kind::SegmentNotFound(wire_error::SegmentNotFound {
-                    segment: Some(segment.into()),
-                })
-            }
-            ReplicaError::InvalidRequest { reason } => {
-                wire_error::Kind::InvalidRequest(wire_error::InvalidRequest { reason })
-            }
-            ReplicaError::NoCapacity { used_percent } => wire_error::Kind::NoCapacity(wire_error::NoCapacity {
-                used_percent: u32::from(used_percent),
-            }),
-            ReplicaError::Draining => wire_error::Kind::Draining(wire_error::Draining {}),
-            ReplicaError::Storage { reason } => wire_error::Kind::Storage(wire_error::Storage { reason }),
-            ReplicaError::Unavailable { reason } => wire_error::Kind::Unavailable(wire_error::Unavailable { reason }),
-        };
-        Self { kind: Some(kind) }
+        Self {
+            kind: Some(kind_of(error)),
+        }
+    }
+}
+
+/// The message of one replica error: the kind of the same name, with every field of the error.
+fn kind_of(error: ReplicaError) -> wire_error::Kind {
+    match error {
+        ReplicaError::Fenced {
+            request_epoch,
+            fenced_epoch,
+        } => wire_error::Kind::Fenced(wire_error::Fenced {
+            request_epoch: request_epoch.get(),
+            fenced_epoch: fenced_epoch.get(),
+        }),
+        ReplicaError::Sealed { sealed_end } => wire_error::Kind::Sealed(wire_error::Sealed {
+            sealed_end: sealed_end.get(),
+        }),
+        ReplicaError::OutOfOrder {
+            first_sequence,
+            local_end,
+        } => wire_error::Kind::OutOfOrder(wire_error::OutOfOrder {
+            first_sequence: first_sequence.get(),
+            local_end: local_end.get(),
+        }),
+        ReplicaError::ConflictingSeal {
+            existing_sealed_end,
+            requested_sealed_end,
+        } => wire_error::Kind::ConflictingSeal(wire_error::ConflictingSeal {
+            existing_sealed_end: existing_sealed_end.get(),
+            requested_sealed_end: requested_sealed_end.get(),
+        }),
+        ReplicaError::SegmentNotFound { segment } => wire_error::Kind::SegmentNotFound(wire_error::SegmentNotFound {
+            segment: Some(segment.into()),
+        }),
+        ReplicaError::InvalidRequest { reason } => {
+            wire_error::Kind::InvalidRequest(wire_error::InvalidRequest { reason })
+        }
+        ReplicaError::NoCapacity { used_percent } => wire_error::Kind::NoCapacity(wire_error::NoCapacity {
+            used_percent: u32::from(used_percent),
+        }),
+        ReplicaError::Draining => wire_error::Kind::Draining(wire_error::Draining {}),
+        ReplicaError::Storage { reason } => wire_error::Kind::Storage(wire_error::Storage { reason }),
+        ReplicaError::Unavailable { reason } => wire_error::Kind::Unavailable(wire_error::Unavailable { reason }),
     }
 }
 
@@ -152,11 +159,14 @@ impl TryFrom<wire::ReplicaError> for ReplicaError {
 ///
 /// Returns [`MalformedMessage::NumberTooLarge`] above 255.
 fn used_percent_from_wire(used_percent: u32) -> Result<u8, MalformedMessage> {
-    u8::try_from(used_percent).map_err(|_| MalformedMessage::NumberTooLarge {
-        field: "ReplicaError.NoCapacity.used_percent",
-        value: u64::from(used_percent),
-        largest: u64::from(u8::MAX),
-    })
+    match u8::try_from(used_percent) {
+        Ok(used_percent) => Ok(used_percent),
+        Err(_too_large) => Err(MalformedMessage::NumberTooLarge {
+            field: "ReplicaError.NoCapacity.used_percent",
+            value: u64::from(used_percent),
+            largest: u64::from(u8::MAX),
+        }),
+    }
 }
 
 #[cfg(test)]
