@@ -19,6 +19,7 @@ use bitacora_types::SequenceNumber;
 use bytes::Bytes;
 
 use super::*;
+use crate::block::BlockSummary;
 use crate::sample::SeriesSamples;
 use crate::test_support::{SmallBlocks, TestArtifacts, batch, job, record, sample, samples_at};
 
@@ -190,6 +191,45 @@ async fn descriptor_states_the_size_of_the_block() {
         .await
         .expect("stored");
     assert_eq!(entry.artifact.size_bytes, block.len() as u64);
+}
+
+#[tokio::test]
+async fn descriptor_carries_the_summary_of_the_block() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    builder
+        .add_records(&[record(1, &batch("api", &[10, 20])), record(2, &batch("web", &[15]))])
+        .expect("valid records");
+
+    let entry = seal(&mut builder, &artifacts, 1, 2).await;
+
+    let expected = BlockSummary {
+        series_count: 2,
+        sample_count: 3,
+        min_time_millis: 10,
+        max_time_millis: 20,
+    };
+    assert_eq!(BlockSummary::decode(&entry.artifact.summary), Some(expected));
+}
+
+#[tokio::test]
+async fn descriptor_of_a_merged_block_carries_the_summary_of_the_merged_block() {
+    let artifacts = TestArtifacts::new();
+    let mut builder = small_builder();
+    let inputs = two_blocks(&mut builder, &artifacts).await;
+
+    let merged = builder
+        .merge_artifacts(&inputs, &artifacts.namespace)
+        .await
+        .expect("merged");
+
+    let expected = BlockSummary {
+        series_count: 2,
+        sample_count: 4,
+        min_time_millis: 10,
+        max_time_millis: 30,
+    };
+    assert_eq!(BlockSummary::decode(&merged.summary), Some(expected));
 }
 
 #[tokio::test]

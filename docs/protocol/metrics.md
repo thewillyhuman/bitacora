@@ -178,6 +178,19 @@ covers the ranges of its inputs together, and the inputs are deleted once
 the catalog that names the merged block is committed. A reader that finds a
 block gone reads the catalog again.
 
+### The summary in a catalog entry
+
+The catalog entry of a block carries a summary of 28 bytes
+([checkpoint-manifest.md](checkpoint-manifest.md)):
+
+```text
+summary  series count u32 | sample count u64 | min time i64 | max time i64
+```
+
+It repeats what the block's footer says. A reader skips a block whose times
+lie outside its query without fetching anything. A summary of another
+length is not understood; the reader then fetches the footer.
+
 ### Finding the blocks
 
 The store's materializer is registered on the stream under the name
@@ -191,7 +204,7 @@ The store's materializer is registered on the stream under the name
    It is a checkpoint manifest; its details are an artifact catalog
    ([checkpoint-manifest.md](checkpoint-manifest.md)).
 3. Each catalog entry gives the range of records a block covers, the block's
-   key under the same prefix, and its size.
+   key under the same prefix, its size, and its summary.
 
 Samples above the checkpoint are not in any block. They are in the log, and
 in the memory of the store that owns the stream.

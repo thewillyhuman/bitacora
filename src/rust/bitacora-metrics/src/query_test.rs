@@ -7,7 +7,8 @@
 //! - Which sample wins when records, blocks or the head disagree; duplicates; samples that arrive out of
 //!   order.
 //! - Time ranges that end exactly on the first or last sample of a block; series that come and go.
-//! - What is fetched: nothing from blocks outside the time range, an index only once.
+//! - What is fetched: nothing from blocks outside the time range, by the summary in their catalog
+//!   entry; an index only once.
 //! - Damage and blocks that are gone.
 //!
 //! # How the fixtures work
@@ -507,7 +508,62 @@ async fn index_of_a_block_is_fetched_once() {
 }
 
 #[tokio::test]
-async fn nothing_is_fetched_from_a_block_outside_the_time_range_once_its_index_is_known() {
+async fn nothing_is_fetched_from_a_block_outside_the_time_range() {
+    let view = view_with_two_blocks().await;
+    let second_block_only = TimeRange::new(30, 40).expect("valid range");
+
+    view.query(&Selector::all(), second_block_only)
+        .await
+        .expect("an answer");
+
+    // The footer, the index and one chunk of the second block. The first block is left alone: its
+    // catalog entry says that it ends at 20.
+    assert_eq!(view.artifacts.range_reads(), 3);
+}
+
+#[tokio::test]
+async fn block_whose_catalog_entry_has_no_summary_is_read_by_its_footer() {
+    let view = view_with_two_blocks().await;
+    let mut entries = view.materializer.view().entries();
+    for entry in &mut entries {
+        entry.artifact.summary = Bytes::new();
+    }
+    let second_block_only = TimeRange::new(30, 40).expect("valid range");
+
+    let mut merged = BTreeMap::new();
+    query_blocks(
+        &view.artifacts.namespace,
+        &view.cache,
+        &entries,
+        &Selector::all(),
+        second_block_only,
+        &mut merged,
+    )
+    .await
+    .expect("read");
+
+    assert_eq!(into_series(merged), [series("api", samples_at(&[30, 40]))]);
+}
+
+#[tokio::test]
+async fn catalog_entry_of_a_block_carries_the_summary_in_its_footer() {
+    let view = view_with_two_blocks().await;
+    let entries = view.materializer.view().entries();
+
+    let index = view
+        .cache
+        .index_of(&view.artifacts.namespace, &entries[1])
+        .await
+        .expect("a valid index");
+
+    assert_eq!(
+        BlockSummary::decode(&entries[1].artifact.summary),
+        Some(index.footer.summary)
+    );
+}
+
+#[tokio::test]
+async fn nothing_is_fetched_from_a_cached_block_outside_the_time_range() {
     let view = view_with_two_blocks().await;
     view.everything().await;
     let reads_before = view.artifacts.range_reads();

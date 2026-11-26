@@ -23,6 +23,8 @@
 //! - **Asking for a seal.** The builder asks once it holds [`BlockPolicy::MAX_BLOCK_SAMPLES`] samples, or
 //!   samples that span [`BlockPolicy::MAX_BLOCK_SPAN_MILLIS`]. Both are counted from the samples
 //!   themselves, never from a clock, so the same records ask at the same point every time.
+//! - **Describing.** Every block is returned to the framework with its summary: how many series and
+//!   samples it holds and which span of time they cover. The framework keeps it in the catalog entry.
 //! - **Sealing.** Everything in the head becomes one block (`block.rs`), stored as one artifact. Only
 //!   once the block is stored does the head drop its samples, and it remembers the last record it gave
 //!   up, so that a query can tell that the catalog it sees does not list the block yet.
@@ -56,7 +58,6 @@ use bitacora_materializer::{
     ArtifactBuilder, ArtifactDescriptor, ArtifactNamespace, CatalogEntry, CompactionPolicy, MaterializerError,
 };
 use bitacora_types::{LogRecord, SequenceRange};
-use bytes::Bytes;
 
 use crate::block::{EncodedBlock, damaged_artifact, decode_whole_block, encode_block};
 use crate::head::SharedHead;
@@ -207,7 +208,7 @@ async fn store_encoded_block(
     Ok(ArtifactDescriptor {
         artifact_key,
         size_bytes,
-        summary: Bytes::new(),
+        summary: encoded.summary.encode(),
     })
 }
 

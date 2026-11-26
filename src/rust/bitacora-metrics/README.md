@@ -90,9 +90,12 @@ sequence number is what a dashboard or a rule evaluation needs.
 
 ### What a query fetches
 
-Per block: the footer and the index, once, then only the chunks of the
-selected series, with range reads. Chunks that lie next to each other are
-fetched in one read. The index of every block in use is kept in memory.
+Nothing from a block whose samples all lie outside the query's time range:
+the block's catalog entry carries its summary, with its first and last
+timestamp. From every other block: the footer and the index, once, then
+only the chunks of the selected series, with range reads. Chunks that lie
+next to each other are fetched in one read. The index of every block that
+was read is kept in memory.
 
 ### A reader that is not the store
 

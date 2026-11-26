@@ -13,6 +13,7 @@
 //!
 //! - [`encode_block`]: series and their samples as the bytes of a block.
 //! - [`BlockSummary`]: how many series and samples a block holds and which span of time they cover.
+//!   It is in the block's footer and, as 28 bytes, in the block's catalog entry.
 //! - `BlockFooter`, `SeriesEntry`, `BlockIndex`: the parts of a block a reader fetches first.
 //! - `load_block_index`, `read_series`: the two steps of a query against one block, with range reads.
 //! - `decode_whole_block`: everything in a block, for merging blocks and for restoring a saved head.
@@ -48,6 +49,9 @@
 //!   list instead of looking at every series.
 //! - The postings start right after the series index. The footer is the last 76 bytes. Its own checksum
 //!   covers the footer before it. The minimum and maximum time of a block without samples are both 0.
+//!
+//! The catalog entry of a block carries the block's summary (`series count u32 | sample count u64 |
+//! min time i64 | max time i64`), so a reader can leave a block alone without fetching anything.
 //!
 //! A reader that knows the block's size, which the catalog records, fetches the footer, then the series
 //! index and the postings in one read, then the chunks of the series it selected, joining chunks that lie
@@ -91,6 +95,9 @@ const BLOCK_FORMAT_VERSION: u32 = 1;
 
 /// The size of the footer at the end of every block.
 pub(crate) const BLOCK_FOOTER_BYTES: usize = 76;
+
+/// The size of a block's summary in its catalog entry: two counts and two times.
+const BLOCK_SUMMARY_BYTES: usize = 4 + 8 + 8 + 8;
 
 /// Where the footer's own checksum starts: it is the last field and covers everything before it.
 const FOOTER_CHECKSUM_OFFSET: usize = BLOCK_FOOTER_BYTES - 4;
@@ -142,6 +149,60 @@ impl BlockSummary {
     /// Whether the block can hold a sample in `time_range`.
     pub(crate) const fn overlaps(&self, time_range: TimeRange) -> bool {
         self.sample_count > 0 && time_range.overlaps(self.min_time_millis, self.max_time_millis)
+    }
+
+    /// The summary as the bytes a catalog entry carries: the four numbers, little-endian, in the order
+    /// of the fields.
+    pub(crate) fn encode(&self) -> Bytes {
+        let mut encoded = BytesMut::with_capacity(BLOCK_SUMMARY_BYTES);
+        encoded.put_u32_le(self.series_count);
+        encoded.put_u64_le(self.sample_count);
+        encoded.put_i64_le(self.min_time_millis);
+        encoded.put_i64_le(self.max_time_millis);
+        encoded.freeze()
+    }
+
+    /// Reads the summary of a block out of the block's catalog entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `catalog_summary` - `ArtifactDescriptor::summary` of a catalog entry of a metrics store, as
+    ///   [`MetricsStore::blocks`](crate::MetricsStore::blocks) and
+    ///   [`BlockReader::blocks`](crate::BlockReader::blocks) return it.
+    ///
+    /// # Returns
+    ///
+    /// The summary, or `None` if the bytes are not a summary of this format. The block's footer then
+    /// still says the same; it only costs a fetch to learn it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::BlockSummary;
+    ///
+    /// let mut catalog_summary = Vec::new();
+    /// catalog_summary.extend_from_slice(&2_u32.to_le_bytes());
+    /// catalog_summary.extend_from_slice(&240_u64.to_le_bytes());
+    /// catalog_summary.extend_from_slice(&0_i64.to_le_bytes());
+    /// catalog_summary.extend_from_slice(&59_500_i64.to_le_bytes());
+    ///
+    /// let summary = BlockSummary::decode(&catalog_summary).expect("28 bytes are a summary");
+    ///
+    /// assert_eq!(summary.max_time_millis, 59_500);
+    /// assert_eq!(BlockSummary::decode(b"something else"), None);
+    /// ```
+    #[must_use]
+    pub fn decode(catalog_summary: &[u8]) -> Option<Self> {
+        if catalog_summary.len() != BLOCK_SUMMARY_BYTES {
+            return None;
+        }
+        let mut unread = catalog_summary;
+        Some(Self {
+            series_count: unread.get_u32_le(),
+            sample_count: unread.get_u64_le(),
+            min_time_millis: unread.get_i64_le(),
+            max_time_millis: unread.get_i64_le(),
+        })
     }
 }
 

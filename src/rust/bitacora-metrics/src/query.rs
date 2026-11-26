@@ -24,10 +24,10 @@
 //! latest such record. Sources are therefore read in log order, the blocks first and the head last, and
 //! each one replaces what an earlier one said about the same series and timestamp.
 //!
-//! **One block.** The block's index is fetched (two range reads) and kept in the cache: blocks never
-//! change, so an index is valid for as long as the block exists. A block whose samples all lie outside
-//! the query's time range is skipped. Otherwise the index picks the series, and only their chunks are
-//! fetched.
+//! **One block.** The block's catalog entry carries the span of time the block covers. A block whose
+//! samples all lie outside the query's time range is skipped without a fetch. Otherwise the block's
+//! index is fetched (two range reads) and kept in the cache: blocks never change, so an index is valid
+//! for as long as the block exists. The index picks the series, and only their chunks are fetched.
 //!
 //! **Head and catalog together.** The head is read first and the catalog second, and a block can be
 //! sealed in between. The head says which records its samples come from and up to which record it has
@@ -71,7 +71,7 @@ use bitacora_materializer::{ArtifactNamespace, CatalogEntry, CatalogView, Materi
 use bitacora_types::SequenceNumber;
 use thiserror::Error;
 
-use crate::block::{BlockIndex, load_block_index, read_series};
+use crate::block::{BlockIndex, BlockSummary, load_block_index, read_series};
 use crate::head::SharedHead;
 use crate::sample::{Labels, Sample, SeriesSamples, TimeRange, merge_series_later_wins};
 use crate::selector::Selector;
@@ -181,6 +181,14 @@ pub(crate) async fn query_blocks(
 ) -> Result<(), MaterializerError> {
     cache.keep_only(entries);
     for entry in entries {
+        // The catalog entry says which span of time the block covers: a block outside the query's range
+        // costs nothing. An entry whose summary cannot be read is no reason to fail; the footer says
+        // the same.
+        if let Some(summary) = BlockSummary::decode(&entry.artifact.summary)
+            && !summary.overlaps(time_range)
+        {
+            continue;
+        }
         let index = cache.index_of(artifacts, entry).await?;
         if !index.footer.summary.overlaps(time_range) {
             continue;

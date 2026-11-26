@@ -177,6 +177,44 @@ fn summary_counts_series_and_samples_and_spans_all_series() {
 }
 
 #[test]
+fn summary_survives_its_catalog_bytes() {
+    let summary = encode_block(&three_series()).summary;
+
+    assert_eq!(BlockSummary::decode(&summary.encode()), Some(summary));
+}
+
+#[test]
+fn summary_in_a_catalog_entry_is_28_bytes() {
+    let summary = encode_block(&three_series()).summary;
+
+    assert_eq!(summary.encode().len(), 28);
+}
+
+#[test]
+fn summary_with_negative_times_survives_its_catalog_bytes() {
+    let summary = BlockSummary {
+        series_count: u32::MAX,
+        sample_count: u64::MAX,
+        min_time_millis: i64::MIN,
+        max_time_millis: -1,
+    };
+
+    assert_eq!(BlockSummary::decode(&summary.encode()), Some(summary));
+}
+
+#[test]
+fn bytes_of_another_length_are_not_a_summary() {
+    let summary = encode_block(&three_series()).summary.encode();
+
+    assert_eq!(BlockSummary::decode(&summary[..27]), None);
+}
+
+#[test]
+fn no_bytes_are_not_a_summary() {
+    assert_eq!(BlockSummary::decode(&[]), None);
+}
+
+#[test]
 fn footer_repeats_the_summary() {
     let encoded = encode_block(&three_series());
 
