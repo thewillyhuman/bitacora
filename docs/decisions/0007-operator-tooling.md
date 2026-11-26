@@ -100,7 +100,8 @@ A snapshot that cannot be written never fails a pass. It is logged and tried aga
 
 `bita metadata restore <snapshot>` writes the keys of a snapshot back, verbatim. It refuses a metadata
 store that holds keys, because the result would mix two states; `--force` makes the store exactly what
-the snapshot was. The restore is several transactions, since etcd limits the size of one, so it is for a
+the snapshot was. (Since [0020](0020-restore-into-a-lost-store.md), registrations of running replicas do
+not count as keys here, and are kept.) The restore is several transactions, since etcd limits the size of one, so it is for a
 cluster whose writers and controllers are stopped.
 
 A snapshot is older than the cluster by up to one interval. A restored stream record can therefore name

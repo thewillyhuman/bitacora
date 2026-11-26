@@ -36,6 +36,18 @@ fn replica_registration_is_keyed_by_the_replica_identifier() {
 }
 
 #[test]
+fn key_of_a_replica_registration_is_recognised() {
+    let registration_key = replica_key(&ReplicaId::new("replica-a").expect("a valid identifier"));
+
+    assert!(is_replica_key(&registration_key));
+}
+
+#[test]
+fn key_of_a_stream_is_no_replica_registration() {
+    assert!(!is_replica_key(&stream_key("replicas")));
+}
+
+#[test]
 fn checkpoints_of_a_stream_are_not_listed_with_those_of_a_longer_identifier() {
     let checkpoint_of_stream_70 = checkpoint_key(StreamId::new(70), "pages");
 

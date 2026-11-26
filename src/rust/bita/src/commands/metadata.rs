@@ -12,8 +12,8 @@
 //! - [`list_snapshots`]: the snapshots in the object store.
 //! - [`restore`]: writes one snapshot back into the metadata store.
 //! - Their results: [`SnapshotList`], [`SnapshotRow`], [`RestoreReport`].
-//! - The steps of a restore: `resolve_snapshot_key`, `fetch_snapshot`, `count_keys_missing_from` and
-//!   `restore_mode_for`.
+//! - The steps of a restore: `resolve_snapshot_key`, `fetch_snapshot` and `plan_restore`, which gives a
+//!   `PlannedRestore`.
 //!
 //! # How it works
 //!
@@ -21,9 +21,13 @@
 //! listing gives them oldest first. `restore` fetches one, verifies its checksum, and writes every key it
 //! holds into the metadata store with the bytes it had.
 //!
-//! A restore into a store that already holds keys would mix two states, so it is refused unless forced;
-//! forced, it makes the store exactly what the snapshot was, deleting every other key. `--dry-run` does
-//! everything except the write, and reports what the write would do.
+//! A restore into a store that is in use would mix two states, so it is refused unless forced; forced,
+//! it makes the store exactly what the snapshot was, deleting every other key. A lost store is not an
+//! empty one, though: the replicas keep running, and each registers again within seconds. A store that
+//! holds registrations and nothing else is therefore restored into without force, and the registrations
+//! stay as the replicas wrote them. What counts as a lost store is the metadata store's rule, not this
+//! file's: `plan_restore` asks it for a preview and reads the answer. `--dry-run` does everything except
+//! the write, and reports what the write would do and whether it needs force.
 //!
 //! [`restore`] reads in a fixed order and writes last: the snapshot's key (a listing, for `latest`), the
 //! snapshot object, then the whole metadata store as it is. Only then does it decide whether to write.
@@ -36,6 +40,7 @@
 //!
 //! - A snapshot that fails its checksum is never restored, not even in part.
 //! - A dry run writes nothing.
+//! - A restore that is not forced never overwrites and never deletes a key.
 //! - Both commands need the cluster's object store and say so if the configuration names none.
 //!
 //! # See also
@@ -44,11 +49,10 @@
 //! - `bitacora-controller/src/controller/snapshot.rs`: who writes the snapshots.
 //! - `commands/rebuild.rs`: recovery from the replicas.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bitacora_artifact::ArtifactStore;
-use bitacora_meta::{MetadataSnapshot, RestoreMode, SNAPSHOT_KEY_PREFIX, snapshot_time_of};
+use bitacora_meta::{MetaError, MetadataSnapshot, RestoreMode, RestoreOutcome, SNAPSHOT_KEY_PREFIX, snapshot_time_of};
 use bytes::Bytes;
 use serde::Serialize;
 use tokio::time::timeout;
@@ -111,6 +115,12 @@ pub(crate) struct RestoreReport {
     pub(crate) keys_written: usize,
     /// How many keys the snapshot does not hold were, or would be, deleted.
     pub(crate) keys_deleted: usize,
+    /// How many keys of the store were, or would be, left as they are: the registrations of running
+    /// replicas, in a restore that is not forced.
+    pub(crate) keys_kept: usize,
+    /// Whether the store holds more than registrations of replicas while the restore is not forced. Only a
+    /// dry run reports that; the counts are then those of a forced restore.
+    pub(crate) needs_force: bool,
 }
 
 impl RestoreReport {
@@ -128,9 +138,13 @@ impl RestoreReport {
             ("keys in the store before", self.keys_in_store_before.to_string()),
             ("keys written", self.keys_written.to_string()),
             ("keys deleted", self.keys_deleted.to_string()),
+            ("keys kept", self.keys_kept.to_string()),
         ]);
-        if self.is_dry_run && self.keys_in_store_before > 0 {
-            rendered.push_str("the metadata store is not empty: the restore needs --force and replaces it\n");
+        if self.needs_force {
+            rendered.push_str(
+                "the metadata store holds more than the registrations of replicas: the restore needs --force and \
+                 replaces everything in it\n",
+            );
         }
         if !self.is_dry_run {
             rendered.push_str("next: run `bita metadata rebuild` to pick up what changed after the snapshot\n");
@@ -189,13 +203,13 @@ pub(crate) async fn list_snapshots(cluster: &Cluster) -> Result<SnapshotList, Co
 ///
 /// * `cluster` - The interfaces to the cluster.
 /// * `snapshot_name` - The object key of the snapshot, or `latest` for the newest one.
-/// * `is_forced` - Restore although the metadata store holds keys: it ends up exactly as the snapshot
-///   was.
+/// * `is_forced` - Restore although the metadata store holds more than registrations of replicas: it
+///   ends up exactly as the snapshot was.
 /// * `is_dry_run` - Read and verify the snapshot, compare it with the store, and write nothing.
 ///
 /// # Returns
 ///
-/// What was, or would be, written and deleted.
+/// What was, or would be, written, deleted and kept.
 ///
 /// # Errors
 ///
@@ -204,7 +218,8 @@ pub(crate) async fn list_snapshots(cluster: &Cluster) -> Result<SnapshotList, Co
 /// * [`CommandError::ObjectStore`] or [`CommandError::ObjectStoreTimedOut`] if the snapshot cannot be
 ///   fetched.
 /// * [`CommandError::UnreadableSnapshot`] if the object is not an intact snapshot.
-/// * [`CommandError::Refused`] if the metadata store holds keys and the restore is not forced.
+/// * [`CommandError::Refused`] if the metadata store holds more than registrations of replicas and the
+///   restore is neither forced nor a dry run.
 /// * [`CommandError::Metadata`] if the metadata store is unavailable or changed during the restore.
 pub(crate) async fn restore(
     cluster: &Cluster,
@@ -216,22 +231,70 @@ pub(crate) async fn restore(
     let object_key = resolve_snapshot_key(cluster, snapshot_name).await?;
     let snapshot = fetch_snapshot(cluster, artifact_store.as_ref(), &object_key).await?;
     let store_before = cluster.metadata.snapshot(cluster.clock.now()).await?;
-    let mut report = RestoreReport {
+    let planned = plan_restore(cluster, &snapshot, is_forced).await?;
+    if let Some(refusal) = &planned.refusal
+        && !is_dry_run
+    {
+        return Err(CommandError::Refused {
+            reason: format!("{refusal}. Look at it with --dry-run, then pass --force to replace everything in it"),
+        });
+    }
+    let outcome = if is_dry_run {
+        planned.preview
+    } else {
+        cluster.metadata.restore(&snapshot, planned.mode).await?
+    };
+    Ok(RestoreReport {
         snapshot: object_key,
         taken_at: format_timestamp(snapshot.taken_at),
         is_dry_run,
         keys_in_store_before: store_before.entries.len(),
-        keys_written: snapshot.entries.len(),
-        keys_deleted: count_keys_missing_from(&snapshot, &store_before),
-    };
-    if is_dry_run {
-        return Ok(report);
+        keys_written: outcome.keys_written,
+        keys_deleted: outcome.keys_deleted,
+        keys_kept: outcome.keys_kept,
+        needs_force: planned.refusal.is_some(),
+    })
+}
+
+/// How a restore would go, worked out before anything is written.
+struct PlannedRestore {
+    /// How the restore would write.
+    mode: RestoreMode,
+    /// What it would change, as the metadata store sees it now.
+    preview: RestoreOutcome,
+    /// Why the metadata store refuses a restore that is not forced, if it does. `mode` and `preview` are then
+    /// those of a forced restore, for a dry run to show.
+    refusal: Option<String>,
+}
+
+/// Asks the metadata store how a restore of `snapshot` would go.
+///
+/// A restore that is not forced is planned as one into a lost store. If the store refuses that, because it holds
+/// more than registrations of replicas, the plan is the one of a forced restore together with the refusal, so that
+/// a dry run can show what force would do. Nothing is written.
+///
+/// # Errors
+///
+/// Returns [`CommandError::Metadata`] if the metadata store cannot be read.
+async fn plan_restore(
+    cluster: &Cluster,
+    snapshot: &MetadataSnapshot,
+    is_forced: bool,
+) -> Result<PlannedRestore, CommandError> {
+    let mut refusal = None;
+    if !is_forced {
+        let mode = RestoreMode::IntoLostStore;
+        match cluster.metadata.preview_restore(snapshot, mode).await {
+            Ok(preview) => {
+                return Ok(PlannedRestore { mode, preview, refusal });
+            }
+            Err(MetaError::InvalidState { reason }) => refusal = Some(reason),
+            Err(meta_error) => return Err(CommandError::Metadata(meta_error)),
+        }
     }
-    let mode = restore_mode_for(store_before.entries.len(), is_forced)?;
-    let outcome = cluster.metadata.restore(&snapshot, mode).await?;
-    report.keys_written = outcome.keys_written;
-    report.keys_deleted = outcome.keys_deleted;
-    Ok(report)
+    let mode = RestoreMode::ReplaceEverything;
+    let preview = cluster.metadata.preview_restore(snapshot, mode).await?;
+    Ok(PlannedRestore { mode, preview, refusal })
 }
 
 /// The object key of the snapshot the operator named: the name itself, or the key of the newest snapshot
@@ -273,43 +336,6 @@ async fn fetch_snapshot(
             object_key: object_key.to_owned(),
             reason,
         }),
-    }
-}
-
-/// How many keys of `store_before` the snapshot does not hold: the keys a forced restore deletes.
-fn count_keys_missing_from(snapshot: &MetadataSnapshot, store_before: &MetadataSnapshot) -> usize {
-    let mut snapshot_keys = BTreeSet::new();
-    for entry in &snapshot.entries {
-        snapshot_keys.insert(entry.key.as_str());
-    }
-    let mut missing_key_count = 0;
-    for existing in &store_before.entries {
-        if !snapshot_keys.contains(existing.key.as_str()) {
-            missing_key_count += 1;
-        }
-    }
-    missing_key_count
-}
-
-/// How to write a snapshot into a store that holds `keys_in_store` keys.
-///
-/// # Errors
-///
-/// Returns [`CommandError::Refused`] if the store holds keys and the restore is not forced: it would
-/// replace all of them.
-fn restore_mode_for(keys_in_store: usize, is_forced: bool) -> Result<RestoreMode, CommandError> {
-    if keys_in_store > 0 && !is_forced {
-        return Err(CommandError::Refused {
-            reason: format!(
-                "the metadata store holds {keys_in_store} keys; restoring replaces all of them with the snapshot. \
-                 Look at it with --dry-run, then pass --force"
-            ),
-        });
-    }
-    if is_forced {
-        Ok(RestoreMode::ReplaceEverything)
-    } else {
-        Ok(RestoreMode::IntoEmptyStore)
     }
 }
 

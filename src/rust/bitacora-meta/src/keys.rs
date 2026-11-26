@@ -10,6 +10,7 @@
 //! # What it contains
 //!
 //! - `stream_key`, `deleted_stream_key`, `checkpoint_key`, `replica_key`: the key of one record.
+//! - `is_replica_key`: whether a key is a replica's registration.
 //! - `STREAM_KEY_PREFIX`, `DELETED_STREAM_KEY_PREFIX`, `REPLICA_KEY_PREFIX`, `checkpoints_key_prefix`: what to list to
 //!   get every record of a kind.
 //! - `STREAM_ID_COUNTER_KEY` and `CONTROLLER_LEADER_KEY`: the two records there is only one of.
@@ -137,6 +138,22 @@ pub(crate) fn checkpoint_key(stream_id: StreamId, materializer: &str) -> String 
 /// The key, for example `replicas/replica-a`.
 pub(crate) fn replica_key(replica_id: &ReplicaId) -> String {
     format!("{REPLICA_KEY_PREFIX}{replica_id}")
+}
+
+/// Says whether `key` is the key of a replica's registration.
+///
+/// A registration is the one record a replica writes itself, again and again. A restore tells it apart from the
+/// records that only a snapshot can bring back.
+///
+/// # Arguments
+///
+/// * `key` - A key of the metadata store, without the prefix of the cluster.
+///
+/// # Returns
+///
+/// `true` for `replicas/replica-a`, `false` for the key of any other record.
+pub(crate) fn is_replica_key(key: &str) -> bool {
+    key.starts_with(REPLICA_KEY_PREFIX)
 }
 
 /// Checks that a stream or materializer name can be part of a key.

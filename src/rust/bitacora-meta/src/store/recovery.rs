@@ -27,14 +27,27 @@
 //! the store. The mode says what to do about keys the store already holds: refuse to start, or end up exactly as the
 //! snapshot was.
 //!
+//! **A lost store is not an empty one.** A replica that is running writes its registration again within seconds of
+//! the store being lost, and the procedure for a lost store leaves the replicas running. So a restore that insisted
+//! on an empty store would be refused every time, and every operator would learn to force it, which is the one thing
+//! the refusal is there to prevent. A restore into a lost store therefore accepts a store that holds registrations
+//! and nothing else. It leaves them alone, because a registration is the replica's own statement and the one in the
+//! store is newer than the snapshot's, and writes every other key of the snapshot, the registrations of replicas
+//! that have not come back among them.
+//!
+//! **Preview.** The same reading and planning as a restore, without the writes, so that a tool can say what a
+//! restore would change and whether it would be refused, with the rule that decides it in one place.
+//!
 //! **Adoption.** A rebuilt stream record is written under its name, replacing the record of the same stream if there is
 //! one. The stream identifier counter is raised to the record's identifier if it is below, in the same transaction, so
 //! that a stream created later never gets an identifier that data on replicas still carries.
 //!
 //! # Invariants
 //!
-//! - A restore into a store that must be empty changes nothing if the store is not empty, and stops as soon as it sees
-//!   a key that somebody else wrote meanwhile.
+//! - A restore into a lost store changes nothing if the store holds a key that is not a replica's registration, and
+//!   stops as soon as it sees such a key that somebody else wrote meanwhile.
+//! - A restore into a lost store never overwrites and never deletes a registration that is in the store.
+//! - A preview writes nothing.
 //! - Adoption never lowers the stream identifier counter, never gives one identifier to two names, never gives one name
 //!   to two identifiers, and never brings back a stream that is recorded as deleted.
 //!
@@ -54,7 +67,7 @@ use super::{
 };
 use crate::error::MetaError;
 use crate::key_value::{Condition, Mutation, TransactionOutcome, VersionedValue};
-use crate::keys::{STREAM_ID_COUNTER_KEY, deleted_stream_key, stream_key, validate_name};
+use crate::keys::{STREAM_ID_COUNTER_KEY, deleted_stream_key, is_replica_key, stream_key, validate_name};
 use crate::records::StreamRecord;
 use crate::snapshot::{MetadataSnapshot, SnapshotEntry};
 
@@ -79,7 +92,7 @@ const RESTORE_BATCH_KEYS: usize = 48;
 ///     .create_stream("orders", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
 ///     .await?;
 ///
-/// let refused = in_use.restore(&snapshot, RestoreMode::IntoEmptyStore).await;
+/// let refused = in_use.restore(&snapshot, RestoreMode::IntoLostStore).await;
 /// let replaced = in_use.restore(&snapshot, RestoreMode::ReplaceEverything).await;
 ///
 /// assert!(matches!(refused, Err(MetaError::InvalidState { .. })));
@@ -89,8 +102,10 @@ const RESTORE_BATCH_KEYS: usize = 48;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestoreMode {
-    /// The store must be empty. If it is not, the restore fails and changes nothing.
-    IntoEmptyStore,
+    /// The store was lost: it holds nothing, or nothing but the registrations that running replicas have written
+    /// into it since. Those are kept, and every other key of the snapshot is written. If the store holds any other
+    /// key, the restore fails and changes nothing.
+    IntoLostStore,
     /// The store ends up as the snapshot was: keys of the snapshot are overwritten and every other key is deleted.
     ReplaceEverything,
 }
@@ -123,7 +138,8 @@ pub enum RestoreMode {
 ///     outcome,
 ///     RestoreOutcome {
 ///         keys_written: 0,
-///         keys_deleted: 2
+///         keys_deleted: 2,
+///         keys_kept: 0
 ///     }
 /// );
 /// # Ok(())
@@ -135,14 +151,32 @@ pub struct RestoreOutcome {
     pub keys_written: usize,
     /// How many keys that the snapshot does not hold were deleted.
     pub keys_deleted: usize,
+    /// How many keys the store held and the restore left as they were: the registrations of running replicas, in a
+    /// restore into a lost store. A restore that replaces everything keeps none.
+    pub keys_kept: usize,
 }
 
 /// The writes a restore will make, worked out before the first one is made.
 struct RestorePlan {
-    /// One write per key of the snapshot, then one delete per key that only the store holds.
+    /// One write per key of the snapshot that is to be written, then one delete per key that is to go.
     mutations: Vec<Mutation>,
+    /// How many of the mutations are writes.
+    keys_written: usize,
     /// How many of the mutations are deletes.
     keys_deleted: usize,
+    /// How many keys of the store no mutation touches.
+    keys_kept: usize,
+}
+
+impl RestorePlan {
+    /// What the store will have changed once every write of the plan is made.
+    fn outcome(&self) -> RestoreOutcome {
+        RestoreOutcome {
+            keys_written: self.keys_written,
+            keys_deleted: self.keys_deleted,
+            keys_kept: self.keys_kept,
+        }
+    }
 }
 
 impl MetadataStore {
@@ -202,8 +236,10 @@ impl MetadataStore {
     /// Writes the content of a snapshot back into the store, after the store was lost (design, section 14, "Disaster
     /// recovery").
     ///
-    /// Every key of the snapshot is written with the bytes it had. With [`RestoreMode::ReplaceEverything`], keys the
-    /// snapshot does not hold are deleted, so that the store ends up as the snapshot was.
+    /// Every key of the snapshot is written with the bytes it had. With [`RestoreMode::IntoLostStore`], the
+    /// registrations that running replicas have written into the store since it was lost are the exception: they
+    /// stay as they are. With [`RestoreMode::ReplaceEverything`], keys the snapshot does not hold are deleted, so
+    /// that the store ends up as the snapshot was.
     ///
     /// The restore is several transactions, not one: a backend limits how much one transaction may change. Run it while
     /// no writer, controller or materializer uses the store. If it fails half way, run it again with
@@ -216,13 +252,13 @@ impl MetadataStore {
     ///
     /// # Returns
     ///
-    /// How many keys were written and how many were deleted.
+    /// How many keys were written, how many were deleted and how many were kept.
     ///
     /// # Errors
     ///
-    /// * [`MetaError::InvalidState`] if the mode is [`RestoreMode::IntoEmptyStore`] and the store holds a key, in which
-    ///   case nothing was changed, or gets one from somebody else while the restore runs, in which case the batches
-    ///   written so far stay.
+    /// * [`MetaError::InvalidState`] if the mode is [`RestoreMode::IntoLostStore`] and the store holds a key that is
+    ///   not a replica's registration, in which case nothing was changed, or gets one from somebody else while the
+    ///   restore runs, in which case the batches written so far stay.
     /// * [`MetaError::Unavailable`] if the store cannot be reached. Part of the snapshot may have been written.
     ///
     /// # Examples
@@ -240,7 +276,7 @@ impl MetadataStore {
     /// let snapshot = lost_store.snapshot(Timestamp::from_unix_millis(1_000)).await?;
     /// let new_store = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
     ///
-    /// let outcome = new_store.restore(&snapshot, RestoreMode::IntoEmptyStore).await?;
+    /// let outcome = new_store.restore(&snapshot, RestoreMode::IntoLostStore).await?;
     ///
     /// assert_eq!(outcome.keys_written, 2);
     /// assert_eq!(new_store.get_stream("orders").await?.name, "orders");
@@ -248,16 +284,7 @@ impl MetadataStore {
     /// # }
     /// ```
     pub async fn restore(&self, snapshot: &MetadataSnapshot, mode: RestoreMode) -> Result<RestoreOutcome, MetaError> {
-        let existing_entries = self.key_value_store.list("").await?;
-        if mode == RestoreMode::IntoEmptyStore && !existing_entries.is_empty() {
-            return Err(MetaError::InvalidState {
-                reason: format!(
-                    "the metadata store holds {} keys; restoring into it would mix two states",
-                    existing_entries.len()
-                ),
-            });
-        }
-        let plan = plan_restore(snapshot, &existing_entries);
+        let plan = self.plan_restore(snapshot, mode).await?;
         for batch in plan.mutations.chunks(RESTORE_BATCH_KEYS) {
             let conditions = conditions_of_a_restore_batch(mode, batch);
             let outcome = self.key_value_store.transact(conditions, batch.to_vec()).await?;
@@ -267,10 +294,72 @@ impl MetadataStore {
                 });
             }
         }
-        Ok(RestoreOutcome {
-            keys_written: snapshot.entries.len(),
-            keys_deleted: plan.keys_deleted,
-        })
+        Ok(plan.outcome())
+    }
+
+    /// Says what [`MetadataStore::restore`] would change if it ran now, and changes nothing.
+    ///
+    /// It reads the store and plans the restore exactly as a restore does, so the answer and the refusal are those a
+    /// restore would give, as long as nobody writes to the store in between.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot` - The snapshot that would be restored.
+    /// * `mode` - What the restore would do about keys the store already holds.
+    ///
+    /// # Returns
+    ///
+    /// How many keys the restore would write, delete and keep.
+    ///
+    /// # Errors
+    ///
+    /// * [`MetaError::InvalidState`] if the mode is [`RestoreMode::IntoLostStore`] and the store holds a key that is
+    ///   not a replica's registration: the restore would be refused.
+    /// * [`MetaError::Unavailable`] if the store could not be read.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), bitacora_meta::MetaError> {
+    /// # use std::sync::Arc;
+    /// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RestoreMode, RetentionPolicy};
+    /// # use bitacora_types::{ReplicationSettings, Timestamp};
+    /// # let lost_store = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+    /// # lost_store
+    /// #     .create_stream("orders", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+    /// #     .await?;
+    /// let snapshot = lost_store.snapshot(Timestamp::from_unix_millis(1_000)).await?;
+    /// let new_store = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+    ///
+    /// let preview = new_store.preview_restore(&snapshot, RestoreMode::IntoLostStore).await?;
+    ///
+    /// assert_eq!(preview.keys_written, 2);
+    /// assert!(new_store.list_streams().await?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn preview_restore(
+        &self,
+        snapshot: &MetadataSnapshot,
+        mode: RestoreMode,
+    ) -> Result<RestoreOutcome, MetaError> {
+        let plan = self.plan_restore(snapshot, mode).await?;
+        Ok(plan.outcome())
+    }
+
+    /// Reads what the store holds and works out the writes of a restore in `mode`.
+    ///
+    /// # Errors
+    ///
+    /// * [`MetaError::InvalidState`] if the mode is [`RestoreMode::IntoLostStore`] and the store is not a lost one.
+    /// * [`MetaError::Unavailable`] if the store could not be read.
+    async fn plan_restore(&self, snapshot: &MetadataSnapshot, mode: RestoreMode) -> Result<RestorePlan, MetaError> {
+        let existing_entries = self.key_value_store.list("").await?;
+        match mode {
+            RestoreMode::IntoLostStore => plan_restore_into_lost_store(snapshot, &existing_entries),
+            RestoreMode::ReplaceEverything => Ok(plan_restore_replacing_everything(snapshot, &existing_entries)),
+        }
     }
 
     /// Writes a stream record that was put together outside the store, as `bita metadata rebuild` does from what
@@ -432,9 +521,72 @@ fn refuse_a_name_that_belongs_to_another_stream(
     Ok(())
 }
 
-/// Works out the writes of a restore: every key of the snapshot is put, and every key the store holds that the snapshot
-/// does not is deleted.
-fn plan_restore(snapshot: &MetadataSnapshot, existing_entries: &[(String, VersionedValue)]) -> RestorePlan {
+/// Works out the writes of a restore into a lost store: every key of the snapshot that the store does not hold is put.
+///
+/// The keys the store holds are registrations of replicas, or the restore is refused. They are left as they are: a
+/// replica wrote them after the snapshot was taken.
+///
+/// # Errors
+///
+/// Returns [`MetaError::InvalidState`] if the store holds a key that is not a replica's registration.
+fn plan_restore_into_lost_store(
+    snapshot: &MetadataSnapshot,
+    existing_entries: &[(String, VersionedValue)],
+) -> Result<RestorePlan, MetaError> {
+    let registration_keys = registration_keys_of_a_lost_store(existing_entries)?;
+    let mut mutations = Vec::with_capacity(snapshot.entries.len());
+    for entry in &snapshot.entries {
+        if !registration_keys.contains(entry.key.as_str()) {
+            mutations.push(Mutation::Put {
+                key: entry.key.clone(),
+                value: entry.value.clone(),
+            });
+        }
+    }
+    let keys_written = mutations.len();
+    Ok(RestorePlan {
+        mutations,
+        keys_written,
+        keys_deleted: 0,
+        keys_kept: registration_keys.len(),
+    })
+}
+
+/// Returns the keys a lost store holds, which are all registrations of replicas.
+///
+/// # Errors
+///
+/// Returns [`MetaError::InvalidState`] if the store holds a key that is not a replica's registration: it is in use,
+/// not lost.
+fn registration_keys_of_a_lost_store(
+    existing_entries: &[(String, VersionedValue)],
+) -> Result<BTreeSet<&str>, MetaError> {
+    let mut registration_keys = BTreeSet::new();
+    let mut other_key_count = 0;
+    for (existing_key, _stored) in existing_entries {
+        if is_replica_key(existing_key) {
+            registration_keys.insert(existing_key.as_str());
+        } else {
+            other_key_count += 1;
+        }
+    }
+    if other_key_count > 0 {
+        return Err(MetaError::InvalidState {
+            reason: format!(
+                "the metadata store holds {other_key_count} keys that are not registrations of replicas; restoring \
+                 into it would mix two states"
+            ),
+        });
+    }
+    Ok(registration_keys)
+}
+
+/// Works out the writes of a restore that replaces everything: every key of the snapshot is put, and every key the
+/// store holds that the snapshot does not is deleted.
+fn plan_restore_replacing_everything(
+    snapshot: &MetadataSnapshot,
+    existing_entries: &[(String, VersionedValue)],
+) -> RestorePlan {
     let mut snapshot_keys = BTreeSet::new();
     let mut mutations = Vec::with_capacity(snapshot.entries.len());
     for entry in &snapshot.entries {
@@ -453,21 +605,30 @@ fn plan_restore(snapshot: &MetadataSnapshot, existing_entries: &[(String, Versio
     }
     RestorePlan {
         mutations,
+        keys_written: snapshot.entries.len(),
         keys_deleted,
+        keys_kept: 0,
     }
 }
 
 /// Returns what must hold for one batch of a restore to be applied.
 ///
-/// A restore into a store that must be empty writes a key only if it is still absent, so that it never overwrites what
-/// somebody else wrote since the restore began. A restore that replaces everything has no conditions.
+/// A restore into a lost store writes a key only if it is still absent, so that it never overwrites what somebody
+/// else wrote since the restore began. A registration is the exception: a replica that was down when the restore
+/// began may register at any moment, a condition on its key would make the restore fail at random and half done, and
+/// the replica's next renewal replaces what was restored anyway. A restore that replaces everything has no
+/// conditions.
 fn conditions_of_a_restore_batch(mode: RestoreMode, batch: &[Mutation]) -> Vec<Condition> {
     let mut conditions = Vec::new();
-    if mode == RestoreMode::IntoEmptyStore {
-        for mutation in batch {
-            if let Mutation::Put { key, .. } = mutation {
-                conditions.push(Condition::IsAbsent { key: key.clone() });
-            }
+    if mode != RestoreMode::IntoLostStore {
+        return conditions;
+    }
+    for mutation in batch {
+        let Mutation::Put { key, .. } = mutation else {
+            continue;
+        };
+        if !is_replica_key(key) {
+            conditions.push(Condition::IsAbsent { key: key.clone() });
         }
     }
     conditions

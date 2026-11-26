@@ -131,6 +131,26 @@ impl TestCluster {
             .expect("the store is emptied");
     }
 
+    /// Deletes every key of the metadata store and has every replica register again, as replicas that are running
+    /// do within seconds of a real loss. Returns how many replicas registered.
+    pub(crate) async fn lose_the_metadata_store_under_running_replicas(&self) -> usize {
+        let registrations = self
+            .cluster
+            .metadata
+            .list_replicas()
+            .await
+            .expect("the replicas are listed");
+        self.lose_the_metadata_store().await;
+        for registration in &registrations {
+            self.cluster
+                .metadata
+                .put_replica(registration)
+                .await
+                .expect("the replica registers again");
+        }
+        registrations.len()
+    }
+
     /// How many keys the metadata store holds.
     pub(crate) async fn metadata_key_count(&self) -> usize {
         self.nodes

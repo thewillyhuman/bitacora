@@ -532,7 +532,7 @@ fn snapshots_are_rendered_as_a_table() {
 }
 
 /// A restore report with every count set to a distinct value.
-fn restore_report(is_dry_run: bool, keys_in_store_before: usize) -> metadata::RestoreReport {
+fn restore_report(is_dry_run: bool, keys_in_store_before: usize, needs_force: bool) -> metadata::RestoreReport {
     metadata::RestoreReport {
         snapshot: "metadata-snapshots/00000001798761599000".to_owned(),
         taken_at: "2026-12-31T23:59:59Z".to_owned(),
@@ -540,12 +540,14 @@ fn restore_report(is_dry_run: bool, keys_in_store_before: usize) -> metadata::Re
         keys_in_store_before,
         keys_written: 12,
         keys_deleted: 2,
+        keys_kept: 3,
+        needs_force,
     }
 }
 
 #[test]
 fn restore_is_rendered_with_what_to_do_next() {
-    let output = CommandOutput::RestoreReport(restore_report(false, 0));
+    let output = CommandOutput::RestoreReport(restore_report(false, 0, false));
 
     assert_eq!(
         output.render(OutputFormat::Table),
@@ -555,13 +557,24 @@ fn restore_is_rendered_with_what_to_do_next() {
          keys in the store before: 0\n\
          keys written:             12\n\
          keys deleted:             2\n\
+         keys kept:                3\n\
          next: run `bita metadata rebuild` to pick up what changed after the snapshot\n"
     );
 }
 
+/// Keys in the store are no reason for the note by themselves: registrations of running replicas are kept.
+#[test]
+fn dry_run_of_a_restore_that_needs_no_force_does_not_ask_for_it() {
+    let output = CommandOutput::RestoreReport(restore_report(true, 5, false));
+
+    let rendered = output.render(OutputFormat::Table);
+
+    assert!(!rendered.contains("--force"), "{rendered}");
+}
+
 #[test]
 fn dry_run_of_a_restore_into_a_used_store_says_that_it_needs_force() {
-    let output = CommandOutput::RestoreReport(restore_report(true, 5));
+    let output = CommandOutput::RestoreReport(restore_report(true, 5, true));
 
     assert_eq!(
         output.render(OutputFormat::Table),
@@ -571,7 +584,9 @@ fn dry_run_of_a_restore_into_a_used_store_says_that_it_needs_force() {
          keys in the store before: 5\n\
          keys written:             12\n\
          keys deleted:             2\n\
-         the metadata store is not empty: the restore needs --force and replaces it\n"
+         keys kept:                3\n\
+         the metadata store holds more than the registrations of replicas: the restore needs --force and \
+         replaces everything in it\n"
     );
 }
 

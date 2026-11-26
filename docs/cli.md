@@ -338,21 +338,30 @@ $ bita metadata restore latest --dry-run
 snapshot:                 metadata-snapshots/00000001798761599000
 taken at:                 2026-12-31T23:59:59Z
 outcome:                  dry run: nothing was written
-keys in the store before: 0
-keys written:             42
+keys in the store before: 3
+keys written:             39
 keys deleted:             0
+keys kept:                3
 $ bita metadata restore latest
 snapshot:                 metadata-snapshots/00000001798761599000
 taken at:                 2026-12-31T23:59:59Z
 outcome:                  restored
-keys in the store before: 0
-keys written:             42
+keys in the store before: 3
+keys written:             39
 keys deleted:             0
+keys kept:                3
 next: run `bita metadata rebuild` to pick up what changed after the snapshot
 ```
 
-A metadata store that already holds keys is refused, because the result would mix two states. `--force`
-restores anyway and makes the store exactly what the snapshot was: every other key is deleted.
+A lost metadata store is not empty for long. The replicas keep running, and each writes its registration
+again within seconds, as the three above did. The restore leaves those registrations as they are, because
+a replica's own statement is newer than the snapshot's, and writes every other key of the snapshot, the
+registrations of replicas that have not come back among them.
+
+A metadata store that holds anything else is in use, and is refused, because the result would mix two
+states. `--force` restores anyway and makes the store exactly what the snapshot was: every other key is
+deleted, and no registration is kept. A dry run says when force would be needed, and shows what it would
+delete.
 
 A snapshot is up to five minutes older than the cluster. A stream that rolled to a new segment or
 changed its writer since then is behind in the restored store, and a writer cannot take it over until

@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: cli
+note: "`bita metadata restore` no longer needs --force after the metadata store was lost. Replicas that keep running register again within seconds, so the store was never empty and the restore was always refused. Their registrations are now kept, everything else comes from the snapshot, and a store that holds any other key is still refused. The report counts the keys it kept."
+issues: [5]

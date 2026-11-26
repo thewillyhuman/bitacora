@@ -4,10 +4,10 @@
 //! # What is covered
 //!
 //! - Listing: nothing before a snapshot exists, snapshots oldest first, other objects ignored.
-//! - Restoring: into a lost store, by key and as `latest`; refused into a store that holds keys unless
-//!   forced; a dry run writes nothing.
+//! - Restoring: into a lost store, by key and as `latest`; next to replicas that registered again since
+//!   the loss, whose registrations are kept; refused into a store that holds more than registrations
+//!   unless forced; a dry run writes nothing and says whether force is needed.
 //! - Refusals: no object store, no snapshot, a missing snapshot, a damaged one.
-//! - The rule that decides how a restore writes, as a pure function: `restore_mode_for`.
 //!
 //! # How the fixtures work
 //!
@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactError;
-use bitacora_meta::{RestoreMode, snapshot_object_key};
+use bitacora_meta::snapshot_object_key;
 
 use super::*;
 use crate::commands::stream;
@@ -140,6 +140,51 @@ async fn restore_reports_the_keys_it_wrote() {
     assert_eq!(report.keys_in_store_before, 0);
     assert_eq!(report.keys_written, keys_before_the_loss);
     assert_eq!(report.keys_deleted, 0);
+    assert_eq!(report.keys_kept, 0);
+}
+
+/// Found on a real cluster. The procedure for a lost store leaves the replicas running, and they register
+/// again within seconds, so the store an operator restores into is never empty. Refusing it made `--force`
+/// part of every restore.
+#[tokio::test(start_paused = true)]
+async fn lost_store_that_the_replicas_registered_in_again_is_restored_without_force() {
+    let (started, _object_key) = cluster_with_a_snapshot().await;
+    started.lose_the_metadata_store_under_running_replicas().await;
+
+    restore(&started.cluster, "latest", false, false)
+        .await
+        .expect("the snapshot is restored");
+
+    let described = stream::describe(&started.cluster, STREAM).await;
+    assert!(described.is_ok(), "{described:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn restore_next_to_registered_replicas_reports_the_registrations_it_kept() {
+    let (started, _object_key) = cluster_with_a_snapshot().await;
+    let keys_before_the_loss = started.metadata_key_count().await;
+    let registered_replica_count = started.lose_the_metadata_store_under_running_replicas().await;
+
+    let report = restore(&started.cluster, "latest", false, false)
+        .await
+        .expect("the snapshot is restored");
+
+    assert_eq!(report.keys_in_store_before, registered_replica_count);
+    assert_eq!(report.keys_kept, registered_replica_count);
+    assert_eq!(report.keys_written, keys_before_the_loss - registered_replica_count);
+    assert_eq!(report.keys_deleted, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dry_run_next_to_registered_replicas_does_not_ask_for_force() {
+    let (started, _object_key) = cluster_with_a_snapshot().await;
+    started.lose_the_metadata_store_under_running_replicas().await;
+
+    let report = restore(&started.cluster, "latest", false, true)
+        .await
+        .expect("the snapshot is read");
+
+    assert!(!report.needs_force);
 }
 
 #[tokio::test(start_paused = true)]
@@ -149,6 +194,33 @@ async fn restore_into_a_store_that_holds_keys_is_refused() {
     let refused = restore(&started.cluster, "latest", false, false).await;
 
     assert!(matches!(refused, Err(CommandError::Refused { .. })));
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_restore_changes_nothing() {
+    let (started, _object_key) = cluster_with_a_snapshot().await;
+    stream::create(&started.cluster, "created-after-the-snapshot", 3, 2, None)
+        .await
+        .expect("the stream is created");
+
+    let _refused = restore(&started.cluster, "latest", false, false).await;
+
+    let listed = stream::list(&started.cluster).await.expect("lists");
+    assert_eq!(listed.streams.len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn refusal_of_a_restore_says_how_to_go_on() {
+    let (started, _object_key) = cluster_with_a_snapshot().await;
+
+    let refused = restore(&started.cluster, "latest", false, false)
+        .await
+        .expect_err("a store in use is not overwritten unasked");
+
+    assert!(
+        refused.to_string().contains("--dry-run, then pass --force"),
+        "{refused}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -208,6 +280,29 @@ async fn dry_run_into_a_store_that_holds_keys_says_what_would_be_deleted() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn dry_run_into_a_store_that_holds_keys_says_that_the_restore_needs_force() {
+    let (started, _object_key) = cluster_with_a_snapshot().await;
+
+    let report = restore(&started.cluster, "latest", false, true)
+        .await
+        .expect("the snapshot is read");
+
+    assert!(report.needs_force);
+}
+
+/// The note is for the operator who has not forced yet; one who has needs no reminder.
+#[tokio::test(start_paused = true)]
+async fn forced_dry_run_does_not_ask_for_force() {
+    let (started, _object_key) = cluster_with_a_snapshot().await;
+
+    let report = restore(&started.cluster, "latest", true, true)
+        .await
+        .expect("the snapshot is read");
+
+    assert!(!report.needs_force);
+}
+
+#[tokio::test(start_paused = true)]
 async fn restoring_the_latest_snapshot_when_there_is_none_fails() {
     let started = TestCluster::with_stream(3).await;
 
@@ -260,33 +355,4 @@ async fn restoring_needs_an_object_store() {
     let refused = restore(&started.cluster, "latest", false, false).await;
 
     assert_eq!(refused, Err(CommandError::NoObjectStore));
-}
-
-/// Without force the metadata store itself still refuses if a key appeared since the command looked.
-#[test]
-fn restore_into_an_empty_store_requires_it_to_stay_empty() {
-    let mode = restore_mode_for(0, false);
-
-    assert_eq!(mode, Ok(RestoreMode::IntoEmptyStore));
-}
-
-#[test]
-fn forced_restore_replaces_everything_the_store_holds() {
-    let mode = restore_mode_for(12, true);
-
-    assert_eq!(mode, Ok(RestoreMode::ReplaceEverything));
-}
-
-#[test]
-fn restore_into_a_store_with_keys_is_refused_without_force() {
-    let refused = restore_mode_for(12, false);
-
-    assert!(matches!(refused, Err(CommandError::Refused { .. })), "{refused:?}");
-}
-
-#[test]
-fn refusal_of_a_restore_says_how_many_keys_would_be_replaced() {
-    let refused = restore_mode_for(12, false).expect_err("a store with keys is not overwritten unasked");
-
-    assert!(refused.to_string().contains("holds 12 keys"), "{refused}");
 }

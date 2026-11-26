@@ -54,3 +54,4 @@ and what follows from it.
 | [0017](decisions/0017-request-size.md) | An append request carries up to 4 MiB |
 | [0018](decisions/0018-soak-tool.md) | A soak tool judges a real cluster with the simulator's checker |
 | [0019](decisions/0019-placement-spread.md) | Placement spreads over replicas that are equally good |
+| [0020](decisions/0020-restore-into-a-lost-store.md) | A restore keeps the registrations of running replicas |
