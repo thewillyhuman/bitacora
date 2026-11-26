@@ -218,11 +218,11 @@ impl Harness {
     /// Opens a store with the block policy `P` that takes the stream at once and checkpoints every
     /// `checkpoint_after`. The controller runs first: a writer opens its segment on the standby
     /// replicas, and the store opened before used the last ones up.
-    pub(crate) async fn open_with<P: BlockPolicy>(
+    pub(crate) async fn open_with<Policy: BlockPolicy>(
         &self,
         writer_settings: WriterSettings,
         checkpoint_after: Duration,
-    ) -> MetricsStore<P> {
+    ) -> MetricsStore<Policy> {
         self.run_controller_pass().await;
         let settings = MetricsSettings {
             takeover: TakeoverPolicy::Force,

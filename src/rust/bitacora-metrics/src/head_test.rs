@@ -24,6 +24,19 @@ fn at(sequence: u64) -> SequenceNumber {
     SequenceNumber::new(sequence)
 }
 
+/// The records from `first` to `last`, both included, as a head says which records it holds.
+fn held(first: u64, last: u64) -> SequenceRange {
+    SequenceRange::new(at(first), at(last)).expect("a range that is in order")
+}
+
+/// The record at `sequence`, decoded into `batch`.
+fn decoded(sequence: u64, batch: Vec<SeriesSamples>) -> DecodedRecord {
+    DecodedRecord {
+        sequence: at(sequence),
+        batch,
+    }
+}
+
 /// Limits that no part reaches: the whole head is one filling part.
 const NO_LIMITS: BlockLimits = BlockLimits {
     max_samples: u64::MAX,
@@ -42,9 +55,9 @@ fn head_with_a_full_part() -> SharedHead {
     let head = SharedHead::default();
     head.add_records(
         &[
-            (at(7), batch("api", &[10, 20])),
-            (at(8), batch("api", &[30, 40])),
-            (at(9), batch("web", &[50])),
+            decoded(7, batch("api", &[10, 20])),
+            decoded(8, batch("api", &[30, 40])),
+            decoded(9, batch("web", &[50])),
         ],
         FOUR_SAMPLES,
     );
@@ -152,7 +165,7 @@ fn record_without_samples_still_counts_as_held() {
 
     head.add_record(at(4), &batch("api", &[]));
 
-    assert_eq!(head.held_records(), Some((at(4), at(4))));
+    assert_eq!(head.held_records(), Some(held(4, 4)));
 }
 
 #[test]
@@ -163,7 +176,7 @@ fn held_records_run_from_the_first_to_the_last_added() {
     head.add_record(at(5), &batch("api", &[20]));
     head.add_record(at(6), &batch("web", &[30]));
 
-    assert_eq!(head.held_records(), Some((at(4), at(6))));
+    assert_eq!(head.held_records(), Some(held(4, 6)));
 }
 
 #[test]
@@ -302,10 +315,10 @@ fn part_rebuilt_from_its_samples_holds_them() {
     saved.add_record(at(7), &batch("api", &[10, 20]));
     saved.add_record(at(8), &batch("web", &[5]));
 
-    let rebuilt = HeadSamples::from_saved(saved.samples_by_series().clone(), (at(7), at(8)));
+    let rebuilt = HeadSamples::from_saved(saved.samples_by_series().clone(), held(7, 8));
 
     assert_eq!(rebuilt.samples_by_series(), saved.samples_by_series());
-    assert_eq!(rebuilt.held_records(), Some((at(7), at(8))));
+    assert_eq!(rebuilt.held_records(), Some(held(7, 8)));
 }
 
 #[test]
@@ -314,7 +327,7 @@ fn part_rebuilt_from_its_samples_is_as_full_as_the_part_that_was_saved() {
     saved.add_record(at(7), &batch("api", &[10, 20]));
     saved.add_record(at(8), &batch("web", &[5]));
 
-    let rebuilt = HeadSamples::from_saved(saved.samples_by_series().clone(), (at(7), at(8)));
+    let rebuilt = HeadSamples::from_saved(saved.samples_by_series().clone(), held(7, 8));
 
     assert_eq!(rebuilt.sample_count(), saved.sample_count());
     assert_eq!(rebuilt.time_span_millis(), saved.time_span_millis());
@@ -322,10 +335,10 @@ fn part_rebuilt_from_its_samples_is_as_full_as_the_part_that_was_saved() {
 
 #[test]
 fn part_rebuilt_without_samples_still_knows_its_records() {
-    let rebuilt = HeadSamples::from_saved(BTreeMap::new(), (at(7), at(9)));
+    let rebuilt = HeadSamples::from_saved(BTreeMap::new(), held(7, 9));
 
     assert_eq!(rebuilt.sample_count(), 0);
-    assert_eq!(rebuilt.held_records(), Some((at(7), at(9))));
+    assert_eq!(rebuilt.held_records(), Some(held(7, 9)));
 }
 
 #[test]
@@ -341,17 +354,23 @@ fn snapshot_of_a_new_shared_head_covers_no_record() {
 #[test]
 fn snapshot_says_which_records_its_samples_come_from() {
     let head = SharedHead::default();
-    head.add_records(&[(at(7), batch("api", &[10])), (at(8), batch("api", &[20]))], NO_LIMITS);
+    head.add_records(
+        &[decoded(7, batch("api", &[10])), decoded(8, batch("api", &[20]))],
+        NO_LIMITS,
+    );
 
     let snapshot = head.snapshot(&Selector::all(), TimeRange::ALL);
 
-    assert_eq!(snapshot.held_records, Some((at(7), at(8))));
+    assert_eq!(snapshot.held_records, Some(held(7, 8)));
 }
 
 #[test]
 fn snapshot_holds_the_selected_samples() {
     let head = SharedHead::default();
-    head.add_records(&[(at(7), batch("api", &[10])), (at(8), batch("web", &[20]))], NO_LIMITS);
+    head.add_records(
+        &[decoded(7, batch("api", &[10])), decoded(8, batch("web", &[20]))],
+        NO_LIMITS,
+    );
     let only_web = Selector::new(vec![crate::selector::Matcher::equal("job", "web")]);
 
     let snapshot = head.snapshot(&only_web, TimeRange::ALL);
@@ -364,7 +383,7 @@ fn snapshot_holds_the_selected_samples() {
 #[test]
 fn head_that_never_sealed_says_so() {
     let head = SharedHead::default();
-    head.add_records(&[(at(7), batch("api", &[10]))], NO_LIMITS);
+    head.add_records(&[decoded(7, batch("api", &[10]))], NO_LIMITS);
 
     let snapshot = head.snapshot(&Selector::all(), TimeRange::ALL);
 
@@ -375,7 +394,7 @@ fn head_that_never_sealed_says_so() {
 fn head_without_a_full_part_names_no_end_of_a_block() {
     let head = SharedHead::default();
 
-    head.add_records(&[(at(7), batch("api", &[10, 20, 30]))], FOUR_SAMPLES);
+    head.add_records(&[decoded(7, batch("api", &[10, 20, 30]))], FOUR_SAMPLES);
 
     assert_eq!(head.oldest_full_part_end(), None);
 }
@@ -403,9 +422,9 @@ fn several_parts_can_be_full_at_once() {
 
     head.add_records(
         &[
-            (at(1), batch("api", &[10, 20, 30, 40])),
-            (at(2), batch("api", &[50, 60, 70, 80])),
-            (at(3), batch("api", &[90])),
+            decoded(1, batch("api", &[10, 20, 30, 40])),
+            decoded(2, batch("api", &[50, 60, 70, 80])),
+            decoded(3, batch("api", &[90])),
         ],
         FOUR_SAMPLES,
     );
@@ -420,10 +439,10 @@ fn several_parts_can_be_full_at_once() {
 #[test]
 fn parts_end_at_the_same_records_however_the_records_arrive() {
     let records = [
-        (at(1), batch("api", &[10, 20])),
-        (at(2), batch("api", &[30, 40])),
-        (at(3), batch("api", &[50, 60, 70])),
-        (at(4), batch("api", &[80])),
+        decoded(1, batch("api", &[10, 20])),
+        decoded(2, batch("api", &[30, 40])),
+        decoded(3, batch("api", &[50, 60, 70])),
+        decoded(4, batch("api", &[80])),
     ];
     let all_at_once = SharedHead::default();
     all_at_once.add_records(&records, FOUR_SAMPLES);
@@ -447,7 +466,7 @@ fn snapshot_covers_the_records_of_every_part() {
 
     let snapshot = head.snapshot(&Selector::all(), TimeRange::ALL);
 
-    assert_eq!(snapshot.held_records, Some((at(7), at(9))));
+    assert_eq!(snapshot.held_records, Some(held(7, 9)));
 }
 
 #[test]
@@ -471,7 +490,7 @@ fn sample_in_a_later_part_replaces_the_one_in_an_earlier_part() {
     let mut replacement = batch("api", &[10]);
     replacement[0].samples[0].value = 99.0;
     head.add_records(
-        &[(at(1), batch("api", &[10, 20, 30, 40])), (at(2), replacement)],
+        &[decoded(1, batch("api", &[10, 20, 30, 40])), decoded(2, replacement)],
         FOUR_SAMPLES,
     );
 
@@ -529,7 +548,7 @@ fn encoding_leaves_the_head_as_it_was() {
 
     assert_eq!(
         head.snapshot(&Selector::all(), TimeRange::ALL).held_records,
-        Some((at(7), at(9)))
+        Some(held(7, 9))
     );
 }
 
@@ -540,7 +559,7 @@ fn sealed_part_is_dropped_and_the_rest_is_kept() {
     head.drop_through(at(8));
 
     let snapshot = head.snapshot(&Selector::all(), TimeRange::ALL);
-    assert_eq!(snapshot.held_records, Some((at(9), at(9))));
+    assert_eq!(snapshot.held_records, Some(held(9, 9)));
     assert_eq!(snapshot.samples_by_series.len(), 1);
 }
 
@@ -577,21 +596,21 @@ fn head_remembers_up_to_which_record_it_was_sealed() {
 #[test]
 fn head_takes_records_again_after_a_seal() {
     let head = SharedHead::default();
-    head.add_records(&[(at(7), batch("api", &[10]))], NO_LIMITS);
+    head.add_records(&[decoded(7, batch("api", &[10]))], NO_LIMITS);
     head.drop_through(at(7));
 
-    head.add_records(&[(at(8), batch("api", &[20]))], NO_LIMITS);
+    head.add_records(&[decoded(8, batch("api", &[20]))], NO_LIMITS);
 
     assert_eq!(
         head.snapshot(&Selector::all(), TimeRange::ALL).held_records,
-        Some((at(8), at(8)))
+        Some(held(8, 8))
     );
 }
 
 #[test]
 fn filling_part_is_saved_as_a_block() {
     let head = SharedHead::default();
-    head.add_records(&[(at(7), batch("api", &[10, 20]))], FOUR_SAMPLES);
+    head.add_records(&[decoded(7, batch("api", &[10, 20]))], FOUR_SAMPLES);
 
     let saved = head.encode_filling_part();
 
@@ -601,13 +620,13 @@ fn filling_part_is_saved_as_a_block() {
 #[test]
 fn saving_leaves_the_head_as_it_was() {
     let head = SharedHead::default();
-    head.add_records(&[(at(7), batch("api", &[10, 20]))], FOUR_SAMPLES);
+    head.add_records(&[decoded(7, batch("api", &[10, 20]))], FOUR_SAMPLES);
 
     drop(head.encode_filling_part());
 
     assert_eq!(
         head.snapshot(&Selector::all(), TimeRange::ALL).held_records,
-        Some((at(7), at(7)))
+        Some(held(7, 7))
     );
 }
 
@@ -622,15 +641,15 @@ fn saving_around_a_full_part_is_a_mistake_of_the_caller() {
 #[test]
 fn restored_head_is_filled_by_the_record_that_would_have_filled_the_saved_one() {
     let uninterrupted = SharedHead::default();
-    uninterrupted.add_records(&[(at(7), batch("api", &[10, 20]))], FOUR_SAMPLES);
+    uninterrupted.add_records(&[decoded(7, batch("api", &[10, 20]))], FOUR_SAMPLES);
     let saved = uninterrupted.encode_filling_part();
     let saved_samples = crate::block::decode_whole_block(&saved.bytes).expect("a valid block");
     let restored = SharedHead::default();
-    restored.restore_filling_part(HeadSamples::from_saved(saved_samples, (at(7), at(7))));
+    restored.restore_filling_part(HeadSamples::from_saved(saved_samples, held(7, 7)));
     let later_records = [
-        (at(8), batch("api", &[30])),
-        (at(9), batch("api", &[40])),
-        (at(10), batch("api", &[50])),
+        decoded(8, batch("api", &[30])),
+        decoded(9, batch("api", &[40])),
+        decoded(10, batch("api", &[50])),
     ];
 
     uninterrupted.add_records(&later_records, FOUR_SAMPLES);
@@ -643,12 +662,12 @@ fn restored_head_is_filled_by_the_record_that_would_have_filled_the_saved_one() 
 #[test]
 fn restored_head_encodes_the_block_the_saved_head_would_have() {
     let uninterrupted = SharedHead::default();
-    uninterrupted.add_records(&[(at(7), batch("api", &[10, 20]))], FOUR_SAMPLES);
+    uninterrupted.add_records(&[decoded(7, batch("api", &[10, 20]))], FOUR_SAMPLES);
     let saved = uninterrupted.encode_filling_part();
     let saved_samples = crate::block::decode_whole_block(&saved.bytes).expect("a valid block");
     let restored = SharedHead::default();
-    restored.restore_filling_part(HeadSamples::from_saved(saved_samples, (at(7), at(7))));
-    let later_records = [(at(8), batch("web", &[30, 40]))];
+    restored.restore_filling_part(HeadSamples::from_saved(saved_samples, held(7, 7)));
+    let later_records = [decoded(8, batch("web", &[30, 40]))];
     uninterrupted.add_records(&later_records, FOUR_SAMPLES);
     restored.add_records(&later_records, FOUR_SAMPLES);
 
@@ -669,11 +688,11 @@ fn restored_head_shows_the_saved_records_to_queries() {
 
     restored.restore_filling_part(HeadSamples::from_saved(
         saved_part.samples_by_series().clone(),
-        (at(7), at(7)),
+        held(7, 7),
     ));
 
     let snapshot = restored.snapshot(&Selector::all(), TimeRange::ALL);
-    assert_eq!(snapshot.held_records, Some((at(7), at(7))));
+    assert_eq!(snapshot.held_records, Some(held(7, 7)));
     assert_eq!(snapshot.samples_by_series.len(), 1);
 }
 

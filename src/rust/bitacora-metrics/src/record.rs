@@ -58,7 +58,19 @@ use crate::sample::{InvalidLabels, Label, Labels, Sample, SeriesSamples};
 const RECORD_FORMAT_VERSION: u8 = 1;
 
 /// The stored size of one sample: a timestamp and a value of eight bytes each.
-const SAMPLE_BYTES: usize = 16;
+const SAMPLE_BYTES: usize = 8 + 8;
+
+/// The stored size of the fixed start of a record: the format version and the number of series.
+const RECORD_START_BYTES: usize = 1 + 4;
+
+/// The stored size of the number of samples of one series.
+const SAMPLE_COUNT_BYTES: usize = 4;
+
+/// The stored size of the number of labels of a label set.
+const LABEL_COUNT_BYTES: usize = 2;
+
+/// The stored size of the length in front of a label's name or value.
+const TEXT_LENGTH_BYTES: usize = 2;
 
 /// Why a batch of samples cannot become a log record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -159,27 +171,43 @@ pub fn encode_record(batch: &[SeriesSamples]) -> Result<Bytes, InvalidBatch> {
 
 /// How many bytes `batch` takes as a record.
 fn encoded_record_bytes(batch: &[SeriesSamples]) -> usize {
-    // Format version and series count.
-    let mut encoded_bytes = 1 + 4;
+    let mut encoded_bytes = RECORD_START_BYTES;
     for series in batch {
         encoded_bytes += encoded_labels_bytes(&series.labels);
-        // Sample count, then the samples.
-        encoded_bytes += 4 + series.samples.len() * SAMPLE_BYTES;
+        encoded_bytes += SAMPLE_COUNT_BYTES + series.samples.len() * SAMPLE_BYTES;
     }
     encoded_bytes
 }
 
 /// How many bytes a label set takes in a record or in a block: its count, then each name and value with
 /// their lengths.
+///
+/// # Arguments
+///
+/// * `labels` - The label set.
+///
+/// # Returns
+///
+/// The number of bytes [`put_labels`] writes for it.
 pub(crate) fn encoded_labels_bytes(labels: &Labels) -> usize {
-    let mut encoded_bytes = 2;
+    let mut encoded_bytes = LABEL_COUNT_BYTES;
     for label in labels.labels() {
-        encoded_bytes += 2 + label.name.len() + 2 + label.value.len();
+        encoded_bytes += TEXT_LENGTH_BYTES + label.name.len() + TEXT_LENGTH_BYTES + label.value.len();
     }
     encoded_bytes
 }
 
 /// Writes a label set the way records and blocks both store it.
+///
+/// # Arguments
+///
+/// * `output` - Where the bytes are appended.
+/// * `labels` - The label set to write.
+///
+/// # Panics
+///
+/// Never for a valid label set: [`Labels`] holds at most 64 labels of at most 1024 bytes each, which fit the
+/// two-byte counts.
 pub(crate) fn put_labels(output: &mut BytesMut, labels: &Labels) {
     output.put_u16_le(u16::try_from(labels.labels().len()).expect("a label set has at most 64 labels"));
     for label in labels.labels() {
@@ -204,6 +232,14 @@ pub(crate) enum LabelsReadError {
 }
 
 /// Reads a label set written by [`put_labels`] and moves `unread` past it.
+///
+/// # Arguments
+///
+/// * `unread` - Bytes that start with a stored label set. They are consumed up to its end.
+///
+/// # Returns
+///
+/// The label set.
 ///
 /// # Errors
 ///

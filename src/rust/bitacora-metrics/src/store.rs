@@ -67,7 +67,13 @@ use crate::record::{InvalidBatch, encode_record};
 use crate::sample::{SeriesSamples, TimeRange};
 use crate::selector::Selector;
 
+/// How long a query waits for the materializer to apply the record it asked to see, unless the settings say
+/// otherwise.
+const DEFAULT_QUERY_WAIT: Duration = Duration::from_secs(10);
+
 /// What a store needs to reach the cluster.
+///
+/// The example of [`MetricsStore`] builds one for a cluster that runs inside the process.
 #[derive(Clone)]
 pub struct MetricsDependencies {
     /// The client the store writes and follows the stream with.
@@ -79,6 +85,21 @@ pub struct MetricsDependencies {
 }
 
 /// How a store takes its stream over, paces its checkpoints and bounds its queries.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use bitacora_metrics::MetricsSettings;
+///
+/// // A store whose queries give up sooner than the default ten seconds.
+/// let settings = MetricsSettings {
+///     query_wait: Duration::from_secs(2),
+///     ..MetricsSettings::default()
+/// };
+/// assert_eq!(settings.checkpoint_after, Duration::from_secs(60));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MetricsSettings {
     /// What to do if another store still holds the writer's lease.
@@ -93,6 +114,37 @@ pub struct MetricsSettings {
     pub query_wait: Duration,
 }
 
+impl MetricsSettings {
+    /// The settings of the runner that runs this store's materializer: the store's pacing under the store's name.
+    fn runner_settings(&self) -> RunnerSettings {
+        RunnerSettings {
+            checkpoint_after_bytes: self.checkpoint_after_bytes,
+            checkpoint_after: self.checkpoint_after,
+            retry_interval: self.retry_interval,
+            ..RunnerSettings::for_materializer(METRICS_MATERIALIZER)
+        }
+    }
+}
+
+/// Opens, for reading, the place in the object store where the materializer of `stream_name` keeps its blocks.
+///
+/// A stream that cannot be looked up is reported as a materializer that cannot start, which is what it means for
+/// the store.
+async fn blocks_of_stream(
+    dependencies: &MetricsDependencies,
+    stream_name: &str,
+) -> Result<ArtifactNamespace, MetricsError> {
+    let stream = match dependencies.metadata.get_stream(stream_name).await {
+        Ok(stream) => stream,
+        Err(meta_error) => return Err(MetricsError::Materializer(RunnerError::Metadata(meta_error))),
+    };
+    Ok(ArtifactNamespace::read_only(
+        Arc::clone(&dependencies.artifact_store),
+        stream.stream_id,
+        METRICS_MATERIALIZER,
+    ))
+}
+
 impl Default for MetricsSettings {
     /// Waits for a live writer's lease to lapse, checkpoints every 64 MiB or 60 seconds, and gives a
     /// query ten seconds to see the record it asked for.
@@ -103,12 +155,24 @@ impl Default for MetricsSettings {
             checkpoint_after_bytes: runner.checkpoint_after_bytes,
             checkpoint_after: runner.checkpoint_after,
             retry_interval: runner.retry_interval,
-            query_wait: Duration::from_secs(10),
+            query_wait: DEFAULT_QUERY_WAIT,
         }
     }
 }
 
 /// How current an answer a query asks for.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::QueryPosition;
+/// use bitacora_types::SequenceNumber;
+///
+/// // What a dashboard asks for, and what a client that has just appended record 42 asks for.
+/// let for_a_dashboard = QueryPosition::Applied;
+/// let to_read_my_own_samples = QueryPosition::AtLeast(SequenceNumber::new(42));
+/// assert_ne!(for_a_dashboard, to_read_my_own_samples);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryPosition {
     /// Whatever the materializer has applied when the query runs. Never waits.
@@ -119,6 +183,21 @@ pub enum QueryPosition {
 }
 
 /// Why an operation on a store failed, split by what the caller may conclude from it.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_client::AppendError;
+/// use bitacora_metrics::MetricsError;
+///
+/// /// Whether the samples may be in the log. Appending them again is safe either way.
+/// fn may_be_appended(append_error: &MetricsError) -> bool {
+///     matches!(append_error, MetricsError::OutcomeUnknown { .. })
+/// }
+///
+/// assert!(may_be_appended(&MetricsError::OutcomeUnknown { reason: AppendError::Fenced }));
+/// assert!(!may_be_appended(&MetricsError::NotWritten { reason: AppendError::Closed }));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum MetricsError {
     /// The store could not become the writer of the stream. Nothing changed.
@@ -181,34 +260,46 @@ impl From<QueryFailure> for MetricsError {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// # use bitacora_metrics::{
-/// #     Labels, Matcher, MetricsDependencies, MetricsSettings, MetricsStore, QueryPosition, Sample, Selector,
-/// #     SeriesSamples, TimeRange,
+/// A store on the stream `tenant-7` of a cluster that runs inside this process:
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use bitacora_artifact::MemoryArtifactStore;
+/// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+/// # use bitacora_metrics::{MetricsDependencies, MetricsSettings, MetricsStore};
+/// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let cluster = bitacora_testkit::Cluster::start(3).await;
+/// # let client = BitacoraClient::new(
+/// #     cluster.metadata().clone(),
+/// #     cluster.connector(),
+/// #     cluster.clock(),
+/// #     ClientSettings::default(),
+/// # );
+/// # client.admin().create_stream("tenant-7", StreamOptions::default()).await?;
+/// # let dependencies = MetricsDependencies {
+/// #     client,
+/// #     metadata: cluster.metadata().clone(),
+/// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
 /// # };
-/// # async fn example(dependencies: MetricsDependencies) -> Result<(), Box<dyn std::error::Error>> {
+/// use bitacora_metrics::{Labels, Matcher, QueryPosition, Sample, Selector, SeriesSamples, TimeRange};
+///
 /// MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
 /// let store: MetricsStore = MetricsStore::open(dependencies, "tenant-7", MetricsSettings::default()).await?;
 ///
-/// let appended_at = store
-///     .append(&[SeriesSamples {
-///         labels: Labels::from_pairs(&[("__name__", "requests_total"), ("job", "api")])?,
-///         samples: vec![Sample { timestamp_millis: 1_700_000_000_000, value: 12.0 }],
-///     }])
-///     .await?;
+/// let requests = SeriesSamples {
+///     labels: Labels::from_pairs(&[("__name__", "requests_total"), ("job", "api")])?,
+///     samples: vec![Sample { timestamp_millis: 1_700_000_000_000, value: 12.0 }],
+/// };
+/// let appended_at = store.append(&[requests]).await?;
 ///
-/// let answer = store
-///     .query(
-///         &Selector::new(vec![Matcher::equal("job", "api")]),
-///         TimeRange::ALL,
-///         QueryPosition::AtLeast(appended_at),
-///     )
-///     .await?;
+/// let from_the_api = Selector::new(vec![Matcher::equal("job", "api")]);
+/// let answer = store.query(&from_the_api, TimeRange::ALL, QueryPosition::AtLeast(appended_at)).await?;
 /// assert_eq!(answer.series.len(), 1);
 /// # Ok(())
 /// # }
 /// ```
-pub struct MetricsStore<P: BlockPolicy = StandardBlocks> {
+pub struct MetricsStore<Policy: BlockPolicy = StandardBlocks> {
     /// The writer of the stream.
     writer: StreamWriter,
     /// The samples the materializer has applied and not yet sealed.
@@ -226,7 +317,7 @@ pub struct MetricsStore<P: BlockPolicy = StandardBlocks> {
     /// How long a query waits for the record it asked to see.
     query_wait: Duration,
     /// The policy is a type; nothing of it is stored.
-    policy: PhantomData<fn() -> P>,
+    policy: PhantomData<fn() -> Policy>,
 }
 
 impl MetricsStore<StandardBlocks> {
@@ -249,6 +340,38 @@ impl MetricsStore<StandardBlocks> {
     ///
     /// Returns [`MetaError::StreamNotFound`] if the stream does not exist, or [`MetaError::Unavailable`]
     /// if the metadata store cannot be reached.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_metrics::{MetricsDependencies, MetricsSettings, MetricsStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("tenant-7", StreamOptions::default()).await?;
+    /// # let dependencies = MetricsDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
+    /// // Preparing a stream twice changes nothing.
+    /// MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
+    ///
+    /// let stream = dependencies.metadata.get_stream("tenant-7").await?;
+    /// assert!(stream.materializers.contains(bitacora_metrics::METRICS_MATERIALIZER));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn initialize(metadata: &MetadataStore, stream_name: &str) -> Result<(), MetaError> {
         metadata
             .register_materializer(stream_name, METRICS_MATERIALIZER)
@@ -257,7 +380,7 @@ impl MetricsStore<StandardBlocks> {
     }
 }
 
-impl<P: BlockPolicy> MetricsStore<P> {
+impl<Policy: BlockPolicy> MetricsStore<Policy> {
     /// Opens the store on `stream_name`: becomes the writer of the stream, restores the materializer
     /// from its last checkpoint and starts it.
     ///
@@ -270,40 +393,62 @@ impl<P: BlockPolicy> MetricsStore<P> {
     /// * `stream_name` - The stream the store lives on, prepared with [`MetricsStore::initialize`].
     /// * `settings` - Takeover, checkpoint pacing and how long queries wait.
     ///
+    /// # Returns
+    ///
+    /// The store, with its materializer running in a task of its own. It is the writer of the stream.
+    ///
     /// # Errors
     ///
     /// Returns [`MetricsError::Open`] if the store could not become the writer; nothing changed then.
     /// Returns [`MetricsError::Materializer`] if the materializer could not start, for example because
     /// [`MetricsStore::initialize`] was never run; the stream is then left without a writer until a
     /// store is opened on it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_metrics::{MetricsDependencies, MetricsSettings, MetricsStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("tenant-7", StreamOptions::default()).await?;
+    /// # let dependencies = MetricsDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
+    /// let store: MetricsStore = MetricsStore::open(dependencies, "tenant-7", MetricsSettings::default()).await?;
+    ///
+    /// // Nothing was appended yet, so there is no block.
+    /// assert!(store.blocks().is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn open(
         dependencies: MetricsDependencies,
         stream_name: &str,
         settings: MetricsSettings,
     ) -> Result<Self, MetricsError> {
         let writer = dependencies.client.open_writer(stream_name, settings.takeover).await?;
-        let stream = match dependencies.metadata.get_stream(stream_name).await {
-            Ok(stream) => stream,
-            Err(meta_error) => return Err(MetricsError::Materializer(RunnerError::Metadata(meta_error))),
-        };
-        let artifacts = ArtifactNamespace::read_only(
-            Arc::clone(&dependencies.artifact_store),
-            stream.stream_id,
-            METRICS_MATERIALIZER,
-        );
-        let runner_settings = RunnerSettings {
-            checkpoint_after_bytes: settings.checkpoint_after_bytes,
-            checkpoint_after: settings.checkpoint_after,
-            retry_interval: settings.retry_interval,
-            ..RunnerSettings::for_materializer(METRICS_MATERIALIZER)
-        };
+        let artifacts = blocks_of_stream(&dependencies, stream_name).await?;
+        let runner_settings = settings.runner_settings();
         let runner_dependencies = RunnerDependencies {
             client: dependencies.client,
             metadata: dependencies.metadata,
             artifact_store: dependencies.artifact_store,
         };
         let runner =
-            MaterializerRunner::<MetricsMaterializer<P>>::start(runner_dependencies, stream_name, runner_settings)
+            MaterializerRunner::<MetricsMaterializer<Policy>>::start(runner_dependencies, stream_name, runner_settings)
                 .await?;
         let head = runner.materializer().builder().head();
         let catalog = runner.materializer().view();
@@ -344,6 +489,45 @@ impl<P: BlockPolicy> MetricsStore<P> {
     /// Returns [`MetricsError::InvalidBatch`] if the batch is empty or too large for one record,
     /// [`MetricsError::NotWritten`] if the log refused the record, and [`MetricsError::OutcomeUnknown`]
     /// if the store cannot tell whether the record was committed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_metrics::{MetricsDependencies, MetricsSettings, MetricsStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("tenant-7", StreamOptions::default()).await?;
+    /// # let dependencies = MetricsDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
+    /// # let store: MetricsStore = MetricsStore::open(dependencies, "tenant-7", MetricsSettings::default()).await?;
+    /// use bitacora_metrics::{Labels, Sample, SeriesSamples};
+    ///
+    /// let requests = SeriesSamples {
+    ///     labels: Labels::from_pairs(&[("__name__", "requests_total"), ("job", "api")])?,
+    ///     samples: vec![Sample { timestamp_millis: 1_700_000_000_000, value: 12.0 }],
+    /// };
+    /// let first_append = store.append(&[requests.clone()]).await?;
+    /// let second_append = store.append(&[requests]).await?;
+    ///
+    /// // Each batch is one record of the stream.
+    /// assert!(second_append > first_append);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn append(&self, batch: &[SeriesSamples]) -> Result<SequenceNumber, MetricsError> {
         let payload = encode_record(batch)?;
         match self.writer.append(payload).await {
@@ -377,6 +561,49 @@ impl<P: BlockPolicy> MetricsStore<P> {
     /// [`MetricsError::Materializer`] if the materializer has stopped short of it,
     /// [`MetricsError::Block`] if a block cannot be read or is damaged, and
     /// [`MetricsError::CatalogKeptChanging`] if blocks were replaced under the query at every attempt.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_metrics::{MetricsDependencies, MetricsSettings, MetricsStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("tenant-7", StreamOptions::default()).await?;
+    /// # let dependencies = MetricsDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
+    /// # let store: MetricsStore = MetricsStore::open(dependencies, "tenant-7", MetricsSettings::default()).await?;
+    /// use bitacora_metrics::{Labels, QueryPosition, Sample, Selector, SeriesSamples, TimeRange};
+    ///
+    /// let requests = SeriesSamples {
+    ///     labels: Labels::from_pairs(&[("__name__", "requests_total"), ("job", "api")])?,
+    ///     samples: vec![Sample { timestamp_millis: 1_700_000_000_000, value: 12.0 }],
+    /// };
+    /// let appended_at = store.append(&[requests.clone()]).await?;
+    ///
+    /// // The store answers with the samples that were just appended, because the query asks to see them.
+    /// let answer = store
+    ///     .query(&Selector::all(), TimeRange::ALL, QueryPosition::AtLeast(appended_at))
+    ///     .await?;
+    ///
+    /// assert_eq!(answer.series, vec![requests]);
+    /// assert_eq!(answer.as_of, appended_at);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn query(
         &self,
         selector: &Selector,
@@ -398,13 +625,100 @@ impl<P: BlockPolicy> MetricsStore<P> {
         Ok(answer)
     }
 
-    /// The blocks the store's materializer has sealed, in log order: gapless and without overlap.
+    /// Lists the blocks the store's materializer has sealed.
+    ///
+    /// # Returns
+    ///
+    /// The catalog entries of the blocks, in log order: gapless and without overlap. The samples the store still
+    /// holds in memory are in no block yet and are not listed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_metrics::{MetricsDependencies, MetricsSettings, MetricsStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("tenant-7", StreamOptions::default()).await?;
+    /// # let dependencies = MetricsDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
+    /// # let store: MetricsStore = MetricsStore::open(dependencies, "tenant-7", MetricsSettings::default()).await?;
+    /// use bitacora_metrics::BlockSummary;
+    ///
+    /// let mut samples_in_blocks = 0;
+    /// for block in store.blocks() {
+    ///     if let Some(summary) = BlockSummary::decode(&block.artifact.summary) {
+    ///         samples_in_blocks += summary.sample_count;
+    ///     }
+    /// }
+    /// // Nothing was appended, so nothing was cut into a block.
+    /// assert_eq!(samples_in_blocks, 0);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn blocks(&self) -> Vec<CatalogEntry> {
         self.catalog.entries()
     }
 
-    /// A handle that shows where the store's materializer is: applied, checkpointed, lag.
+    /// Gives a handle that shows where the store's materializer is: applied, checkpointed, lag.
+    ///
+    /// # Returns
+    ///
+    /// A handle that can be cloned, read and waited on from any task. It also says why the materializer
+    /// stopped, once it has.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_client::{BitacoraClient, ClientSettings, StreamOptions};
+    /// # use bitacora_metrics::{MetricsDependencies, MetricsSettings, MetricsStore};
+    /// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let cluster = bitacora_testkit::Cluster::start(3).await;
+    /// # let client = BitacoraClient::new(
+    /// #     cluster.metadata().clone(),
+    /// #     cluster.connector(),
+    /// #     cluster.clock(),
+    /// #     ClientSettings::default(),
+    /// # );
+    /// # client.admin().create_stream("tenant-7", StreamOptions::default()).await?;
+    /// # let dependencies = MetricsDependencies {
+    /// #     client,
+    /// #     metadata: cluster.metadata().clone(),
+    /// #     artifact_store: Arc::new(MemoryArtifactStore::new()),
+    /// # };
+    /// # MetricsStore::initialize(&dependencies.metadata, "tenant-7").await?;
+    /// # let store: MetricsStore = MetricsStore::open(dependencies, "tenant-7", MetricsSettings::default()).await?;
+    /// use bitacora_metrics::{Labels, Sample, SeriesSamples};
+    ///
+    /// let requests = SeriesSamples {
+    ///     labels: Labels::from_pairs(&[("__name__", "requests_total"), ("job", "api")])?,
+    ///     samples: vec![Sample { timestamp_millis: 1_700_000_000_000, value: 12.0 }],
+    /// };
+    /// let appended_at = store.append(&[requests]).await?;
+    ///
+    /// let mut progress = store.progress();
+    /// let reached = progress.wait_until_applied(appended_at).await?;
+    /// assert!(reached.applied_sequence >= appended_at);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn progress(&self) -> RunnerProgress {
         self.progress.clone()
@@ -430,7 +744,7 @@ impl<P: BlockPolicy> MetricsStore<P> {
     }
 }
 
-impl<P: BlockPolicy> Drop for MetricsStore<P> {
+impl<Policy: BlockPolicy> Drop for MetricsStore<Policy> {
     /// Stops the materializer. The writer stops when its own field is dropped.
     fn drop(&mut self) {
         self.runner_task.abort();

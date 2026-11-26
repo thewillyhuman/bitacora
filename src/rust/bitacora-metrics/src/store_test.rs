@@ -45,12 +45,12 @@ use crate::test_support::{
 const NEVER: Duration = Duration::from_hours(100_000);
 
 /// Appends `samples` and returns the sequence number of the record.
-async fn append<P: BlockPolicy>(store: &MetricsStore<P>, samples: &[SeriesSamples]) -> SequenceNumber {
+async fn append<Policy: BlockPolicy>(store: &MetricsStore<Policy>, samples: &[SeriesSamples]) -> SequenceNumber {
     store.append(samples).await.expect("the append commits")
 }
 
 /// Everything the store holds once it has applied the record at `sequence`.
-async fn everything_at<P: BlockPolicy>(store: &MetricsStore<P>, sequence: SequenceNumber) -> QueryResult {
+async fn everything_at<Policy: BlockPolicy>(store: &MetricsStore<Policy>, sequence: SequenceNumber) -> QueryResult {
     store
         .query(&Selector::all(), TimeRange::ALL, QueryPosition::AtLeast(sequence))
         .await
@@ -58,7 +58,7 @@ async fn everything_at<P: BlockPolicy>(store: &MetricsStore<P>, sequence: Sequen
 }
 
 /// Waits until `store` has committed a checkpoint at or above `sequence`.
-async fn checkpointed<P: BlockPolicy>(store: &MetricsStore<P>, sequence: SequenceNumber) {
+async fn checkpointed<Policy: BlockPolicy>(store: &MetricsStore<Policy>, sequence: SequenceNumber) {
     timeout(PATIENCE, store.progress().wait_until_committed(sequence))
         .await
         .expect("the checkpoint is committed in time")
@@ -66,24 +66,44 @@ async fn checkpointed<P: BlockPolicy>(store: &MetricsStore<P>, sequence: Sequenc
 }
 
 /// Appends `samples`, then waits for the checkpoint timer and the checkpoint that covers the record.
-async fn append_and_checkpoint<P: BlockPolicy>(store: &MetricsStore<P>, samples: &[SeriesSamples]) -> SequenceNumber {
+async fn append_and_checkpoint<Policy: BlockPolicy>(
+    store: &MetricsStore<Policy>,
+    samples: &[SeriesSamples],
+) -> SequenceNumber {
     let appended_at = append(store, samples).await;
     sleep(CHECKPOINT_AFTER).await;
     checkpointed(store, appended_at).await;
     appended_at
 }
 
-/// The records each block of `store` covers, as pairs of first and last sequence number.
-fn covered_records<P: BlockPolicy>(store: &MetricsStore<P>) -> Vec<(u64, u64)> {
-    let mut covered = Vec::new();
+/// The records one block covers, as numbers a test can write down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoveredRecords {
+    /// The first record the block covers.
+    first: u64,
+    /// The last record the block covers.
+    last: u64,
+}
+
+/// The records from `first` to `last`, both included.
+const fn covered(first: u64, last: u64) -> CoveredRecords {
+    CoveredRecords { first, last }
+}
+
+/// The records each block of `store` covers, in log order.
+fn covered_records<Policy: BlockPolicy>(store: &MetricsStore<Policy>) -> Vec<CoveredRecords> {
+    let mut covered_by_blocks = Vec::new();
     for entry in store.blocks() {
-        covered.push((entry.covered_range.first().get(), entry.covered_range.last().get()));
+        covered_by_blocks.push(covered(
+            entry.covered_range.first().get(),
+            entry.covered_range.last().get(),
+        ));
     }
-    covered
+    covered_by_blocks
 }
 
 /// The keys the blocks of `store` have in the artifact store.
-async fn block_object_keys<P: BlockPolicy>(harness: &Harness, store: &MetricsStore<P>) -> Vec<String> {
+async fn block_object_keys<Policy: BlockPolicy>(harness: &Harness, store: &MetricsStore<Policy>) -> Vec<String> {
     let prefix = namespace_prefix(harness.stream_id().await, METRICS_MATERIALIZER);
     let mut object_keys = Vec::new();
     for entry in store.blocks() {
@@ -278,11 +298,11 @@ async fn block_ends_with_the_record_that_fills_it() {
 
     append_and_checkpoint(&store, &batch("api", &[90])).await;
 
-    assert_eq!(covered_records(&store), [(1, 2)]);
+    assert_eq!(covered_records(&store), [covered(1, 2)]);
 }
 
 /// The bytes of every block of `store`, in log order.
-async fn block_contents<P: BlockPolicy>(harness: &Harness, store: &MetricsStore<P>) -> Vec<Bytes> {
+async fn block_contents<Policy: BlockPolicy>(harness: &Harness, store: &MetricsStore<Policy>) -> Vec<Bytes> {
     let mut contents = Vec::new();
     for object_key in block_object_keys(harness, store).await {
         let block = harness
@@ -337,7 +357,10 @@ async fn same_records_give_the_same_blocks_whenever_the_checkpoints_happen() {
 
     append_and_checkpoint(&store_checkpointed_once, &batches[5]).await;
 
-    assert_eq!(covered_records(&store_checkpointed_often), [(1, 3), (4, 5)]);
+    assert_eq!(
+        covered_records(&store_checkpointed_often),
+        [covered(1, 3), covered(4, 5)]
+    );
     assert_eq!(
         covered_records(&store_checkpointed_once),
         covered_records(&store_checkpointed_often)
@@ -373,7 +396,7 @@ async fn new_store_cuts_the_block_the_replaced_one_was_filling() {
 
     append_and_checkpoint(&successor, &batch("api", &[50, 60, 70, 80])).await;
 
-    assert_eq!(covered_records(&successor), [(1, 2)]);
+    assert_eq!(covered_records(&successor), [covered(1, 2)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -409,7 +432,7 @@ async fn full_builder_cuts_a_block_without_waiting_for_the_timer() {
     let appended_at = append(&store, &batch("api", &[1, 2, 3, 4, 5, 6, 7, 8])).await;
 
     checkpointed(&store, appended_at).await;
-    assert_eq!(covered_records(&store), [(1, 1)]);
+    assert_eq!(covered_records(&store), [covered(1, 1)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -493,7 +516,7 @@ async fn two_neighbouring_blocks_are_merged_into_one() {
 
     append_and_checkpoint(&store, &second_batch_that_fills_a_block()).await;
 
-    assert_eq!(covered_records(&store), [(1, 2)]);
+    assert_eq!(covered_records(&store), [covered(1, 2)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -746,7 +769,7 @@ async fn new_store_goes_on_from_the_blocks_of_the_replaced_one() {
 
     append_and_checkpoint(&successor, &batch("api", &[20])).await;
 
-    assert_eq!(covered_records(&successor), [(1, 1), (2, 2)]);
+    assert_eq!(covered_records(&successor), [covered(1, 1), covered(2, 2)]);
 }
 
 /// What became of the appends that were in flight while another store took over.
@@ -1019,9 +1042,17 @@ async fn open_with_small_segments(harness: &Harness) -> MetricsStore<SmallBlocks
 /// How many records the truncation tests append before the log is truncated.
 const RECORDS_BEFORE_TRUNCATION: i64 = 10;
 
+/// A store whose log was truncated below its checkpoint.
+struct TruncatedStore {
+    /// The store, still open.
+    store: MetricsStore<SmallBlocks>,
+    /// The sequence number of the last record the store appended before its checkpoint.
+    last_append: SequenceNumber,
+}
+
 /// Appends ten records, one segment each, checkpoints, and lets the controller truncate the log below
-/// the checkpoint. Returns the store and the sequence number of the last record.
-async fn store_whose_log_was_truncated(harness: &Harness) -> (MetricsStore<SmallBlocks>, SequenceNumber) {
+/// the checkpoint.
+async fn store_whose_log_was_truncated(harness: &Harness) -> TruncatedStore {
     let store = open_with_small_segments(harness).await;
     let mut last_append = SequenceNumber::ZERO;
     for record_number in 0..RECORDS_BEFORE_TRUNCATION {
@@ -1032,7 +1063,7 @@ async fn store_whose_log_was_truncated(harness: &Harness) -> (MetricsStore<Small
     sleep(CHECKPOINT_AFTER).await;
     checkpointed(&store, last_append).await;
     harness.run_controller_pass().await;
-    (store, last_append)
+    TruncatedStore { store, last_append }
 }
 
 /// How many samples `answer` holds, over all series.
@@ -1048,7 +1079,10 @@ fn sample_count(answer: &QueryResult) -> usize {
 async fn log_below_the_checkpoint_of_the_store_is_truncated() {
     let harness = Harness::start().await;
 
-    let (_store, last_append) = store_whose_log_was_truncated(&harness).await;
+    let TruncatedStore {
+        store: _store,
+        last_append,
+    } = store_whose_log_was_truncated(&harness).await;
 
     let low_water_mark = harness.low_water_mark().await;
     assert!(low_water_mark > SequenceNumber::FIRST, "{low_water_mark}");
@@ -1059,7 +1093,7 @@ async fn log_below_the_checkpoint_of_the_store_is_truncated() {
 async fn store_answers_every_sample_after_its_log_was_truncated() {
     let harness = Harness::start().await;
 
-    let (store, last_append) = store_whose_log_was_truncated(&harness).await;
+    let TruncatedStore { store, last_append } = store_whose_log_was_truncated(&harness).await;
 
     assert_eq!(sample_count(&everything_at(&store, last_append).await), 1_500);
 }
@@ -1067,7 +1101,7 @@ async fn store_answers_every_sample_after_its_log_was_truncated() {
 #[tokio::test(start_paused = true)]
 async fn store_reopens_after_its_log_was_truncated() {
     let harness = Harness::start().await;
-    let (store, last_append) = store_whose_log_was_truncated(&harness).await;
+    let TruncatedStore { store, last_append } = store_whose_log_was_truncated(&harness).await;
     drop(store);
 
     let reopened = harness.open().await;
@@ -1078,7 +1112,7 @@ async fn store_reopens_after_its_log_was_truncated() {
 #[tokio::test(start_paused = true)]
 async fn queries_are_answered_in_full_while_the_log_is_being_truncated() {
     let harness = Harness::start().await;
-    let (store, _last_append) = store_whose_log_was_truncated(&harness).await;
+    let store = store_whose_log_was_truncated(&harness).await.store;
     let store = Arc::new(store);
     let querying_store = Arc::clone(&store);
     // An answer exact up to record N holds the 150 samples of each of the N records.

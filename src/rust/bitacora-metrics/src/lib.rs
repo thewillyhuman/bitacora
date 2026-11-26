@@ -28,7 +28,7 @@
 //! - [`BlockBuilder`], [`BlockPolicy`], [`StandardBlocks`], [`MetricsMaterializer`]: the materializer.
 //! - [`BlockSummary`], [`QueryResult`], and the error types.
 //!
-//! # How it fits together
+//! # How it works
 //!
 //! ```text
 //! append --> record --> StreamWriter --> log
@@ -40,10 +40,25 @@
 //! query -------------------- + ------------------------+
 //! ```
 //!
+//! A store is the writer of its stream. An append is one record. A materializer follows the stream and keeps the
+//! samples of the newest records in memory, the head; when the head holds as much as one block may, it writes the
+//! samples as a block to the object store and drops them from memory. A query merges what the blocks and the head
+//! hold of the series it selects, and says up to which record its answer is exact.
+//!
+//! # Invariants
+//!
+//! - An answer with `as_of` = N holds exactly what the records up to N make of the selected series.
+//! - An append reported as done is in the log once, at the returned sequence number.
+//! - The same records give the same blocks, byte for byte, whenever checkpoints happen and whichever instance
+//!   cuts them (invariant I6).
+//! - Nothing is returned from a block before the checksum that covers it was verified.
+//! - The crate uses the materializer framework through its public interface only.
+//!
 //! # See also
 //!
-//! The `README.md` of this crate for the formats, and `docs/decisions/0015-metrics-materializer.md` for
-//! what building it showed about the framework.
+//! - `README.md` in this crate: the design, and which file holds what.
+//! - `docs/protocol/metrics.md`: the formats of records, blocks and chunks.
+//! - `docs/decisions/0015-metrics-materializer.md`: what building this crate showed about the framework.
 
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]

@@ -68,7 +68,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bitacora_artifact::ArtifactError;
 use bitacora_materializer::{ArtifactNamespace, CatalogEntry, CatalogView, MaterializerError};
-use bitacora_types::SequenceNumber;
+use bitacora_types::{SequenceNumber, SequenceRange};
 use thiserror::Error;
 
 use crate::block::{BlockIndex, BlockSummary, load_block_index, read_series};
@@ -213,6 +213,14 @@ pub(crate) async fn query_blocks(
 }
 
 /// Turns the merged samples into the series of an answer, leaving out series without a sample.
+///
+/// # Arguments
+///
+/// * `merged` - The samples read for a query, by series.
+///
+/// # Returns
+///
+/// The series that have a sample, in ascending order of labels.
 pub(crate) fn into_series(merged: BTreeMap<Labels, Vec<Sample>>) -> Vec<SeriesSamples> {
     let mut series = Vec::with_capacity(merged.len());
     for (labels, samples) in merged {
@@ -251,27 +259,29 @@ enum HeadFit {
 /// # Arguments
 ///
 /// * `catalog_end` - The last record the catalog's blocks reach; [`SequenceNumber::ZERO`] without blocks.
-/// * `held_records` - The first and the last record the head held, if it held any.
+/// * `held_records` - The records the head held, if it held any.
 /// * `sealed_through` - The last record the head had given up to a block; [`SequenceNumber::ZERO`] if
 ///   none.
 fn how_the_head_fits(
     catalog_end: SequenceNumber,
-    held_records: Option<(SequenceNumber, SequenceNumber)>,
+    held_records: Option<SequenceRange>,
     sealed_through: SequenceNumber,
 ) -> HeadFit {
     if catalog_end < sealed_through {
         return HeadFit::Gap;
     }
-    let Some((first_held, last_held)) = held_records else {
+    let Some(held_records) = held_records else {
         return HeadFit::CoveredByBlocks;
     };
-    if last_held <= catalog_end {
+    if held_records.last() <= catalog_end {
         return HeadFit::CoveredByBlocks;
     }
-    if first_held > catalog_end.next() {
+    if held_records.first() > catalog_end.next() {
         return HeadFit::Gap;
     }
-    HeadFit::OnTopOfBlocks { last_held }
+    HeadFit::OnTopOfBlocks {
+        last_held: held_records.last(),
+    }
 }
 
 /// Whether a read failed because the block is gone, which happens when a merge replaced it.

@@ -101,6 +101,18 @@ pub enum InvalidLabels {
 }
 
 /// One name and value of a label set.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::{Label, Labels};
+///
+/// let labels = Labels::from_pairs(&[("job", "api")])?;
+///
+/// let job = Label { name: "job".to_owned(), value: "api".to_owned() };
+/// assert_eq!(labels.labels(), [job]);
+/// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Label {
     /// The label's name, for example `job`.
@@ -147,6 +159,19 @@ impl Labels {
     ///
     /// Returns [`InvalidLabels`] if there is no label, there are too many, a name or value is empty or
     /// too long, or a name appears twice.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{InvalidLabels, Labels};
+    ///
+    /// let in_one_order = Labels::from_pairs(&[("job", "api"), ("zone", "a")])?;
+    /// let in_another = Labels::from_pairs(&[("zone", "a"), ("job", "api")])?;
+    /// assert_eq!(in_one_order, in_another);
+    ///
+    /// assert_eq!(Labels::from_pairs(&[]), Err(InvalidLabels::NoLabels));
+    /// # Ok::<(), InvalidLabels>(())
+    /// ```
     pub fn from_pairs(pairs: &[(&str, &str)]) -> Result<Self, InvalidLabels> {
         let mut labels = Vec::with_capacity(pairs.len());
         for (name, value) in pairs {
@@ -167,6 +192,10 @@ impl Labels {
     /// # Arguments
     ///
     /// * `labels` - The labels, in ascending order of name.
+    ///
+    /// # Returns
+    ///
+    /// The label set, with the labels as given.
     ///
     /// # Errors
     ///
@@ -201,7 +230,26 @@ impl Labels {
         Ok(Self { labels })
     }
 
-    /// The labels, in ascending order of name.
+    /// The labels of the set.
+    ///
+    /// # Returns
+    ///
+    /// Every label, in ascending order of name. Never empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::Labels;
+    ///
+    /// let labels = Labels::from_pairs(&[("zone", "a"), ("job", "api")])?;
+    ///
+    /// let mut names = Vec::new();
+    /// for label in labels.labels() {
+    ///     names.push(label.name.as_str());
+    /// }
+    /// assert_eq!(names, ["job", "zone"]);
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub fn labels(&self) -> &[Label] {
         &self.labels
@@ -209,10 +257,26 @@ impl Labels {
 
     /// The value of the label called `name`.
     ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the label to look up.
+    ///
     /// # Returns
     ///
     /// The value, or the empty text if the series does not have the label. Matchers treat a missing label
     /// and an empty value alike, and so does this.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::Labels;
+    ///
+    /// let labels = Labels::from_pairs(&[("job", "api")])?;
+    ///
+    /// assert_eq!(labels.value_of("job"), "api");
+    /// assert_eq!(labels.value_of("zone"), "");
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub fn value_of(&self, name: &str) -> &str {
         for label in &self.labels {
@@ -303,6 +367,15 @@ pub struct SeriesSamples {
 }
 
 /// The range ends before it starts.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::TimeRange;
+///
+/// let refused = TimeRange::new(2_000, 1_000).expect_err("a range cannot end before it starts");
+/// assert_eq!(refused.to_string(), "a time range cannot end at 1000, before it starts at 2000");
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("a time range cannot end at {end_millis}, before it starts at {start_millis}")]
 pub struct InvalidTimeRange {
@@ -343,9 +416,30 @@ impl TimeRange {
 
     /// Builds the range from `start_millis` to `end_millis`, both included.
     ///
+    /// # Arguments
+    ///
+    /// * `start_millis` - The first moment of the range, in milliseconds since the Unix epoch.
+    /// * `end_millis` - The last moment of the range. It may equal the start: a range of one moment.
+    ///
+    /// # Returns
+    ///
+    /// The range.
+    ///
     /// # Errors
     ///
     /// Returns [`InvalidTimeRange`] if the range would end before it starts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{InvalidTimeRange, TimeRange};
+    ///
+    /// assert!(TimeRange::new(1_000, 1_000).is_ok());
+    /// assert_eq!(
+    ///     TimeRange::new(2_000, 1_000),
+    ///     Err(InvalidTimeRange { start_millis: 2_000, end_millis: 1_000 })
+    /// );
+    /// ```
     pub const fn new(start_millis: i64, end_millis: i64) -> Result<Self, InvalidTimeRange> {
         if end_millis < start_millis {
             return Err(InvalidTimeRange {
@@ -360,18 +454,66 @@ impl TimeRange {
     }
 
     /// The first moment of the range.
+    ///
+    /// # Returns
+    ///
+    /// The start, in milliseconds since the Unix epoch. A sample at this moment is in the range.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::TimeRange;
+    ///
+    /// assert_eq!(TimeRange::new(0, 59_999)?.start_millis(), 0);
+    /// assert_eq!(TimeRange::ALL.start_millis(), i64::MIN);
+    /// # Ok::<(), bitacora_metrics::InvalidTimeRange>(())
+    /// ```
     #[must_use]
     pub const fn start_millis(self) -> i64 {
         self.start_millis
     }
 
     /// The last moment of the range.
+    ///
+    /// # Returns
+    ///
+    /// The end, in milliseconds since the Unix epoch. A sample at this moment is in the range.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::TimeRange;
+    ///
+    /// assert_eq!(TimeRange::new(0, 59_999)?.end_millis(), 59_999);
+    /// assert_eq!(TimeRange::ALL.end_millis(), i64::MAX);
+    /// # Ok::<(), bitacora_metrics::InvalidTimeRange>(())
+    /// ```
     #[must_use]
     pub const fn end_millis(self) -> i64 {
         self.end_millis
     }
 
     /// Whether `timestamp_millis` lies in the range.
+    ///
+    /// # Arguments
+    ///
+    /// * `timestamp_millis` - A moment, in milliseconds since the Unix epoch.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the moment is at or after the start and at or before the end.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::TimeRange;
+    ///
+    /// let first_minute = TimeRange::new(0, 59_999)?;
+    ///
+    /// assert!(first_minute.contains(0));
+    /// assert!(!first_minute.contains(-1));
+    /// # Ok::<(), bitacora_metrics::InvalidTimeRange>(())
+    /// ```
     #[must_use]
     pub const fn contains(self, timestamp_millis: i64) -> bool {
         self.start_millis <= timestamp_millis && timestamp_millis <= self.end_millis
@@ -381,6 +523,29 @@ impl TimeRange {
     ///
     /// A block or a series knows the times of its first and last sample; this says whether it can hold
     /// anything a query for this range wants.
+    ///
+    /// # Arguments
+    ///
+    /// * `min_time_millis` - The earliest moment of the other span.
+    /// * `max_time_millis` - The latest moment of the other span.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the two spans share at least one moment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::TimeRange;
+    ///
+    /// let first_minute = TimeRange::new(0, 59_999)?;
+    ///
+    /// // A block whose samples run from half a minute to two minutes.
+    /// assert!(first_minute.overlaps(30_000, 120_000));
+    /// // A block that starts with the second minute.
+    /// assert!(!first_minute.overlaps(60_000, 120_000));
+    /// # Ok::<(), bitacora_metrics::InvalidTimeRange>(())
+    /// ```
     #[must_use]
     pub const fn overlaps(self, min_time_millis: i64, max_time_millis: i64) -> bool {
         min_time_millis <= self.end_millis && self.start_millis <= max_time_millis

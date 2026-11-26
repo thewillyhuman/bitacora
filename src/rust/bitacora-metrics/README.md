@@ -130,7 +130,8 @@ what the store applied since. It looks for a newer checkpoint when asked to
 | `sample.rs` | `Labels`, `Sample`, `SeriesSamples`, `TimeRange`, and the "later wins" merge |
 | `record.rs` | The log record: `encode_record`, `decode_record` |
 | `chunk.rs` | The samples of one series, compressed |
-| `block.rs` | The block: encoding, index, range reads |
+| `block.rs` | The block: its layout, encoding, the footer and the index |
+| `block/fetch.rs` | Reading a block out of the object store with range reads |
 | `selector.rs` | `Selector` and `Matcher` |
 | `head.rs` | The samples in memory |
 | `builder.rs` | `BlockBuilder`: records to blocks, and merging; it owns the head |

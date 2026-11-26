@@ -15,8 +15,9 @@
 //! - [`BlockSummary`]: how many series and samples a block holds and which span of time they cover.
 //!   It is in the block's footer and, as 28 bytes, in the block's catalog entry.
 //! - `BlockFooter`, `SeriesEntry`, `BlockIndex`: the parts of a block a reader fetches first.
-//! - `load_block_index`, `read_series`: the two steps of a query against one block, with range reads.
 //! - `decode_whole_block`: everything in a block, for merging blocks and for restoring a saved head.
+//! - In `block/fetch.rs`, which is part of this module: `load_block_index` and `read_series`, the two steps of a
+//!   query against one block in the object store.
 //! - [`DamagedBlock`]: why bytes are not a block.
 //!
 //! # How it works
@@ -63,28 +64,31 @@
 //!
 //! # Invariants
 //!
-//! - Everything here except the two functions that take an `ArtifactNamespace` is a pure function over
-//!   bytes.
+//! - Everything in this file is a pure function over bytes. The functions that read from the object store
+//!   are in `block/fetch.rs`.
 //! - Encoding is deterministic: equal series and samples give equal bytes.
 //! - Nothing is returned from a block before the checksum that covers it was verified.
 //! - The samples of a series in a block are strictly increasing in time.
 //!
 //! # See also
 //!
+//! - `block/fetch.rs`: reading a block out of the object store, a part at a time.
 //! - `chunk.rs`: the samples of one series inside a block.
 //! - `builder.rs`: where blocks are written and merged.
 //! - `query.rs`: where blocks are read.
 
+mod fetch;
+
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use bitacora_materializer::{ArtifactNamespace, MaterializerError};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use thiserror::Error;
 
+pub(crate) use self::fetch::{damaged_artifact, load_block_index, read_series};
 use crate::chunk::{decode_chunk, decode_chunk_in_range, encode_chunk};
 use crate::record::{LabelsReadError, put_labels, take_labels};
-use crate::sample::{Label, Labels, Sample, SeriesSamples, TimeRange};
+use crate::sample::{Label, Labels, Sample, TimeRange};
 use crate::selector::Selector;
 
 /// The first bytes of the footer of every block.
@@ -93,20 +97,36 @@ const BLOCK_MAGIC: [u8; 8] = *b"BITAMBLK";
 /// The block format this code reads and writes.
 const BLOCK_FORMAT_VERSION: u32 = 1;
 
-/// The size of the footer at the end of every block.
-pub(crate) const BLOCK_FOOTER_BYTES: usize = 76;
+/// The size of a checksum.
+const CHECKSUM_BYTES: usize = 4;
+
+/// The size of the footer at the end of every block: the magic, the format version, the summary, the offset of
+/// the series index, the lengths of the series index and of the postings, and three checksums.
+pub(crate) const BLOCK_FOOTER_BYTES: usize = 8 + 4 + BLOCK_SUMMARY_BYTES + 8 + 8 + 8 + 3 * CHECKSUM_BYTES;
+
+/// The size of what a series entry holds after the labels: the offset, the length and the checksum of the chunk,
+/// the number of samples, and the times of the first and the last one.
+const SERIES_ENTRY_FIXED_BYTES: usize = 8 + 4 + CHECKSUM_BYTES + 4 + 8 + 8;
+
+/// The size of one series number in the postings.
+const SERIES_NUMBER_BYTES: usize = 4;
 
 /// The size of a block's summary in its catalog entry: two counts and two times.
 const BLOCK_SUMMARY_BYTES: usize = 4 + 8 + 8 + 8;
 
 /// Where the footer's own checksum starts: it is the last field and covers everything before it.
-const FOOTER_CHECKSUM_OFFSET: usize = BLOCK_FOOTER_BYTES - 4;
-
-/// Two selected chunks this close together are fetched in one read, gap included. A request to an
-/// object store costs far more than these bytes do.
-const JOINED_READ_GAP_BYTES: u64 = 64 * 1024;
+const FOOTER_CHECKSUM_OFFSET: usize = BLOCK_FOOTER_BYTES - CHECKSUM_BYTES;
 
 /// Why bytes are not a block, or not the part of a block they were read as.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::DamagedBlock;
+///
+/// let damaged = DamagedBlock { reason: "its footer fails its checksum".to_owned() };
+/// assert_eq!(damaged.to_string(), "block is damaged: its footer fails its checksum");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[error("block is damaged: {reason}")]
 pub struct DamagedBlock {
@@ -147,12 +167,25 @@ pub struct BlockSummary {
 
 impl BlockSummary {
     /// Whether the block can hold a sample in `time_range`.
+    ///
+    /// # Arguments
+    ///
+    /// * `time_range` - The span of time a query asks for.
+    ///
+    /// # Returns
+    ///
+    /// `false` if the block holds no sample, or none between its earliest and latest that lies in the range: a
+    /// query then leaves the block alone.
     pub(crate) const fn overlaps(&self, time_range: TimeRange) -> bool {
         self.sample_count > 0 && time_range.overlaps(self.min_time_millis, self.max_time_millis)
     }
 
     /// The summary as the bytes a catalog entry carries: the four numbers, little-endian, in the order
     /// of the fields.
+    ///
+    /// # Returns
+    ///
+    /// 28 bytes, which [`BlockSummary::decode`] turns back.
     pub(crate) fn encode(&self) -> Bytes {
         let mut encoded = BytesMut::with_capacity(BLOCK_SUMMARY_BYTES);
         encoded.put_u32_le(self.series_count);
@@ -225,58 +258,94 @@ pub(crate) struct EncodedBlock {
 ///
 /// The block's bytes and its summary. A block of no series is valid: a footer and an empty index.
 pub(crate) fn encode_block(samples_by_series: &BTreeMap<Labels, Vec<Sample>>) -> EncodedBlock {
-    let mut block = BytesMut::new();
-    let mut series_index = BytesMut::new();
-    let mut series_by_label: BTreeMap<&Label, Vec<u32>> = BTreeMap::new();
-    let mut summary = BlockSummary {
-        series_count: 0,
-        sample_count: 0,
-        min_time_millis: i64::MAX,
-        max_time_millis: i64::MIN,
-    };
-
+    let mut writer = BlockWriter::new();
     for (labels, samples) in samples_by_series {
+        writer.add_series(labels, samples);
+    }
+    writer.finish()
+}
+
+/// A block while it is being written: the chunks so far, the index that describes them, and what they hold.
+struct BlockWriter<'series> {
+    /// The chunks written so far, back to back. They are the start of the block.
+    chunks: BytesMut,
+    /// The series index so far: one entry per chunk, in the same order.
+    series_index: BytesMut,
+    /// For each label seen so far, the numbers of the series that have it, ascending.
+    series_by_label: BTreeMap<&'series Label, Vec<u32>>,
+    /// What the chunks hold. The two times start at the far ends, so that the first sample replaces both.
+    summary: BlockSummary,
+}
+
+impl<'series> BlockWriter<'series> {
+    /// Starts a block that holds nothing yet.
+    fn new() -> Self {
+        Self {
+            chunks: BytesMut::new(),
+            series_index: BytesMut::new(),
+            series_by_label: BTreeMap::new(),
+            summary: BlockSummary {
+                series_count: 0,
+                sample_count: 0,
+                min_time_millis: i64::MAX,
+                max_time_millis: i64::MIN,
+            },
+        }
+    }
+
+    /// Writes the chunk of one series and its entry in the series index, and lists the series under each of its
+    /// labels. A series without samples is left out. Series must come in ascending order of their labels.
+    fn add_series(&mut self, labels: &'series Labels, samples: &[Sample]) {
         let (Some(first_sample), Some(last_sample)) = (samples.first(), samples.last()) else {
-            continue;
+            return;
         };
         let chunk = encode_chunk(samples);
-        put_labels(&mut series_index, labels);
-        series_index.put_u64_le(block.len() as u64);
-        series_index.put_u32_le(u32::try_from(chunk.len()).expect("the chunk of one series is far below 4 GiB"));
-        series_index.put_u32_le(crc32c::crc32c(&chunk));
-        series_index.put_u32_le(u32::try_from(samples.len()).expect("a series has far fewer than 2^32 samples"));
-        series_index.put_i64_le(first_sample.timestamp_millis);
-        series_index.put_i64_le(last_sample.timestamp_millis);
-        block.put_slice(&chunk);
+        let chunk_bytes = u32::try_from(chunk.len()).expect("the chunk of one series is far below 4 GiB");
+        let sample_count = u32::try_from(samples.len()).expect("a series has far fewer than 2^32 samples");
+        put_labels(&mut self.series_index, labels);
+        self.series_index.put_u64_le(self.chunks.len() as u64);
+        self.series_index.put_u32_le(chunk_bytes);
+        self.series_index.put_u32_le(crc32c::crc32c(&chunk));
+        self.series_index.put_u32_le(sample_count);
+        self.series_index.put_i64_le(first_sample.timestamp_millis);
+        self.series_index.put_i64_le(last_sample.timestamp_millis);
+        self.chunks.put_slice(&chunk);
 
         for label in labels.labels() {
-            series_by_label.entry(label).or_default().push(summary.series_count);
+            self.series_by_label
+                .entry(label)
+                .or_default()
+                .push(self.summary.series_count);
         }
-        summary.series_count += 1;
-        summary.sample_count += samples.len() as u64;
-        summary.min_time_millis = summary.min_time_millis.min(first_sample.timestamp_millis);
-        summary.max_time_millis = summary.max_time_millis.max(last_sample.timestamp_millis);
-    }
-    if summary.sample_count == 0 {
-        summary.min_time_millis = 0;
-        summary.max_time_millis = 0;
+        self.summary.series_count += 1;
+        self.summary.sample_count += samples.len() as u64;
+        self.summary.min_time_millis = self.summary.min_time_millis.min(first_sample.timestamp_millis);
+        self.summary.max_time_millis = self.summary.max_time_millis.max(last_sample.timestamp_millis);
     }
 
-    let postings = encode_postings(&series_by_label);
-    let footer = BlockFooter {
-        summary,
-        series_index_offset: block.len() as u64,
-        series_index_bytes: series_index.len() as u64,
-        postings_bytes: postings.len() as u64,
-        series_index_checksum: crc32c::crc32c(&series_index),
-        postings_checksum: crc32c::crc32c(&postings),
-    };
-    block.put_slice(&series_index);
-    block.put_slice(&postings);
-    block.put_slice(&footer.encode());
-    EncodedBlock {
-        bytes: block.freeze(),
-        summary,
+    /// Writes the series index, the postings and the footer after the chunks, and hands the block over.
+    fn finish(mut self) -> EncodedBlock {
+        if self.summary.sample_count == 0 {
+            self.summary.min_time_millis = 0;
+            self.summary.max_time_millis = 0;
+        }
+        let postings = encode_postings(&self.series_by_label);
+        let footer = BlockFooter {
+            summary: self.summary,
+            series_index_offset: self.chunks.len() as u64,
+            series_index_bytes: self.series_index.len() as u64,
+            postings_bytes: postings.len() as u64,
+            series_index_checksum: crc32c::crc32c(&self.series_index),
+            postings_checksum: crc32c::crc32c(&postings),
+        };
+        let mut block = self.chunks;
+        block.put_slice(&self.series_index);
+        block.put_slice(&postings);
+        block.put_slice(&footer.encode());
+        EncodedBlock {
+            bytes: block.freeze(),
+            summary: self.summary,
+        }
     }
 }
 
@@ -337,6 +406,14 @@ impl BlockFooter {
 
     /// Parses and verifies a footer from the last bytes of a block.
     ///
+    /// # Arguments
+    ///
+    /// * `block_end` - The last [`BLOCK_FOOTER_BYTES`] bytes of a block, or more: the whole block will do.
+    ///
+    /// # Returns
+    ///
+    /// What the footer says about the block.
+    ///
     /// # Errors
     ///
     /// Returns [`DamagedBlock`] if the bytes are too short, do not end like a block, come from another
@@ -358,7 +435,18 @@ impl BlockFooter {
                 reason: format!("block format version {format_version} is not supported"),
             });
         }
-        let footer = Self {
+        let footer = Self::read_fields(&mut unread);
+        let stored_checksum = unread.get_u32_le();
+        if stored_checksum != crc32c::crc32c(&encoded[..FOOTER_CHECKSUM_OFFSET]) {
+            return Err(DamagedBlock::because("its footer fails its checksum"));
+        }
+        Ok(footer)
+    }
+
+    /// Reads the fields of a footer that lie between its format version and its own checksum, and moves
+    /// `unread` past them. The caller has made sure that a whole footer is there.
+    fn read_fields(unread: &mut &[u8]) -> Self {
+        Self {
             summary: BlockSummary {
                 series_count: unread.get_u32_le(),
                 sample_count: unread.get_u64_le(),
@@ -370,12 +458,7 @@ impl BlockFooter {
             postings_bytes: unread.get_u64_le(),
             series_index_checksum: unread.get_u32_le(),
             postings_checksum: unread.get_u32_le(),
-        };
-        let stored_checksum = unread.get_u32_le();
-        if stored_checksum != crc32c::crc32c(&encoded[..FOOTER_CHECKSUM_OFFSET]) {
-            return Err(DamagedBlock::because("its footer fails its checksum"));
         }
-        Ok(footer)
     }
 
     /// Where the series index and the postings lie in the block: one stretch of bytes.
@@ -392,6 +475,11 @@ impl BlockFooter {
     }
 
     /// The size of the whole block, by the footer's own numbers.
+    ///
+    /// # Returns
+    ///
+    /// The size, or `None` if the footer's numbers do not add up to one. A block of another size than its footer
+    /// states is damaged.
     pub(crate) fn block_bytes(&self) -> Option<u64> {
         self.index_range()?.end.checked_add(BLOCK_FOOTER_BYTES as u64)
     }
@@ -442,6 +530,10 @@ impl BlockIndex {
     /// * `footer` - The block's footer.
     /// * `index_bytes` - The bytes of [`BlockFooter::index_range`].
     ///
+    /// # Returns
+    ///
+    /// The index: every series of the block and, for each label, the series that have it.
+    ///
     /// # Errors
     ///
     /// Returns [`DamagedBlock`] if the bytes are not the size the footer states, fail a checksum, or do
@@ -474,6 +566,15 @@ impl BlockIndex {
     ///
     /// Matchers that ask for one value of a label are answered from the postings; the series they leave
     /// are then checked against every matcher.
+    ///
+    /// # Arguments
+    ///
+    /// * `selector` - Which series a query wants.
+    /// * `time_range` - Which span of time it wants them for.
+    ///
+    /// # Returns
+    ///
+    /// The numbers of the selected series, ascending. Pass them to `read_series`.
     pub(crate) fn select(&self, selector: &Selector, time_range: TimeRange) -> Vec<u32> {
         let mut candidates: Option<Vec<u32>> = None;
         for required_label in selector.required_labels() {
@@ -522,33 +623,11 @@ fn intersect_ascending(left: &[u32], right: &[u32]) -> Vec<u32> {
 
 /// Reads the series index of a block and checks that it describes the block the footer does.
 fn decode_series_index(footer: &BlockFooter, series_index: Bytes) -> Result<Vec<SeriesEntry>, DamagedBlock> {
-    let cut_short = || DamagedBlock::because("its series index ends inside an entry");
     let mut unread = series_index;
     let mut series: Vec<SeriesEntry> = Vec::new();
     let mut next_chunk_offset = 0_u64;
     for _entry in 0..footer.summary.series_count {
-        let labels = match take_labels(&mut unread) {
-            Ok(labels) => labels,
-            Err(LabelsReadError::Malformed(_reason)) => return Err(cut_short()),
-            Err(LabelsReadError::Invalid(invalid_labels)) => {
-                return Err(DamagedBlock {
-                    reason: format!("a series has invalid labels: {invalid_labels}"),
-                });
-            }
-        };
-        // Offset, length, checksum, count and the two times.
-        if unread.remaining() < 8 + 4 + 4 + 4 + 8 + 8 {
-            return Err(cut_short());
-        }
-        let entry = SeriesEntry {
-            labels,
-            chunk_offset: unread.get_u64_le(),
-            chunk_bytes: unread.get_u32_le(),
-            chunk_checksum: unread.get_u32_le(),
-            sample_count: unread.get_u32_le(),
-            min_time_millis: unread.get_i64_le(),
-            max_time_millis: unread.get_i64_le(),
-        };
+        let entry = take_series_entry(&mut unread)?;
         if entry.chunk_offset != next_chunk_offset {
             return Err(DamagedBlock::because("its chunks are not back to back"));
         }
@@ -571,6 +650,32 @@ fn decode_series_index(footer: &BlockFooter, series_index: Bytes) -> Result<Vec<
     Ok(series)
 }
 
+/// Reads one entry of a series index and moves `unread` past it.
+fn take_series_entry(unread: &mut Bytes) -> Result<SeriesEntry, DamagedBlock> {
+    let cut_short = || DamagedBlock::because("its series index ends inside an entry");
+    let labels = match take_labels(unread) {
+        Ok(labels) => labels,
+        Err(LabelsReadError::Malformed(_reason)) => return Err(cut_short()),
+        Err(LabelsReadError::Invalid(invalid_labels)) => {
+            return Err(DamagedBlock {
+                reason: format!("a series has invalid labels: {invalid_labels}"),
+            });
+        }
+    };
+    if unread.remaining() < SERIES_ENTRY_FIXED_BYTES {
+        return Err(cut_short());
+    }
+    Ok(SeriesEntry {
+        labels,
+        chunk_offset: unread.get_u64_le(),
+        chunk_bytes: unread.get_u32_le(),
+        chunk_checksum: unread.get_u32_le(),
+        sample_count: unread.get_u32_le(),
+        min_time_millis: unread.get_i64_le(),
+        max_time_millis: unread.get_i64_le(),
+    })
+}
+
 /// Reads the postings of a block.
 fn decode_postings(postings: Bytes, series_count: usize) -> Result<BTreeMap<Label, Vec<u32>>, DamagedBlock> {
     let cut_short = || DamagedBlock::because("its postings end inside an entry");
@@ -582,33 +687,40 @@ fn decode_postings(postings: Bytes, series_count: usize) -> Result<BTreeMap<Labe
     for _pair in 0..pair_count {
         let name = take_posting_text(&mut unread)?;
         let value = take_posting_text(&mut unread)?;
-        let Ok(listed_count) = unread.try_get_u32_le() else {
-            return Err(cut_short());
-        };
-        // Checked before allocating: a damaged count must not ask for gigabytes.
-        if unread.remaining() / 4 < listed_count as usize {
-            return Err(cut_short());
-        }
-        let mut series_numbers: Vec<u32> = Vec::with_capacity(listed_count as usize);
-        for _listed in 0..listed_count {
-            let series_number = unread.get_u32_le();
-            if series_number as usize >= series_count {
-                return Err(DamagedBlock::because("its postings name a series it does not hold"));
-            }
-            // Selecting series intersects these lists, which only works on ascending ones.
-            if let Some(previous_number) = series_numbers.last()
-                && *previous_number >= series_number
-            {
-                return Err(DamagedBlock::because("its postings are not in order"));
-            }
-            series_numbers.push(series_number);
-        }
+        let series_numbers = take_series_numbers(&mut unread, series_count)?;
         series_by_label.insert(Label { name, value }, series_numbers);
     }
     if unread.has_remaining() {
         return Err(DamagedBlock::because("its postings hold more than their count says"));
     }
     Ok(series_by_label)
+}
+
+/// Reads the series numbers one posting lists, and checks that they name series of the block in ascending order.
+fn take_series_numbers(unread: &mut Bytes, series_count: usize) -> Result<Vec<u32>, DamagedBlock> {
+    let cut_short = || DamagedBlock::because("its postings end inside an entry");
+    let Ok(listed_count) = unread.try_get_u32_le() else {
+        return Err(cut_short());
+    };
+    // Checked before allocating: a damaged count must not ask for gigabytes.
+    if unread.remaining() / SERIES_NUMBER_BYTES < listed_count as usize {
+        return Err(cut_short());
+    }
+    let mut series_numbers: Vec<u32> = Vec::with_capacity(listed_count as usize);
+    for _listed in 0..listed_count {
+        let series_number = unread.get_u32_le();
+        if series_number as usize >= series_count {
+            return Err(DamagedBlock::because("its postings name a series it does not hold"));
+        }
+        // Selecting series intersects these lists, which only works on ascending ones.
+        if let Some(previous_number) = series_numbers.last()
+            && *previous_number >= series_number
+        {
+            return Err(DamagedBlock::because("its postings are not in order"));
+        }
+        series_numbers.push(series_number);
+    }
+    Ok(series_numbers)
 }
 
 /// Reads one name or value of a posting.
@@ -671,11 +783,15 @@ fn byte_range_as_usize(byte_range: &Range<u64>) -> Range<usize> {
 /// * `chunk` - The chunk's bytes.
 /// * `time_range` - If given, only samples in this range are returned.
 ///
+/// # Returns
+///
+/// The samples of the chunk, or those of them in `time_range`, in the order the chunk holds them.
+///
 /// # Errors
 ///
 /// Returns [`DamagedBlock`] if the chunk fails its checksum, does not decode, or does not hold the
 /// samples its entry describes.
-fn decode_verified_chunk(
+pub(super) fn decode_verified_chunk(
     entry: &SeriesEntry,
     chunk: &[u8],
     time_range: Option<TimeRange>,
@@ -704,122 +820,6 @@ fn decode_verified_chunk(
         ));
     }
     Ok(samples)
-}
-
-/// Wraps a [`DamagedBlock`] as the error the framework knows, naming the artifact.
-pub(crate) fn damaged_artifact(artifact_key: &str, damaged_block: DamagedBlock) -> MaterializerError {
-    MaterializerError::DamagedArtifact {
-        artifact_key: artifact_key.to_owned(),
-        reason: damaged_block.reason,
-    }
-}
-
-/// Fetches and verifies the footer, the series index and the postings of a block: two range reads.
-///
-/// # Arguments
-///
-/// * `artifacts` - Where the block is stored.
-/// * `artifact_key` - The block's key.
-/// * `size_bytes` - The block's size, as the catalog records it. It locates the footer.
-///
-/// # Errors
-///
-/// Returns [`MaterializerError::ArtifactStore`] if the block cannot be read, and
-/// [`MaterializerError::DamagedArtifact`] if what was read is not the index of a block of that size.
-pub(crate) async fn load_block_index(
-    artifacts: &ArtifactNamespace,
-    artifact_key: &str,
-    size_bytes: u64,
-) -> Result<BlockIndex, MaterializerError> {
-    let damaged = |damaged_block| damaged_artifact(artifact_key, damaged_block);
-    let Some(footer_start) = size_bytes.checked_sub(BLOCK_FOOTER_BYTES as u64) else {
-        return Err(damaged(DamagedBlock::because("it is too short to hold a footer")));
-    };
-    let footer_bytes = artifacts
-        .get_artifact_range(artifact_key, footer_start..size_bytes)
-        .await?;
-    let footer = BlockFooter::decode(&footer_bytes).map_err(damaged)?;
-    if footer.block_bytes() != Some(size_bytes) {
-        return Err(damaged(DamagedBlock::because("it is not the size its footer states")));
-    }
-    let index_range = footer.index_range().expect("the block's size was just derived from it");
-    let index_bytes = artifacts.get_artifact_range(artifact_key, index_range).await?;
-    BlockIndex::decode(footer, &index_bytes).map_err(damaged)
-}
-
-/// Fetches, verifies and decodes the samples of the selected series of a block that lie in a time range.
-///
-/// Chunks that lie next to each other, or nearly so, are fetched in one range read.
-///
-/// # Arguments
-///
-/// * `artifacts` - Where the block is stored.
-/// * `artifact_key` - The block's key.
-/// * `index` - The block's index, from [`load_block_index`].
-/// * `selected_series` - The numbers of the series to read, ascending, from [`BlockIndex::select`].
-/// * `time_range` - Only samples in this range are returned.
-///
-/// # Returns
-///
-/// The selected series that have a sample in the range, in ascending order of labels, each with its
-/// samples in the range.
-///
-/// # Errors
-///
-/// Returns [`MaterializerError::ArtifactStore`] if a chunk cannot be read, and
-/// [`MaterializerError::DamagedArtifact`] if one fails its checksum or does not decode.
-pub(crate) async fn read_series(
-    artifacts: &ArtifactNamespace,
-    artifact_key: &str,
-    index: &BlockIndex,
-    selected_series: &[u32],
-    time_range: TimeRange,
-) -> Result<Vec<SeriesSamples>, MaterializerError> {
-    let mut series_in_range = Vec::new();
-    let mut run_start = 0;
-    while run_start < selected_series.len() {
-        let run_end = end_of_joined_read(index, selected_series, run_start);
-        let first_entry = &index.series[selected_series[run_start] as usize];
-        let last_entry = &index.series[selected_series[run_end - 1] as usize];
-        let joined_range = first_entry.chunk_offset..last_entry.chunk_range().end;
-        let joined_bytes = artifacts.get_artifact_range(artifact_key, joined_range.clone()).await?;
-        if joined_bytes.len() as u64 != joined_range.end - joined_range.start {
-            return Err(damaged_artifact(
-                artifact_key,
-                DamagedBlock::because("a read returned fewer bytes than were asked for"),
-            ));
-        }
-        for series_number in &selected_series[run_start..run_end] {
-            let entry = &index.series[*series_number as usize];
-            let chunk_start = usize::try_from(entry.chunk_offset - joined_range.start).expect("within one read");
-            let chunk = &joined_bytes[chunk_start..chunk_start + entry.chunk_bytes as usize];
-            let samples = decode_verified_chunk(entry, chunk, Some(time_range))
-                .map_err(|damaged_block| damaged_artifact(artifact_key, damaged_block))?;
-            if !samples.is_empty() {
-                series_in_range.push(SeriesSamples {
-                    labels: entry.labels.clone(),
-                    samples,
-                });
-            }
-        }
-        run_start = run_end;
-    }
-    Ok(series_in_range)
-}
-
-/// Where the run of selected series that starts at `run_start` ends, if their chunks are fetched in one
-/// read: before the first series whose chunk lies further than [`JOINED_READ_GAP_BYTES`] from the last.
-fn end_of_joined_read(index: &BlockIndex, selected_series: &[u32], run_start: usize) -> usize {
-    let mut run_end = run_start + 1;
-    while run_end < selected_series.len() {
-        let previous_entry = &index.series[selected_series[run_end - 1] as usize];
-        let next_entry = &index.series[selected_series[run_end] as usize];
-        if next_entry.chunk_offset - previous_entry.chunk_range().end > JOINED_READ_GAP_BYTES {
-            break;
-        }
-        run_end += 1;
-    }
-    run_end
 }
 
 #[cfg(test)]

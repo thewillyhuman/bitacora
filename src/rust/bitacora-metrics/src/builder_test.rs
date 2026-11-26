@@ -308,10 +308,7 @@ async fn records_after_the_boundary_stay_in_the_builder() {
     seal(&mut builder, &artifacts, 1, 1).await;
 
     let snapshot = builder.head().snapshot(&Selector::all(), TimeRange::ALL);
-    assert_eq!(
-        snapshot.held_records,
-        Some((SequenceNumber::new(2), SequenceNumber::new(2)))
-    );
+    assert_eq!(snapshot.held_records, Some(records(2, 2)));
 }
 
 /// Saves what `builder` holds, as the records `first..=last`, and returns the entry a checkpoint would
@@ -359,10 +356,7 @@ async fn saving_leaves_the_builder_as_it_was() {
     save(&mut builder, &artifacts, 1, 1).await;
 
     let snapshot = builder.head().snapshot(&Selector::all(), TimeRange::ALL);
-    assert_eq!(
-        snapshot.held_records,
-        Some((SequenceNumber::new(1), SequenceNumber::new(1)))
-    );
+    assert_eq!(snapshot.held_records, Some(records(1, 1)));
 }
 
 #[tokio::test]
@@ -426,10 +420,7 @@ async fn saved_head_without_samples_restores_a_builder_that_holds_its_records() 
         .expect("restored");
 
     let snapshot = restored.head().snapshot(&Selector::all(), TimeRange::ALL);
-    assert_eq!(
-        snapshot.held_records,
-        Some((SequenceNumber::new(1), SequenceNumber::new(1)))
-    );
+    assert_eq!(snapshot.held_records, Some(records(1, 1)));
 }
 
 #[tokio::test]

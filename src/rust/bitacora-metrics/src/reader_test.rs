@@ -39,7 +39,10 @@ async fn open_reader(harness: &Harness) -> BlockReader {
 }
 
 /// Appends `samples` to `store` and waits for the checkpoint that covers the record.
-async fn append_and_checkpoint<P: BlockPolicy>(store: &MetricsStore<P>, samples: &[SeriesSamples]) -> SequenceNumber {
+async fn append_and_checkpoint<Policy: BlockPolicy>(
+    store: &MetricsStore<Policy>,
+    samples: &[SeriesSamples],
+) -> SequenceNumber {
     let appended_at = store.append(samples).await.expect("the append commits");
     sleep(CHECKPOINT_AFTER).await;
     timeout(PATIENCE, store.progress().wait_until_committed(appended_at))

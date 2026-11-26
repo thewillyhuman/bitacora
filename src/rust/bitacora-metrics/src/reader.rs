@@ -68,6 +68,19 @@ use crate::selector::Selector;
 const MAX_QUERY_ATTEMPTS: usize = 4;
 
 /// Why the committed blocks could not be found or read.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::BlockReaderError;
+///
+/// /// Whether asking again later can help.
+/// fn is_worth_another_try(reader_error: &BlockReaderError) -> bool {
+///     matches!(reader_error, BlockReaderError::CheckpointKeptChanging)
+/// }
+///
+/// assert!(is_worth_another_try(&BlockReaderError::CheckpointKeptChanging));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum BlockReaderError {
     /// The metadata store refused or could not be reached, the stream does not exist, or no metrics
@@ -106,20 +119,31 @@ struct CommittedBlocks {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// A query node on a stream whose store was prepared and has not committed a checkpoint yet:
+///
+/// ```
 /// # use std::sync::Arc;
-/// # use bitacora_artifact::ArtifactStore;
-/// # use bitacora_meta::MetadataStore;
-/// # use bitacora_metrics::{BlockReader, Selector, TimeRange};
-/// # async fn example(
-/// #     metadata: MetadataStore,
-/// #     artifact_store: Arc<dyn ArtifactStore>,
-/// # ) -> Result<(), bitacora_metrics::BlockReaderError> {
+/// # use bitacora_artifact::MemoryArtifactStore;
+/// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+/// # use bitacora_metrics::MetricsStore;
+/// # use bitacora_types::ReplicationSettings;
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+/// # metadata
+/// #     .create_stream("tenant-7", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+/// #     .await?;
+/// # MetricsStore::initialize(&metadata, "tenant-7").await?;
+/// # let artifact_store = Arc::new(MemoryArtifactStore::new());
+/// use bitacora_metrics::{BlockReader, Selector, TimeRange};
+///
 /// let mut reader = BlockReader::open(metadata, artifact_store, "tenant-7").await?;
 ///
 /// let answer = reader.query(&Selector::all(), TimeRange::ALL).await?;
 /// println!("{} series as of record {}", answer.series.len(), answer.as_of);
+/// assert!(answer.series.is_empty());
 ///
+/// // Later: look for what the store has committed since.
 /// reader.refresh().await?;
 /// # Ok(())
 /// # }
@@ -148,11 +172,42 @@ impl BlockReader {
     /// * `artifact_store` - The object store the stream's metrics store keeps its blocks in.
     /// * `stream_name` - The stream.
     ///
+    /// # Returns
+    ///
+    /// A reader that answers as of the checkpoint the store had committed when this was called.
+    ///
     /// # Errors
     ///
     /// Returns [`BlockReaderError::Metadata`] if the stream does not exist, no metrics store was
     /// prepared on it, or the metadata store cannot be reached, and [`BlockReaderError::Block`] if the
     /// committed manifest cannot be read.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+    /// # use bitacora_metrics::MetricsStore;
+    /// # use bitacora_types::ReplicationSettings;
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+    /// # metadata
+    /// #     .create_stream("tenant-7", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+    /// #     .await?;
+    /// # MetricsStore::initialize(&metadata, "tenant-7").await?;
+    /// # let artifact_store = Arc::new(MemoryArtifactStore::new());
+    /// use bitacora_metrics::{BlockReader, BlockReaderError};
+    ///
+    /// let not_a_stream = BlockReader::open(metadata.clone(), artifact_store.clone(), "tenant-8").await;
+    /// assert!(matches!(not_a_stream, Err(BlockReaderError::Metadata(_))));
+    ///
+    /// let reader = BlockReader::open(metadata, artifact_store, "tenant-7").await?;
+    /// assert!(reader.blocks().is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn open(
         metadata: MetadataStore,
         artifact_store: Arc<dyn ArtifactStore>,
@@ -185,6 +240,32 @@ impl BlockReader {
     ///
     /// Returns [`BlockReaderError`] if the checkpoint or its manifest cannot be read. The reader then
     /// keeps answering from the blocks it knew.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+    /// # use bitacora_metrics::MetricsStore;
+    /// # use bitacora_types::ReplicationSettings;
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+    /// # metadata
+    /// #     .create_stream("tenant-7", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+    /// #     .await?;
+    /// # MetricsStore::initialize(&metadata, "tenant-7").await?;
+    /// # let artifact_store = Arc::new(MemoryArtifactStore::new());
+    /// # let mut reader = bitacora_metrics::BlockReader::open(metadata, artifact_store, "tenant-7").await?;
+    /// use bitacora_types::SequenceNumber;
+    ///
+    /// // The store has not committed anything since the reader was opened.
+    /// let checkpoint = reader.refresh().await?;
+    /// assert_eq!(checkpoint, SequenceNumber::ZERO);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn refresh(&mut self) -> Result<SequenceNumber, BlockReaderError> {
         let committed =
             read_committed_checkpoint(&self.metadata, &self.artifacts, self.stream_id, METRICS_MATERIALIZER).await?;
@@ -207,14 +288,73 @@ impl BlockReader {
     }
 
     /// The checkpoint the reader answers as of.
+    ///
+    /// # Returns
+    ///
+    /// The checkpoint the reader saw when it was opened or last refreshed: its answers hold every record up to
+    /// it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+    /// # use bitacora_metrics::MetricsStore;
+    /// # use bitacora_types::ReplicationSettings;
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+    /// # metadata
+    /// #     .create_stream("tenant-7", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+    /// #     .await?;
+    /// # MetricsStore::initialize(&metadata, "tenant-7").await?;
+    /// # let artifact_store = Arc::new(MemoryArtifactStore::new());
+    /// # let mut reader = bitacora_metrics::BlockReader::open(metadata, artifact_store, "tenant-7").await?;
+    /// use bitacora_types::SequenceNumber;
+    ///
+    /// assert_eq!(reader.checkpoint(), SequenceNumber::ZERO);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub const fn checkpoint(&self) -> SequenceNumber {
         self.committed.checkpoint
     }
 
-    /// What the reader answers from, in log order: the blocks of the catalog and, after them, the part
-    /// of the store's head that the checkpoint saved, if it saved one. That part has the layout of a
-    /// block and is read like one.
+    /// What the reader answers from.
+    ///
+    /// # Returns
+    ///
+    /// In log order: the blocks of the catalog and, after them, the part of the store's head that the
+    /// checkpoint saved, if it saved one. That part has the layout of a block and is read like one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+    /// # use bitacora_metrics::MetricsStore;
+    /// # use bitacora_types::ReplicationSettings;
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+    /// # metadata
+    /// #     .create_stream("tenant-7", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+    /// #     .await?;
+    /// # MetricsStore::initialize(&metadata, "tenant-7").await?;
+    /// # let artifact_store = Arc::new(MemoryArtifactStore::new());
+    /// # let mut reader = bitacora_metrics::BlockReader::open(metadata, artifact_store, "tenant-7").await?;
+    /// let mut stored_bytes = 0;
+    /// for block in reader.blocks() {
+    ///     stored_bytes += block.artifact.size_bytes;
+    /// }
+    /// // Nothing was checkpointed yet, so there is nothing to read.
+    /// assert_eq!(stored_bytes, 0);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn blocks(&self) -> &[CatalogEntry] {
         &self.committed.entries
@@ -238,6 +378,35 @@ impl BlockReader {
     ///
     /// Returns [`BlockReaderError::Block`] if a block cannot be read or is damaged, and what
     /// [`BlockReader::refresh`] returns if a refresh was needed and failed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use bitacora_artifact::MemoryArtifactStore;
+    /// # use bitacora_meta::{MemoryKeyValueStore, MetadataStore, RetentionPolicy};
+    /// # use bitacora_metrics::MetricsStore;
+    /// # use bitacora_types::ReplicationSettings;
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let metadata = MetadataStore::new(Arc::new(MemoryKeyValueStore::new()));
+    /// # metadata
+    /// #     .create_stream("tenant-7", ReplicationSettings::DEFAULT, RetentionPolicy::default(), None)
+    /// #     .await?;
+    /// # MetricsStore::initialize(&metadata, "tenant-7").await?;
+    /// # let artifact_store = Arc::new(MemoryArtifactStore::new());
+    /// # let mut reader = bitacora_metrics::BlockReader::open(metadata, artifact_store, "tenant-7").await?;
+    /// use bitacora_metrics::{Matcher, Selector, TimeRange};
+    ///
+    /// let from_the_api = Selector::new(vec![Matcher::equal("job", "api")]);
+    /// let last_hour = TimeRange::new(1_700_000_000_000 - 3_600_000, 1_700_000_000_000)?;
+    ///
+    /// let answer = reader.query(&from_the_api, last_hour).await?;
+    ///
+    /// assert_eq!(answer.as_of, reader.checkpoint());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn query(&mut self, selector: &Selector, time_range: TimeRange) -> Result<QueryResult, BlockReaderError> {
         for _attempt in 0..MAX_QUERY_ATTEMPTS {
             let mut merged = BTreeMap::new();

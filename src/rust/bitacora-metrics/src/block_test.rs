@@ -14,10 +14,14 @@
 //! `three_series` is a block's worth of samples for `job` = `api`, `db` and `web`. `stored_block` puts an
 //! encoded block into a `MemoryArtifactStore` through a real `ArtifactNamespace` and returns what a
 //! reader needs to find it again. The samples come from `test_support.rs`.
+//!
+//! The reads from the artifact store are in `block/fetch.rs`; they are tested here with the format they read.
 
 use bitacora_artifact::{ArtifactError, MemoryArtifactStore};
+use bitacora_materializer::{ArtifactNamespace, MaterializerError};
 
 use super::*;
+use crate::sample::SeriesSamples;
 use crate::selector::Matcher;
 use crate::test_support::{TestArtifacts, job, sample, samples_at};
 
@@ -283,10 +287,8 @@ fn series_entry_says_when_the_series_starts_and_ends() {
 
     let index = index_of(&encoded.bytes);
 
-    assert_eq!(
-        (index.series[1].min_time_millis, index.series[1].max_time_millis),
-        (100, 200)
-    );
+    assert_eq!(index.series[1].min_time_millis, 100);
+    assert_eq!(index.series[1].max_time_millis, 200);
 }
 
 #[test]

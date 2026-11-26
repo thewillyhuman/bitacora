@@ -41,6 +41,15 @@ use crate::sample::{Label, Labels};
 /// One condition on one label of a series.
 ///
 /// A series without the label counts as having the empty value for it.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::Matcher;
+///
+/// let by_hand = Matcher::Equal { name: "job".to_owned(), value: "api".to_owned() };
+/// assert_eq!(Matcher::equal("job", "api"), by_hand);
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Matcher {
     /// The series' value for the label is exactly this text.
@@ -61,6 +70,27 @@ pub enum Matcher {
 
 impl Matcher {
     /// A matcher for series whose label `name` has the value `value`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The label's name.
+    /// * `value` - The value the series must have. Empty: the series must not have the label.
+    ///
+    /// # Returns
+    ///
+    /// The matcher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{Labels, Matcher};
+    ///
+    /// let from_the_api = Labels::from_pairs(&[("job", "api")])?;
+    ///
+    /// assert!(Matcher::equal("job", "api").matches(&from_the_api));
+    /// assert!(Matcher::equal("instance", "").matches(&from_the_api));
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub fn equal(name: &str, value: &str) -> Self {
         Self::Equal {
@@ -70,6 +100,27 @@ impl Matcher {
     }
 
     /// A matcher for series whose label `name` does not have the value `value`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The label's name.
+    /// * `value` - The value the series must not have. Empty: the series must have the label.
+    ///
+    /// # Returns
+    ///
+    /// The matcher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{Labels, Matcher};
+    ///
+    /// let from_the_api = Labels::from_pairs(&[("job", "api")])?;
+    ///
+    /// assert!(Matcher::not_equal("job", "batch").matches(&from_the_api));
+    /// assert!(!Matcher::not_equal("instance", "").matches(&from_the_api));
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub fn not_equal(name: &str, value: &str) -> Self {
         Self::NotEqual {
@@ -79,6 +130,26 @@ impl Matcher {
     }
 
     /// Whether a series with these labels meets the condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `labels` - The labels of the series.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the series' value for the matcher's label, empty if it has none, is what the matcher asks for.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{Labels, Matcher};
+    ///
+    /// let from_the_api = Labels::from_pairs(&[("job", "api")])?;
+    ///
+    /// assert!(Matcher::equal("job", "api").matches(&from_the_api));
+    /// assert!(!Matcher::equal("job", "batch").matches(&from_the_api));
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub fn matches(&self, labels: &Labels) -> bool {
         match self {
@@ -115,18 +186,75 @@ pub struct Selector {
 
 impl Selector {
     /// A selector for the series that meet every one of `matchers`.
+    ///
+    /// # Arguments
+    ///
+    /// * `matchers` - The conditions. Without any, every series is selected.
+    ///
+    /// # Returns
+    ///
+    /// The selector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{Labels, Matcher, Selector};
+    ///
+    /// let requests_of_the_api = Selector::new(vec![
+    ///     Matcher::equal("__name__", "requests_total"),
+    ///     Matcher::equal("job", "api"),
+    /// ]);
+    ///
+    /// let errors_of_the_api = Labels::from_pairs(&[("__name__", "errors_total"), ("job", "api")])?;
+    /// assert!(!requests_of_the_api.matches(&errors_of_the_api));
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub const fn new(matchers: Vec<Matcher>) -> Self {
         Self { matchers }
     }
 
     /// A selector that matches every series.
+    ///
+    /// # Returns
+    ///
+    /// A selector without conditions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{Labels, Selector};
+    ///
+    /// let any_series = Labels::from_pairs(&[("job", "api")])?;
+    /// assert!(Selector::all().matches(&any_series));
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub const fn all() -> Self {
         Self { matchers: Vec::new() }
     }
 
     /// Whether a series with these labels is selected.
+    ///
+    /// # Arguments
+    ///
+    /// * `labels` - The labels of the series.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the series meets every condition of the selector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_metrics::{Labels, Matcher, Selector};
+    ///
+    /// let not_from_a_batch = Selector::new(vec![Matcher::not_equal("job", "batch")]);
+    ///
+    /// assert!(not_from_a_batch.matches(&Labels::from_pairs(&[("job", "api")])?));
+    /// assert!(!not_from_a_batch.matches(&Labels::from_pairs(&[("job", "batch")])?));
+    /// # Ok::<(), bitacora_metrics::InvalidLabels>(())
+    /// ```
     #[must_use]
     pub fn matches(&self, labels: &Labels) -> bool {
         for matcher in &self.matchers {
@@ -141,6 +269,11 @@ impl Selector {
     /// particular, non-empty value.
     ///
     /// A block looks these up in its postings to avoid examining every series it holds.
+    ///
+    /// # Returns
+    ///
+    /// The labels, in the order of the matchers. Empty if no matcher asks for one particular value: every series
+    /// must then be examined.
     pub(crate) fn required_labels(&self) -> Vec<Label> {
         let mut required_labels = Vec::new();
         for matcher in &self.matchers {

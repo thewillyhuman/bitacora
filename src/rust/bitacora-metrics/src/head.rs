@@ -60,11 +60,25 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use bitacora_types::SequenceNumber;
+use bitacora_types::{SequenceNumber, SequenceRange};
 
 use crate::block::{EncodedBlock, encode_block};
 use crate::sample::{Labels, Sample, SeriesSamples, TimeRange, insert_sample, merge_series_later_wins};
 use crate::selector::Selector;
+
+/// One record of the stream, decoded: where it is in the log and the samples it carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DecodedRecord {
+    /// The record's position in the log.
+    pub sequence: SequenceNumber,
+    /// The record's samples, by series, as the record lists them.
+    pub batch: Vec<SeriesSamples>,
+}
+
+/// The records from `first` to `last`, both included, as the range a head says it holds.
+fn records_from_to(first: SequenceNumber, last: SequenceNumber) -> SequenceRange {
+    SequenceRange::new(first, last).expect("a head is given its records in log order")
+}
 
 /// The samples of some consecutive records, by series.
 #[derive(Debug, Default)]
@@ -77,8 +91,8 @@ pub(crate) struct HeadSamples {
     min_time_millis: i64,
     /// The time of the latest sample held. Meaningless while `sample_count` is 0.
     max_time_millis: i64,
-    /// The first and the last record whose samples are held, or `None` if no record was added.
-    held_records: Option<(SequenceNumber, SequenceNumber)>,
+    /// The records whose samples are held, or `None` if no record was added.
+    held_records: Option<SequenceRange>,
 }
 
 impl HeadSamples {
@@ -88,11 +102,13 @@ impl HeadSamples {
     ///
     /// * `samples_by_series` - What the saved block holds: every series with its samples, strictly
     ///   increasing in time.
-    /// * `held_records` - The first and the last record whose samples those are.
-    pub(crate) fn from_saved(
-        samples_by_series: BTreeMap<Labels, Vec<Sample>>,
-        held_records: (SequenceNumber, SequenceNumber),
-    ) -> Self {
+    /// * `held_records` - The records whose samples those are.
+    ///
+    /// # Returns
+    ///
+    /// A part that holds exactly those samples and says it holds exactly those records, as the part that was
+    /// saved did.
+    pub(crate) fn from_saved(samples_by_series: BTreeMap<Labels, Vec<Sample>>, held_records: SequenceRange) -> Self {
         let mut rebuilt = Self {
             samples_by_series,
             held_records: Some(held_records),
@@ -115,13 +131,22 @@ impl HeadSamples {
     }
 
     /// Whether the part holds as many samples, or samples that span as much time, as one block may.
+    ///
+    /// # Arguments
+    ///
+    /// * `limits` - The limits of one block.
+    ///
+    /// # Returns
+    ///
+    /// `true` once either limit is reached: the part then becomes a block as it is.
     pub(crate) const fn is_full(&self, limits: BlockLimits) -> bool {
         self.sample_count >= limits.max_samples || self.time_span_millis() >= limits.max_span_millis
     }
 
     /// The last record whose samples are held, if any record was added.
     fn last_record(&self) -> Option<SequenceNumber> {
-        self.held_records.map(|(_first_held, last_held)| last_held)
+        let held_records = self.held_records?;
+        Some(held_records.last())
     }
 
     /// Adds the samples of the record at `sequence`.
@@ -134,10 +159,11 @@ impl HeadSamples {
         for series in batch {
             self.add_series(&series.labels, &series.samples);
         }
-        self.held_records = match self.held_records {
-            Some((first_held, _last_held)) => Some((first_held, sequence)),
-            None => Some((sequence, sequence)),
+        let first_held = match self.held_records {
+            Some(held_records) => held_records.first(),
+            None => sequence,
         };
+        self.held_records = Some(records_from_to(first_held, sequence));
     }
 
     /// Adds samples to one series, creating the series if this is its first sample.
@@ -170,18 +196,30 @@ impl HeadSamples {
     }
 
     /// Every series held, with its samples.
+    ///
+    /// # Returns
+    ///
+    /// The samples by series, each series strictly increasing in time. This is what a block of the part holds.
     pub(crate) const fn samples_by_series(&self) -> &BTreeMap<Labels, Vec<Sample>> {
         &self.samples_by_series
     }
 
     /// How many samples are held. Only the tests ask; the head itself uses the count through
     /// [`HeadSamples::is_full`].
+    ///
+    /// # Returns
+    ///
+    /// The number of samples over all series. A sample that replaced another counts once.
     #[cfg(test)]
     pub(crate) const fn sample_count(&self) -> u64 {
         self.sample_count
     }
 
-    /// How many milliseconds lie between the earliest and the latest sample held. 0 without samples.
+    /// How many milliseconds lie between the earliest and the latest sample held.
+    ///
+    /// # Returns
+    ///
+    /// The span, by the samples' own timestamps. 0 without samples and with one sample.
     pub(crate) const fn time_span_millis(&self) -> u64 {
         if self.sample_count == 0 {
             return 0;
@@ -189,14 +227,25 @@ impl HeadSamples {
         self.max_time_millis.abs_diff(self.min_time_millis)
     }
 
-    /// The first and the last record whose samples are held.
-    pub(crate) const fn held_records(&self) -> Option<(SequenceNumber, SequenceNumber)> {
+    /// The records whose samples are held.
+    ///
+    /// # Returns
+    ///
+    /// The range from the first to the last record added, or `None` if no record was added. A record without
+    /// samples counts: the part still stands for it.
+    pub(crate) const fn held_records(&self) -> Option<SequenceRange> {
         self.held_records
     }
 
     /// Merges the samples of the selected series that lie in `time_range` into `selected`. Where
     /// `selected` already has a sample for a series and timestamp, the one held here replaces it: the
     /// head is later in the log than anything read before it.
+    ///
+    /// # Arguments
+    ///
+    /// * `selector` - Which series to take.
+    /// * `time_range` - Which samples of them to take.
+    /// * `selected` - Where the samples go, by series. Changed in place.
     pub(crate) fn select_into(
         &self,
         selector: &Selector,
@@ -223,8 +272,8 @@ impl HeadSamples {
 pub(crate) struct HeadSnapshot {
     /// The selected samples in the query's time range, by series.
     pub samples_by_series: BTreeMap<Labels, Vec<Sample>>,
-    /// The first and the last record whose samples the head held at that moment, if any.
-    pub held_records: Option<(SequenceNumber, SequenceNumber)>,
+    /// The records whose samples the head held at that moment, if any.
+    pub held_records: Option<SequenceRange>,
     /// The last record whose samples the head has given up to a block; [`SequenceNumber::ZERO`] if it
     /// has not given any up. The catalog must reach at least this far for nothing to be missing.
     pub sealed_through: SequenceNumber,
@@ -267,6 +316,18 @@ impl HeadState {
         }
         None
     }
+
+    /// The oldest `part_count` parts of the head, oldest first. The filling part comes after the full ones.
+    fn oldest_parts(&self, part_count: usize) -> Vec<&HeadSamples> {
+        let mut parts = Vec::with_capacity(part_count);
+        for part in self.full_parts.iter().chain([&self.filling]) {
+            if parts.len() == part_count {
+                break;
+            }
+            parts.push(part);
+        }
+        parts
+    }
 }
 
 /// A head that queries can read while the builder adds to it.
@@ -295,13 +356,12 @@ impl SharedHead {
     ///
     /// # Arguments
     ///
-    /// * `decoded_records` - Each record's position and its samples, in log order, following the last
-    ///   record added.
+    /// * `decoded_records` - The records, in log order, following the last record added.
     /// * `limits` - When a part is full.
-    pub(crate) fn add_records(&self, decoded_records: &[(SequenceNumber, Vec<SeriesSamples>)], limits: BlockLimits) {
+    pub(crate) fn add_records(&self, decoded_records: &[DecodedRecord], limits: BlockLimits) {
         let mut state = self.write();
-        for (sequence, batch) in decoded_records {
-            state.filling.add_record(*sequence, batch);
+        for decoded_record in decoded_records {
+            state.filling.add_record(decoded_record.sequence, &decoded_record.batch);
             if state.filling.is_full(limits) {
                 let full_part = std::mem::take(&mut state.filling);
                 state.full_parts.push_back(full_part);
@@ -309,28 +369,36 @@ impl SharedHead {
         }
     }
 
-    /// The last record of the oldest full part: where the next block ends. `None` while no part is full.
+    /// The last record of the oldest full part: where the next block ends.
+    ///
+    /// # Returns
+    ///
+    /// The record that filled the oldest part still waiting to be sealed. `None` while no part is full.
     pub(crate) fn oldest_full_part_end(&self) -> Option<SequenceNumber> {
-        self.read().full_parts.front().and_then(HeadSamples::last_record)
+        self.read().full_parts.front()?.last_record()
     }
 
     /// The samples of the records up to `last_record`, as the bytes of a block. The head is left as it
     /// is.
     ///
+    /// # Arguments
+    ///
+    /// * `last_record` - The last record the block is to hold.
+    ///
     /// # Returns
     ///
-    /// `None` if no part of the head ends at `last_record`: a block is made of whole parts.
+    /// The block. `None` if no part of the head ends at `last_record`: a block is made of whole parts.
     pub(crate) fn encode_through(&self, last_record: SequenceNumber) -> Option<EncodedBlock> {
         let state = self.read();
         let part_count = state.parts_through(last_record)?;
-        let mut parts = state.full_parts.iter().chain([&state.filling]).take(part_count);
-        let first_part = parts.next()?;
-        if part_count == 1 {
+        let parts = state.oldest_parts(part_count);
+        let (first_part, later_parts) = parts.split_first()?;
+        if later_parts.is_empty() {
             return Some(encode_block(first_part.samples_by_series()));
         }
         // Several parts in one block: their samples are merged, the later part winning.
         let mut merged = first_part.samples_by_series().clone();
-        for later_part in parts {
+        for later_part in later_parts {
             for (labels, samples) in later_part.samples_by_series() {
                 merge_series_later_wins(&mut merged, labels, samples);
             }
@@ -344,6 +412,10 @@ impl SharedHead {
     /// The block is not in the catalog yet when the builder calls this; the framework lists it a moment
     /// later. A query that looks in between is told by [`HeadSnapshot::sealed_through`] that the catalog
     /// it sees is too short.
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_through` - The last record the block that was just written holds.
     pub(crate) fn drop_through(&self, sealed_through: SequenceNumber) {
         let mut state = self.write();
         while let Some(oldest_end) = state.full_parts.front().and_then(HeadSamples::last_record) {
@@ -360,6 +432,10 @@ impl SharedHead {
     }
 
     /// The filling part as the bytes of a block, to be saved at a checkpoint. The head is left as it is.
+    ///
+    /// # Returns
+    ///
+    /// A block of every sample the filling part holds. A part without samples gives a block without series.
     ///
     /// # Panics
     ///
@@ -385,6 +461,15 @@ impl SharedHead {
     }
 
     /// Copies the selected samples in `time_range` out of the head, with the records they come from.
+    ///
+    /// # Arguments
+    ///
+    /// * `selector` - Which series to copy.
+    /// * `time_range` - Which samples of them to copy.
+    ///
+    /// # Returns
+    ///
+    /// The samples, the records the head held and how far it had sealed, all of the same moment.
     pub(crate) fn snapshot(&self, selector: &Selector, time_range: TimeRange) -> HeadSnapshot {
         let state = self.read();
         let mut snapshot = HeadSnapshot {
@@ -394,13 +479,14 @@ impl SharedHead {
         };
         // Oldest part first, so that a later record wins a shared timestamp.
         for part in state.full_parts.iter().chain([&state.filling]) {
-            let Some((first_held, last_held)) = part.held_records() else {
+            let Some(held_by_part) = part.held_records() else {
                 continue;
             };
-            snapshot.held_records = match snapshot.held_records {
-                Some((first_of_all, _last_so_far)) => Some((first_of_all, last_held)),
-                None => Some((first_held, last_held)),
+            let first_of_all = match snapshot.held_records {
+                Some(held_so_far) => held_so_far.first(),
+                None => held_by_part.first(),
             };
+            snapshot.held_records = Some(records_from_to(first_of_all, held_by_part.last()));
             part.select_into(selector, time_range, &mut snapshot.samples_by_series);
         }
         snapshot

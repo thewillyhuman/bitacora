@@ -64,6 +64,10 @@
 //!
 //! - Decoding what was encoded returns the same samples, bit for bit, in the same order, whatever the
 //!   timestamps and values are.
+//! - The loops that write and read bits, timestamps and values run once per sample. They are kept as plain
+//!   loops over a borrowed slice or one growing vector, without a call through a trait and without an
+//!   allocation per sample; the helpers they are split into are small private functions in this file. Their
+//!   speed was not measured.
 //! - Encoding is deterministic: equal samples give equal bytes.
 //! - Decoding bytes that are not a chunk returns an error. It never panics and never allocates more
 //!   than the bytes could hold.
@@ -89,7 +93,36 @@ const SHORT_DOD_PREFIX_BITS: [u8; 3] = [2, 3, 4];
 /// The largest leading-zero count a value code can state: what five bits hold.
 const MAX_STATED_LEADING_ZEROS: u32 = 31;
 
+/// How many bits a timestamp, a value or a delta of deltas takes when it is written in full.
+const FULL_WIDTH_BITS: u8 = 64;
+
+/// How many bits state the leading zeros of the window of a value code.
+const LEADING_ZEROS_BITS: u8 = 5;
+
+/// How many bits state the length of the window of a value code.
+const WINDOW_LENGTH_BITS: u8 = 6;
+
+/// The size of the first sample of a bit stream: a timestamp and a value, both in full.
+const FIRST_SAMPLE_BYTES: usize = 8 + 8;
+
+/// The most samples one byte of a bit stream can hold after the first sample: each takes at least two bits.
+const MOST_LATER_SAMPLES_PER_BYTE: usize = 4;
+
+/// What is wrong with a chunk whose bit stream ends before its samples do.
+const CUT_SHORT: DamagedChunk = DamagedChunk {
+    reason: "its bit stream ends before its samples do",
+};
+
 /// Why bytes are not the chunk of a series.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::DamagedChunk;
+///
+/// let damaged = DamagedChunk { reason: "it is too short to hold its sample count" };
+/// assert_eq!(damaged.to_string(), "chunk is damaged: it is too short to hold its sample count");
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("chunk is damaged: {reason}")]
 pub struct DamagedChunk {
@@ -232,8 +265,8 @@ pub(crate) fn encode_chunk(samples: &[Sample]) -> Vec<u8> {
         return writer.into_bytes();
     };
     #[allow(clippy::cast_sign_loss)]
-    writer.write_bits(first_sample.timestamp_millis as u64, 64);
-    writer.write_bits(first_sample.value.to_bits(), 64);
+    writer.write_bits(first_sample.timestamp_millis as u64, FULL_WIDTH_BITS);
+    writer.write_bits(first_sample.value.to_bits(), FULL_WIDTH_BITS);
     let mut previous = PreviousSample {
         timestamp_millis: first_sample.timestamp_millis,
         delta_millis: 0,
@@ -269,7 +302,7 @@ fn write_timestamp(writer: &mut BitWriter, previous: &mut PreviousSample, timest
         }
     }
     writer.write_bits(0b1111, 4);
-    writer.write_bits(delta_of_delta_bits, 64);
+    writer.write_bits(delta_of_delta_bits, FULL_WIDTH_BITS);
 }
 
 /// Writes the value code of one sample and remembers the sample's value and window.
@@ -295,9 +328,9 @@ fn write_value(writer: &mut BitWriter, previous: &mut PreviousSample, value_bits
         trailing_zeros,
     };
     writer.write_bits(0b11, 2);
-    writer.write_bits(u64::from(leading_zeros), 5);
+    writer.write_bits(u64::from(leading_zeros), LEADING_ZEROS_BITS);
     // A window of 64 bits is stored as 0: six bits hold 0 to 63, and a window is never empty.
-    writer.write_bits(u64::from(window.length_bits() % 64), 6);
+    writer.write_bits(u64::from(window.length_bits() % 64), WINDOW_LENGTH_BITS);
     writer.write_bits(xor >> trailing_zeros, bit_count_of(window.length_bits()));
     previous.window = Some(window);
 }
@@ -322,6 +355,15 @@ pub(crate) struct ChunkDecoder<'chunk> {
 impl<'chunk> ChunkDecoder<'chunk> {
     /// Starts reading `chunk`.
     ///
+    /// # Arguments
+    ///
+    /// * `chunk` - The bytes of one chunk, as [`encode_chunk`] wrote them. Borrowed for as long as the decoder
+    ///   lives.
+    ///
+    /// # Returns
+    ///
+    /// A decoder that has read the sample count and none of the samples.
+    ///
     /// # Errors
     ///
     /// Returns [`DamagedChunk`] if the bytes are too short to hold the sample count, or the count is more
@@ -333,11 +375,11 @@ impl<'chunk> ChunkDecoder<'chunk> {
             });
         };
         let sample_count = u32::from_le_bytes(count_bytes.try_into().expect("four bytes were split off"));
-        // The first sample takes 128 bits and every later one at least two.
-        let most_samples_that_fit = if bit_stream.len() < 16 {
+        // The first sample is stored in full and every later one takes at least two bits.
+        let most_samples_that_fit = if bit_stream.len() < FIRST_SAMPLE_BYTES {
             0
         } else {
-            1 + (bit_stream.len() - 16) * 4
+            1 + (bit_stream.len() - FIRST_SAMPLE_BYTES) * MOST_LATER_SAMPLES_PER_BYTE
         };
         if sample_count as usize > most_samples_that_fit {
             return Err(DamagedChunk {
@@ -355,6 +397,10 @@ impl<'chunk> ChunkDecoder<'chunk> {
     }
 
     /// How many samples are still to be read.
+    ///
+    /// # Returns
+    ///
+    /// The count the chunk states, less the samples read so far.
     pub(crate) const fn samples_left(&self) -> u32 {
         self.samples_left
     }
@@ -373,38 +419,41 @@ impl<'chunk> ChunkDecoder<'chunk> {
         if self.samples_left == 0 {
             return Ok(None);
         }
-        let cut_short = DamagedChunk {
-            reason: "its bit stream ends before its samples do",
-        };
         let sample = match self.previous {
-            None => {
-                let timestamp_bits = self.reader.read_bits(64).ok_or(cut_short)?;
-                let value_bits = self.reader.read_bits(64).ok_or(cut_short)?;
-                #[allow(clippy::cast_possible_wrap)]
-                let timestamp_millis = timestamp_bits as i64;
-                self.previous = Some(PreviousSample {
-                    timestamp_millis,
-                    delta_millis: 0,
-                    value_bits,
-                    window: None,
-                });
-                Sample {
-                    timestamp_millis,
-                    value: f64::from_bits(value_bits),
-                }
-            }
-            Some(mut previous) => {
-                let timestamp_millis = read_timestamp(&mut self.reader, &mut previous).ok_or(cut_short)?;
-                let value_bits = read_value(&mut self.reader, &mut previous)?;
-                self.previous = Some(previous);
-                Sample {
-                    timestamp_millis,
-                    value: f64::from_bits(value_bits),
-                }
-            }
+            None => self.read_first_sample()?,
+            Some(previous) => self.read_later_sample(previous)?,
         };
         self.samples_left -= 1;
         Ok(Some(sample))
+    }
+
+    /// Reads the first sample of the chunk, which is stored in full, and remembers it.
+    fn read_first_sample(&mut self) -> Result<Sample, DamagedChunk> {
+        let timestamp_bits = self.reader.read_bits(FULL_WIDTH_BITS).ok_or(CUT_SHORT)?;
+        let value_bits = self.reader.read_bits(FULL_WIDTH_BITS).ok_or(CUT_SHORT)?;
+        #[allow(clippy::cast_possible_wrap)]
+        let timestamp_millis = timestamp_bits as i64;
+        self.previous = Some(PreviousSample {
+            timestamp_millis,
+            delta_millis: 0,
+            value_bits,
+            window: None,
+        });
+        Ok(Sample {
+            timestamp_millis,
+            value: f64::from_bits(value_bits),
+        })
+    }
+
+    /// Reads a sample that is stored as its difference from `previous`, and remembers it in turn.
+    fn read_later_sample(&mut self, mut previous: PreviousSample) -> Result<Sample, DamagedChunk> {
+        let timestamp_millis = read_timestamp(&mut self.reader, &mut previous).ok_or(CUT_SHORT)?;
+        let value_bits = read_value(&mut self.reader, &mut previous)?;
+        self.previous = Some(previous);
+        Ok(Sample {
+            timestamp_millis,
+            value: f64::from_bits(value_bits),
+        })
     }
 }
 
@@ -426,7 +475,7 @@ fn read_timestamp(reader: &mut BitReader<'_>, previous: &mut PreviousSample) -> 
             }
         } else {
             #[allow(clippy::cast_possible_wrap)]
-            let wide = reader.read_bits(64)? as i64;
+            let wide = reader.read_bits(FULL_WIDTH_BITS)? as i64;
             delta_of_delta = wide;
         }
     }
@@ -439,27 +488,13 @@ fn read_timestamp(reader: &mut BitReader<'_>, previous: &mut PreviousSample) -> 
 
 /// Reads one value code and returns the bits of the value it stands for.
 fn read_value(reader: &mut BitReader<'_>, previous: &mut PreviousSample) -> Result<u64, DamagedChunk> {
-    let cut_short = DamagedChunk {
-        reason: "its bit stream ends before its samples do",
-    };
-    if !reader.read_bit().ok_or(cut_short)? {
+    if !reader.read_bit().ok_or(CUT_SHORT)? {
         return Ok(previous.value_bits);
     }
-    let window = if reader.read_bit().ok_or(cut_short)? {
-        let leading_zeros = u32::try_from(reader.read_bits(5).ok_or(cut_short)?).expect("five bits");
-        let stored_length = u32::try_from(reader.read_bits(6).ok_or(cut_short)?).expect("six bits");
-        let length_bits = if stored_length == 0 { 64 } else { stored_length };
-        if leading_zeros + length_bits > 64 {
-            return Err(DamagedChunk {
-                reason: "a value is stated to be wider than 64 bits",
-            });
-        }
-        let window = ValueWindow {
-            leading_zeros,
-            trailing_zeros: 64 - leading_zeros - length_bits,
-        };
-        previous.window = Some(window);
-        window
+    let window = if reader.read_bit().ok_or(CUT_SHORT)? {
+        let stated_window = read_stated_window(reader)?;
+        previous.window = Some(stated_window);
+        stated_window
     } else {
         match previous.window {
             Some(window) => window,
@@ -470,13 +505,37 @@ fn read_value(reader: &mut BitReader<'_>, previous: &mut PreviousSample) -> Resu
             }
         }
     };
-    let window_bits = reader.read_bits(bit_count_of(window.length_bits())).ok_or(cut_short)?;
+    let window_bits = reader.read_bits(bit_count_of(window.length_bits())).ok_or(CUT_SHORT)?;
     let value_bits = previous.value_bits ^ (window_bits << window.trailing_zeros);
     previous.value_bits = value_bits;
     Ok(value_bits)
 }
 
+/// Reads the eleven bits that state a new window: how many zero bits come before it, and how long it is.
+fn read_stated_window(reader: &mut BitReader<'_>) -> Result<ValueWindow, DamagedChunk> {
+    let leading_zeros = u32::try_from(reader.read_bits(LEADING_ZEROS_BITS).ok_or(CUT_SHORT)?).expect("five bits");
+    let stored_length = u32::try_from(reader.read_bits(WINDOW_LENGTH_BITS).ok_or(CUT_SHORT)?).expect("six bits");
+    let length_bits = if stored_length == 0 { 64 } else { stored_length };
+    if leading_zeros + length_bits > 64 {
+        return Err(DamagedChunk {
+            reason: "a value is stated to be wider than 64 bits",
+        });
+    }
+    Ok(ValueWindow {
+        leading_zeros,
+        trailing_zeros: 64 - leading_zeros - length_bits,
+    })
+}
+
 /// Decodes every sample of a chunk.
+///
+/// # Arguments
+///
+/// * `chunk` - The chunk's bytes.
+///
+/// # Returns
+///
+/// The samples, in the order the chunk holds them.
 ///
 /// # Errors
 ///

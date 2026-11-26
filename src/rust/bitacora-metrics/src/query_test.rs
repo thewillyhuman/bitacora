@@ -13,10 +13,10 @@
 //!
 //! # How the fixtures work
 //!
-//! [`View`] is the store's materializer, the framework's catalog over the block builder, driven by hand: a test says which record is applied and when a
-//! checkpoint cuts a block, with no cluster and no timing involved. The blocks go to the in-memory
-//! artifact store of `test_support.rs`. Under `BlockPerRecord` every record with a sample is a block,
-//! and every block stays as it was cut.
+//! [`View`] is the store's materializer, the framework's catalog over the block builder, driven by hand: a test
+//! says which record is applied and when a checkpoint cuts a block, with no cluster and no timing involved. The
+//! blocks go to the in-memory artifact store of `test_support.rs`. Under `BlockPerRecord` every record with a
+//! sample is a block, and every block stays as it was cut.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +27,7 @@ use bitacora_materializer::Materializer;
 use bytes::Bytes;
 
 use super::*;
-use crate::head::BlockLimits;
+use crate::head::{BlockLimits, DecodedRecord};
 use crate::materializer::{METRICS_MATERIALIZER, MetricsMaterializer};
 use crate::selector::Matcher;
 use crate::test_support::{
@@ -37,6 +37,19 @@ use crate::test_support::{
 /// The record position `sequence`.
 fn at(sequence: u64) -> SequenceNumber {
     SequenceNumber::new(sequence)
+}
+
+/// The records from `first` to `last`, both included, as a head says which records it holds.
+fn held(first: u64, last: u64) -> SequenceRange {
+    SequenceRange::new(at(first), at(last)).expect("a range that is in order")
+}
+
+/// The record at `sequence`, decoded into `batch`.
+fn decoded(sequence: u64, batch: Vec<SeriesSamples>) -> DecodedRecord {
+    DecodedRecord {
+        sequence: at(sequence),
+        batch,
+    }
 }
 
 /// The store's materializer, driven by hand, and what a query against it needs.
@@ -119,7 +132,7 @@ impl View {
 }
 
 /// A head that holds the given records, in one part, and nothing else.
-fn head_holding(decoded_records: &[(SequenceNumber, Vec<SeriesSamples>)]) -> SharedHead {
+fn head_holding(decoded_records: &[DecodedRecord]) -> SharedHead {
     let never_full = BlockLimits {
         max_samples: u64::MAX,
         max_span_millis: u64::MAX,
@@ -139,42 +152,42 @@ fn empty_head_adds_nothing_to_the_blocks() {
 
 #[test]
 fn head_right_after_the_catalog_goes_on_top() {
-    let fit = how_the_head_fits(at(5), Some((at(6), at(9))), at(5));
+    let fit = how_the_head_fits(at(5), Some(held(6, 9)), at(5));
 
     assert_eq!(fit, HeadFit::OnTopOfBlocks { last_held: at(9) });
 }
 
 #[test]
 fn head_without_any_block_goes_on_top() {
-    let fit = how_the_head_fits(SequenceNumber::ZERO, Some((at(1), at(3))), NEVER_SEALED);
+    let fit = how_the_head_fits(SequenceNumber::ZERO, Some(held(1, 3)), NEVER_SEALED);
 
     assert_eq!(fit, HeadFit::OnTopOfBlocks { last_held: at(3) });
 }
 
 #[test]
 fn head_that_starts_inside_the_catalog_and_ends_beyond_it_goes_on_top() {
-    let fit = how_the_head_fits(at(5), Some((at(3), at(9))), at(2));
+    let fit = how_the_head_fits(at(5), Some(held(3, 9)), at(2));
 
     assert_eq!(fit, HeadFit::OnTopOfBlocks { last_held: at(9) });
 }
 
 #[test]
 fn head_that_ends_where_the_catalog_ends_is_covered() {
-    let fit = how_the_head_fits(at(5), Some((at(3), at(5))), at(2));
+    let fit = how_the_head_fits(at(5), Some(held(3, 5)), at(2));
 
     assert_eq!(fit, HeadFit::CoveredByBlocks);
 }
 
 #[test]
 fn head_that_ends_before_the_catalog_ends_is_covered() {
-    let fit = how_the_head_fits(at(5), Some((at(1), at(4))), NEVER_SEALED);
+    let fit = how_the_head_fits(at(5), Some(held(1, 4)), NEVER_SEALED);
 
     assert_eq!(fit, HeadFit::CoveredByBlocks);
 }
 
 #[test]
 fn head_that_starts_later_than_right_after_the_catalog_leaves_a_gap() {
-    let fit = how_the_head_fits(at(5), Some((at(7), at(9))), NEVER_SEALED);
+    let fit = how_the_head_fits(at(5), Some(held(7, 9)), NEVER_SEALED);
 
     assert_eq!(fit, HeadFit::Gap);
 }
@@ -192,7 +205,7 @@ fn empty_head_whose_last_seal_the_catalog_lists_is_covered() {
 
 #[test]
 fn head_that_sealed_beyond_the_catalog_and_holds_later_records_leaves_a_gap() {
-    let fit = how_the_head_fits(at(5), Some((at(10), at(12))), at(9));
+    let fit = how_the_head_fits(at(5), Some(held(10, 12)), at(9));
 
     assert_eq!(fit, HeadFit::Gap);
 }
@@ -605,7 +618,7 @@ async fn head_that_overlaps_the_catalog_answers_every_sample_once() {
     view.apply(2, &batch("api", &[20]));
     view.checkpoint().await;
     // A head that still holds record 2, which a block already has, and record 3 beyond it.
-    let overlapping = head_holding(&[(at(2), batch("api", &[20])), (at(3), batch("api", &[30]))]);
+    let overlapping = head_holding(&[decoded(2, batch("api", &[20])), decoded(3, batch("api", &[30]))]);
 
     let answer = view
         .query_with_head(&overlapping, &Selector::all(), TimeRange::ALL)
@@ -625,7 +638,7 @@ async fn head_the_catalog_has_overtaken_is_not_used() {
     view.apply(2, &[series("api", vec![sample(10, 7.0)])]);
     view.checkpoint().await;
     // A head as a query would have read it before record 2 was applied and both were sealed.
-    let overtaken = head_holding(&[(at(1), batch("api", &[10]))]);
+    let overtaken = head_holding(&[decoded(1, batch("api", &[10]))]);
 
     let answer = view.query_with_head(&overtaken, &Selector::all(), TimeRange::ALL).await;
 
@@ -642,7 +655,7 @@ async fn query_gives_no_answer_rather_than_one_with_a_hole() {
     view.apply(1, &batch("api", &[10]));
     view.checkpoint().await;
     // A head that starts at record 3: record 2 is in neither place.
-    let after_a_hole = head_holding(&[(at(3), batch("api", &[30]))]);
+    let after_a_hole = head_holding(&[decoded(3, batch("api", &[30]))]);
 
     let answer = view
         .query_with_head(&after_a_hole, &Selector::all(), TimeRange::ALL)

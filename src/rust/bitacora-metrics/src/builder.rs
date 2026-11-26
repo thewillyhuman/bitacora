@@ -69,7 +69,7 @@ use bitacora_materializer::{
 use bitacora_types::{LogRecord, SequenceNumber, SequenceRange};
 
 use crate::block::{EncodedBlock, damaged_artifact, decode_whole_block, encode_block};
-use crate::head::{BlockLimits, HeadSamples, SharedHead};
+use crate::head::{BlockLimits, DecodedRecord, HeadSamples, SharedHead};
 use crate::record::decode_record;
 use crate::sample::{Labels, Sample, merge_series_later_wins};
 
@@ -83,6 +83,26 @@ const SAVED_HEAD_LABEL: &str = "head";
 ///
 /// It is a trait with constants, implemented by marker types, because the framework creates the builder
 /// with `Default`: a type is the only thing a caller can choose.
+///
+/// # Examples
+///
+/// A policy for a store whose blocks hold at most an hour of samples:
+///
+/// ```
+/// use bitacora_materializer::CompactionPolicy;
+/// use bitacora_metrics::{BlockPolicy, MetricsStore, StandardBlocks};
+///
+/// struct HourlyBlocks;
+///
+/// impl BlockPolicy for HourlyBlocks {
+///     const MAX_BLOCK_SAMPLES: u64 = StandardBlocks::MAX_BLOCK_SAMPLES;
+///     const MAX_BLOCK_SPAN_MILLIS: u64 = 60 * 60 * 1_000;
+///     const COMPACTION: CompactionPolicy = StandardBlocks::COMPACTION;
+/// }
+///
+/// /// A store that cuts its blocks by that policy.
+/// type HourlyStore = MetricsStore<HourlyBlocks>;
+/// ```
 pub trait BlockPolicy: Send + Sync + 'static {
     /// A block ends with the record that brings it to this many samples.
     const MAX_BLOCK_SAMPLES: u64;
@@ -95,6 +115,15 @@ pub trait BlockPolicy: Send + Sync + 'static {
 
 /// The policy for real use: a block holds up to a million samples or two hours of them, and four
 /// neighbouring blocks of similar size are merged into one.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_metrics::{BlockPolicy, StandardBlocks};
+///
+/// assert_eq!(StandardBlocks::MAX_BLOCK_SAMPLES, 1_000_000);
+/// assert_eq!(StandardBlocks::MAX_BLOCK_SPAN_MILLIS, 2 * 60 * 60 * 1_000);
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StandardBlocks;
 
@@ -111,14 +140,14 @@ impl BlockPolicy for StandardBlocks {
 ///
 /// The framework owns the builder, inside an `ArtifactCatalog`. It is not used directly; see
 /// [`MetricsStore`](crate::MetricsStore).
-pub struct BlockBuilder<P: BlockPolicy = StandardBlocks> {
+pub struct BlockBuilder<Policy: BlockPolicy = StandardBlocks> {
     /// The samples of the records added since the last seal, shared with the store's queries.
     head: Arc<SharedHead>,
     /// The policy is a type; nothing of it is stored.
-    policy: PhantomData<P>,
+    policy: PhantomData<Policy>,
 }
 
-impl<P: BlockPolicy> Default for BlockBuilder<P> {
+impl<Policy: BlockPolicy> Default for BlockBuilder<Policy> {
     /// A builder that holds nothing.
     fn default() -> Self {
         Self {
@@ -128,8 +157,12 @@ impl<P: BlockPolicy> Default for BlockBuilder<P> {
     }
 }
 
-impl<P: BlockPolicy> BlockBuilder<P> {
-    /// A handle on the head, for queries.
+impl<Policy: BlockPolicy> BlockBuilder<Policy> {
+    /// Gives a handle on the head, for queries.
+    ///
+    /// # Returns
+    ///
+    /// The head this builder adds to and seals from. The store reads it while the runner owns the builder.
     pub(crate) fn head(&self) -> Arc<SharedHead> {
         Arc::clone(&self.head)
     }
@@ -137,21 +170,24 @@ impl<P: BlockPolicy> BlockBuilder<P> {
     /// The limits of one block, from the policy.
     const fn limits() -> BlockLimits {
         BlockLimits {
-            max_samples: P::MAX_BLOCK_SAMPLES,
-            max_span_millis: P::MAX_BLOCK_SPAN_MILLIS,
+            max_samples: Policy::MAX_BLOCK_SAMPLES,
+            max_span_millis: Policy::MAX_BLOCK_SPAN_MILLIS,
         }
     }
 }
 
 #[async_trait]
-impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
+impl<Policy: BlockPolicy> ArtifactBuilder for BlockBuilder<Policy> {
     /// Decodes the records and adds their samples to the head. If one of them is not a metrics record,
     /// none is added.
     fn add_records(&mut self, committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
         let mut decoded_records = Vec::with_capacity(committed_records.len());
         for record in committed_records {
             match decode_record(&record.payload) {
-                Ok(batch) => decoded_records.push((record.sequence, batch)),
+                Ok(batch) => decoded_records.push(DecodedRecord {
+                    sequence: record.sequence,
+                    batch,
+                }),
                 Err(record_error) => {
                     return Err(MaterializerError::InvalidRecord {
                         sequence: record.sequence,
@@ -217,9 +253,8 @@ impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
             Ok(samples_by_series) => samples_by_series,
             Err(damaged_block) => return Err(damaged_artifact(artifact_key, damaged_block)),
         };
-        let held_records = (saved.covered_range.first(), saved.covered_range.last());
         self.head
-            .restore_filling_part(HeadSamples::from_saved(samples_by_series, held_records));
+            .restore_filling_part(HeadSamples::from_saved(samples_by_series, saved.covered_range));
         Ok(())
     }
 
@@ -247,7 +282,7 @@ impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
 
     /// The policy's compaction settings.
     fn compaction_policy(&self) -> CompactionPolicy {
-        P::COMPACTION
+        Policy::COMPACTION
     }
 }
 
