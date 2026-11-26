@@ -11,16 +11,22 @@ There is one environment so far, and it is not the one the design's targets assu
 - **Cluster.** Kubernetes 1.36 on virtual machines: six workers with 4 vCPUs and 7.4 GiB of memory, two in
   each of three zones of one region.
 - **bitacora.** The chart with five replicas, so two zones had two replicas and one zone had one, and two
-  controllers. No object store: nothing was tiered. Streams had three replicas and a write quorum of two.
+  controllers. Streams had three replicas and a write quorum of two.
+- **Object store.** None in the first round of runs, so nothing was tiered. The second round added an S3
+  server, one pod on a 100 GiB volume of the same kind, and had the controller upload a segment a minute
+  after it was sealed and the replicas release it two minutes later.
 - **Disks.** Every replica on a 100 GiB network block volume. Making a small write durable took 4.5 ms on
   average there, and under 26 ms for 99 in 100 (`bitacora_disk_flush_duration_seconds`). The design assumes
   local NVMe disks with power-loss protection, where that takes a fraction of a millisecond.
 - **etcd.** Three members, one per zone, on the same kind of volume.
 - **Load.** `bita-bench` in a pod on the sixth worker, which ran no replica, from the same image version as
   the cluster unless a run says otherwise.
+- **Watching.** In the second round, a Prometheus in the cluster's own namespace that scraped the
+  replicas, the controllers and etcd and evaluated the default alert rules.
 - **Versions.** Release candidates `0.1.0-rc.1` (commit `84b8f76`), `0.1.0-rc.2` (`8637e7d`) and
-  `0.1.0-rc.3` (`d09f17f`), installed as [development/kubernetes](../development/kubernetes/README.md)
-  describes.
+  `0.1.0-rc.3` (`d09f17f`) in the first round; `0.1.0-rc.4` (`911b506`), `0.1.0-rc.5` (`1b0a2da`) and
+  `0.1.0-rc.8` (`5e10b45`) in the second. All were installed as
+  [development/kubernetes](../development/kubernetes/README.md) describes.
 
 Every run lasted 60 seconds unless it says otherwise, and each was made once: there are no error bars.
 
@@ -83,6 +89,46 @@ Because of these runs, a request carries up to 4 MiB by default in the versions 
 flush would be some 250 MiB/s, so the old limit was not expected to bind on the disks the design assumes;
 that was not measured.
 
+With that default, on `0.1.0-rc.4`, one stream of 64 KiB records with 128 appends in flight moved
+111.4 MiB/s at 70 ms p50 and 164 ms p99, and 16 appends in flight of 1 KiB records took 13.6 ms at p50
+and 23.0 ms at p99, as before.
+
+## Many streams
+
+Records of 1 KiB, requests of up to 4 MiB, every stream written as fast as the cluster committed.
+
+| Workload | Version | MiB/s | p50 | p99 | Worst |
+| --- | --- | --- | --- | --- | --- |
+| 16 streams, each 64 in flight, 16 records per append | `0.1.0-rc.4` | 233.6 | 68 ms | 104 ms | 429 ms |
+| The same | `0.1.0-rc.5` | 240.3 | 63 ms | 123 ms | 602 ms |
+| 64 streams, each 16 in flight, 16 records per append | `0.1.0-rc.4` | 76.9 | 213 ms | 590 ms | 779 ms |
+| The same | `0.1.0-rc.5` | 128.8 | 129 ms | 209 ms | 711 ms |
+| 128 streams, each 4 in flight, 1 record per append | `0.1.0-rc.4` | 1.5 | 336 ms | 721 ms | 931 ms |
+| The same | `0.1.0-rc.5` | 1.9 | 270 ms | 500 ms | 880 ms |
+
+Two things are in these numbers.
+
+**Placement.** `0.1.0-rc.4` put every stream of a run on the same three replicas, one per zone, and left
+the other two idle: it chose the replica with the most free bytes, and one replica of a zone was always a
+few megabytes emptier than its neighbour. Since `0.1.0-rc.5` placement spreads over replicas that are
+equally good ([decision record 0019](decisions/0019-placement-spread.md)), and the 64 streams moved two
+thirds more with a p99 of 209 ms where it had been 590 ms. Placement still prefers a disk that is emptier
+by a tenth of its size: in the run of 128 streams one of the two replicas of a zone, 13% full next to a
+neighbour at 8%, was given no stream.
+
+**The storage.** Many streams that each write little are slow here: 128 streams at 16 appends a second
+each waited 270 ms for an append that takes 14 ms on a quiet cluster. Every open segment makes its own
+writes durable, one flush per request, and a volume of this kind completed about 600 flushes a second in
+total however many segments asked for them. On `0.1.0-rc.4` each loaded replica completed 620 to 630
+flushes a second, each taking 180 ms on average, so some 113 were waiting at any time. The time an append
+takes therefore grows with the number of streams that write to one replica at once. Sharing a flush
+between the segments of a replica would remove that; bitacora does not do it. Whether it matters on
+disks where a flush takes a fraction of a millisecond was not measured.
+
+During these runs a replica used at most 0.57 of a core. Its own memory stayed between 100 and 150 MiB
+with 208 streams open, as the kubelet reports resident memory. `kubectl top` showed up to 850 MiB for the
+same process: that figure is the working set, which counts the page cache of the files just written.
+
 ## Against the targets of the design
 
 Section 16 of the design proposes targets for three replicas on NVMe disks with power-loss protection.
@@ -91,18 +137,18 @@ Section 16 of the design proposes targets for three replicas on NVMe disks with 
 | --- | --- | --- | --- |
 | Append latency, p50 | 2 ms | 7.7 ms | Missed: the flush alone takes 4.5 ms on this storage |
 | Append latency, p99 | 10 ms | 18.4 ms | Missed, for the same reason |
-| Sustained throughput per stream | 50 MiB/s | 23.8 MiB/s | Missed with requests of 256 KiB; 104 MiB/s with 4 MiB, the default since |
+| Sustained throughput per stream | 50 MiB/s | 111.4 MiB/s | Met with requests of 4 MiB, the default since `0.1.0-rc.4`; 23.8 MiB/s with the 256 KiB of the versions before |
 | Tail reader delay behind commit | 5 ms | | Not measured: the tool has no such workload |
 | Write unavailability on writer failover | 5 s | | Not measured: a forced takeover was over within the five seconds its pod took to start, run and stop |
-| Write pause on a replica-failure roll | 200 ms | 157 ms | Met in the one run made: the worst append while a replica was killed |
+| Write pause on a replica-failure roll | 200 ms | 157 ms | Met in the one run made with a replica that was killed. Not met when a zone was cut off the network instead: the worst append then took 25.6 s, see "A soak" |
 
 None of this says whether the targets hold on the disks they were written for. That takes a run on such
 disks.
 
 ## Failures and an upgrade
 
-All on the cluster above, with 16 appends in flight of 1 KiB records. After each, the stream was read back
-in full.
+All on the cluster above, with 16 appends in flight of 1 KiB records unless the row says otherwise. After
+each, the streams were read back in full.
 
 | What was done | What happened |
 | --- | --- |
@@ -110,12 +156,87 @@ in full.
 | The leading controller was killed | Another controller led 9 seconds later. Writers are not affected by this: the controller is not on the write path |
 | A second writer took a stream by force from a writer that was appending | The first writer stopped with "another writer has taken the stream" after 28,253 records; the second appended at 28,254 under the next epoch. The stream held 28,254 records |
 | The cluster was upgraded from `0.1.0-rc.1` to `0.1.0-rc.2` with `helm upgrade`, one replica at a time, during a 240 second run by a writer of the older version | All 246,948 appends committed and were read back, at the rate of a quiet cluster. The worst append took 163 ms. The stream rolled six times |
-| 33 streams were deleted | Every replica's disk went back to 0% used |
+| 33 streams were deleted, and later 338 | Every replica's disk went back to 0% used |
+| A replica's volume was deleted together with its pod | The replica came back empty, under a new identity. The controller rebuilt the lost copies on the other replica of the same zone within about five minutes, and all 30,976 records of the stream were read back. The old identity was removed with `bita replica remove` |
+| A replica was taken away for longer than the five minutes after which the controller gives a replica up | Its four copies were rebuilt on other replicas 325 seconds after it left. When it returned, its own copies, no longer part of any segment, were removed within ten seconds. Every stream held exactly the records it had |
+| The metadata store was emptied on a cluster without an object store, with the controllers stopped | `bita metadata rebuild` put the five streams back together from what the replicas held. Every stream held exactly the records it had, and a new writer appended under the next epoch |
+| Controllers were started against the emptied metadata store, by mistake, before it was rebuilt | They deleted nothing on the replicas. The rebuild that followed found every copy |
+| The metadata store was emptied on a cluster with an object store, one append after the newest snapshot | The snapshot, a few minutes old, was restored, and the rebuild found what it lacked: the one segment written since, on three replicas. All six streams were read back whole, 387,054 records, all but the two newest from the object store, the record appended after the snapshot among them. A new writer appended under the next epoch |
+| The same again on `0.1.0-rc.8`, with a snapshot taken while 208 streams were being deleted | The restore needed no force: it kept the five registrations the replicas had written since the loss and wrote the other 114 keys. The six streams that held data were read back whole, 387,055 records. The 97 streams that were deleted after the snapshot came back as records without data: the controller marked every copy as bad, and a read stopped with "every reachable copy of the sealed segment is incomplete". They were deleted again by hand |
+| The cluster was upgraded four more times, to `0.1.0-rc.3`, `0.1.0-rc.4`, `0.1.0-rc.5` and `0.1.0-rc.8` | No stream lost a record |
+
+No network was cut by hand. A policy that isolated one replica was accepted by the cluster and had no
+effect: the replica kept renewing its registration, and new connections reached it. That turned out to
+depend on the machine. The soak below cut a whole zone off, and there the policies held: the cluster
+enforces network policies on the machines of at least one zone and not on a machine of another. A cut on
+this cluster therefore has to be seen to be in effect before it counts, which is what the soak tool does.
+
+## A soak
+
+`bita-soak` ([soak.md](soak.md)) writes and reads streams for days, kills pods meanwhile, and has the
+simulator's checker judge what its clients were told.
+
+Its alarm was tried first, on `0.1.0-rc.8`: a run that plants a commit that never happened. In a round of
+90 seconds the tool committed 8,405 appends and read 16,804 records, the checker reported the planted
+record as `CommittedRecordMissing`, and the run ended as `violated` with exit code 3. The tool also tried
+a network cut, saw the replica behind it renew its registration, and gave cuts up for the run, naming
+the reason in every line it printed.
+
+A run of three days was started on the same version on 2026-11-26: four streams at twenty appends a
+second each, a fault a minute, every segment uploaded a minute after it is sealed and released by the
+replicas two minutes later, so that most of what the audit reads comes from the object store. Its result
+is not in yet, and this page does not count it. Its first two rounds, of ten minutes each, are:
+
+| Round | Appends committed | Records read | Faults | Longest append | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 50,278 | 100,552 | 2 replicas, 2 controllers and 2 etcd members killed; one zone cut off twice | 25.6 s | Clean |
+| 2 | 47,899 | 95,794 | 3 replicas, 2 controllers and 3 etcd members killed | 543 ms | Clean |
+
+The zone that was cut off held two of the five replicas and one of the three etcd members, for half a
+minute each time. That the cuts were in effect is not only the tool's word: for their duration the
+Prometheus could not scrape those three processes, and none of them restarted. In the second round the
+tool cut off a single replica on a machine of another zone, saw it renew its registration from behind the
+cut, and gave that kind of fault up for the run.
+
+No append was lost or left without an outcome in either round. What the cut cost is time: with kills
+alone the longest append took half a second, with the zone cut off it took 25.6 s, although two replicas
+of every stream and two etcd members could be reached throughout.
+
+## Tiering
+
+On `0.1.0-rc.5`, with the object store described above.
+
+| What was done | What happened |
+| --- | --- |
+| The object store was added to a cluster that held a stream of 246,948 records in seven sealed segments | All seven were uploaded within minutes and released by the replicas after the two minutes they are kept for readers. A reader that was not given the object store stopped with "the segment is in the object store, and this client was given none"; one that was read all 246,948 records at 211 MiB/s |
+| 69,303 records of 64 KiB, 4.3 GiB, were appended to one stream at 108 MiB/s | The stream rolled into six segments of 332 MiB to 1.0 GiB, on all five replicas. All were uploaded and released. While they uploaded, `kubectl top` showed 93 to 195 MiB for a replica and 104 MiB for the S3 server. The stream was read back from the object store at 160.7 MiB/s, all 69,303 records |
+
+The versions before `0.1.0-rc.5` read a whole segment into memory to upload it, which a segment of a
+gigabyte makes a gigabyte per upload. Since then a segment is uploaded in parts of 8 MiB.
+
+## Alerts
+
+The default rules, 18 of them, were evaluated from the middle of the second round on: through the
+tiering runs, the second run of many streams, the deletion of several hundred streams and the restore of
+the metadata store. What they did:
+
+| Alert | When | Right? |
+| --- | --- | --- |
+| `BitacoraReplicaFlushSlow` | Pending during every heavier benchmark; fired once, for a minute | Yes. Its threshold, 10 ms at p99, is the disk the design assumes; this storage is slower than that under load |
+| `BitacoraControllerAbsent`, `BitacoraControllerNoLeader`, `BitacoraMetadataSnapshotsStopped` | Pending for the minutes in which the controllers were stopped for a drill or replaced by an upgrade | Yes. None fired, because no stop lasted as long as the rule waits |
+| `BitacoraControllerStreamErrors` | Pending for eleven minutes while hundreds of streams were deleted | It pointed at a defect, listed below |
+| `BitacoraReplicaRegistrationFailing` | Pending for six minutes during the same deletions | It pointed at another |
+| `BitacoraMetadataStoreSlow` | Pending for five to nine minutes after a replica started; never fired | Noise. A process's first request to etcd took about 0.6 s here, and a replica makes one request every five seconds, so one slow request is the 99th percentile of five minutes. The rule waits ten minutes, which is just longer |
+| `BitacoraSegmentsMissingCopies` | Pending for a minute or two during an upgrade and while 128 streams were created at once | Not looked into |
+
+The drills with a lost disk and with a replica that was away were made before this Prometheus ran, so
+whether the rules for a replica that is not registered and for segments that miss copies fire in time was
+not seen.
 
 ## What these runs found
 
-Three things that no test on one machine had shown. The first two are fixed; the tests that now hold them
-are named.
+Things that no test on one machine had shown. The third and the last are not fixed. Where a test now
+holds a fix, it is named.
 
 - **A tool that had just started sometimes could not read the metadata store.** About one or two runs of
   `bita` in a hundred failed with "etcd did not answer the read within 5s", with etcd in good health: the first
@@ -128,14 +249,40 @@ are named.
   (`bitacora-controller`, `standby_test.rs`). On the cluster, the standby in two zones became one in three
   when `0.1.0-rc.3`, the first version with the fix, was installed. A segment that was opened in that state keeps its placement;
   the [operations guide](operations/README.md) says what follows from that.
-- **The request size bounds a stream where a flush is slow**, as described above.
+- **The request size bounds a stream where a flush is slow**, as described above. The default was raised.
+  That many streams share the flushes of a volume is the same property seen from the other side, and is
+  not changed.
+- **Streams created together were all placed on the same replicas**, as described under "Many streams"
+  (`bitacora-meta`, `placement_test.rs`).
+- **A stream that was deleted while the controller looked at it counted as an error.** The alert for
+  stream errors went pending during every large deletion (`bitacora-controller`).
+- **A replica that was deleting segments could fail to list them**, and a listing is part of renewing its
+  registration, so it missed renewals while it deleted (`bitacora-replica`).
+- **The rebuild of the metadata store refused to write on a cluster without an object store**, because it
+  could not tell such a cluster from a configuration that leaves the object store out.
+  `bita metadata rebuild --no-object-store` says which it is.
+- **An upload held the whole segment in memory**, as described under "Tiering".
+- **A restore always needed `--force`.** The replicas keep running while the metadata store is lost, and
+  each writes its registration again within seconds, so the store was never empty when the snapshot was
+  restored. A restore now keeps those registrations and refuses only a store that holds something else
+  ([decision record 0020](decisions/0020-restore-into-a-lost-store.md)).
+- **A restore brought deleted streams back, and nothing said so.** A snapshot is minutes older than the
+  cluster. The streams deleted in those minutes return as records whose segments are gone, and the rebuild
+  planned only the streams it found. `bita metadata rebuild` now ends with a list of the records of which
+  no data was found (`bita`, `rebuild_test.rs`).
+- **A zone that falls silent stalls its writers for many seconds.** A killed process refuses connections
+  at once. A zone that is cut off answers nothing, and everything that talks to it waits: a request to a
+  replica or to etcd is given up after 5 s, a writer rolls away from a silent replica after 10 s, and
+  neither connection probes whether the other side is still there. Which of these made up the 25.6 s of
+  the soak's first round was not established. Not fixed.
 
 ## What was not measured
 
 - Disks like those the design assumes, and therefore whether its targets hold.
 - A reader's delay behind the writer, and the time a writer failover takes.
-- Tiering: the cluster had no object store.
-- The loss of a machine or of a zone. A killed process comes back on its volume; a lost disk was not
-  tried.
-- More than 16 streams, more than five replicas, or a run longer than four minutes.
+- The loss of a machine, and a partition other than of the one zone whose machines enforce network
+  policies.
+- More than 128 streams or more than five replicas.
+- A run longer than a few minutes. The soak above is the first, and it has not finished.
+- An object store other than one S3 server on one volume, and what happens when it is slow or away.
 - Other systems on the same machines, which the design names as reference points.
