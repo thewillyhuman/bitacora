@@ -102,6 +102,20 @@ There is one writer per stream. It is a library inside the application.
 A writer holds a bounded amount of unacknowledged records; beyond that,
 appending waits.
 
+### What an answer to an append means
+
+| Answer | What the writer does |
+| --- | --- |
+| Success, with the local end | Counts the replica as holding the segment up to there |
+| Out of order, with the local end | Sends again from the local end plus one. The replica holds less than the writer assumed, typically after a request whose answer was lost |
+| Fenced, or sealed | Has lost the stream (below) |
+| Unavailable, another gRPC status, or nothing in time | Sends the same request again after a pause. Rolls if the replica stays silent |
+| Any other refusal: no capacity, draining, storage, invalid request | Gives up on the replica for this segment and rolls |
+
+A roll needs a standby replica set. A writer that wants to roll and finds
+none keeps appending to its segment, as long as W replicas of it answer,
+and looks again later: the controller places one.
+
 ### Rolling
 
 The writer rolls to a new segment when a replica has not answered for a
@@ -132,6 +146,48 @@ segment that its writer has not sealed itself. It fails every pending and
 later append and stops. An append whose outcome it never learned is
 **indeterminate**: the record may or may not be in the stream. The
 application reads the log to find out.
+
+### Unknown outcomes of the writer's own updates
+
+The update of a roll can fail without an answer. Until the writer knows
+whether it was applied, it does not know which segment is open, and commits
+nothing. It makes the same update again until it gets an answer;
+[metadata.md](metadata.md) says what a repeated roll finds. An answer that
+the epoch changed means the stream is lost; any other refusal means the
+roll did not happen, and the writer goes on in its segment.
+
+### Stepping down
+
+A writer that is closed on purpose:
+
+1. stops accepting appends and waits until the durable sequence has reached
+   the last record it accepted;
+2. seals its segment at the durable sequence, with one conditional write;
+3. clears its lease, with another;
+4. tells the replicas the sealed end.
+
+Its successor then finds no open segment and no lease, and goes from step 1
+of a takeover to step 8 without waiting and without recovery. A writer that
+cannot finish these steps just stops: its successor recovers the segment.
+
+### Timings
+
+None of these is part of the protocol; a writer or a reader may choose
+others. They are what the client libraries use unless told otherwise.
+
+| Setting | Default |
+| --- | --- |
+| Heartbeat to a replica when there is nothing to send | 50 ms |
+| A replica is given up on after it was silent for | 10 s |
+| A replica is given up on when it is behind the durable sequence by | 64 MiB |
+| Appending waits when the uncommitted records exceed | 64 MiB |
+| Batch frames in one append request | About 256 KiB |
+| Timeout of a request to a replica | 5 s |
+| Pause before a request is sent again | 100 ms |
+| A segment is rolled at | 1 GiB, or one hour |
+| Length of the writer's lease, and how often it is renewed | 10 s, about every 3 s |
+| Records in one answer to a reader | About 1 MiB |
+| A reader at the tail lets a replica hold its request for | 1 s |
 
 ## Taking over a stream
 
