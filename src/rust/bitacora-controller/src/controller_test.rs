@@ -4,6 +4,8 @@
 //!
 //! - A pass over a cluster without streams does nothing, and a pass fails only when the metadata store cannot be
 //!   listed.
+//! - A stream that is deleted while a pass is at work is not counted as an error of the pass; a stream that fails
+//!   for any other reason is.
 //! - The condition every write about a copy carries: the copy is found only while it is still the one that was
 //!   looked at.
 //! - Asking a replica or the object store with a time limit: an answer, a refusal and silence are told apart.
@@ -17,11 +19,13 @@
 
 use std::future::pending;
 
-use bitacora_meta::CopyState;
+use bitacora_meta::{CopyState, StoreUnavailable};
 use bitacora_testkit::Cluster;
 use bitacora_types::SegmentId;
 
-use super::test_support::{create_stream, replica_id, run_pass, stream_record};
+use super::test_support::{
+    CONTROLLER_IDENTITY, STREAM, controller_named, create_stream, replica_id, run_pass, stream, stream_record,
+};
 use super::*;
 
 /// The time limit the plumbing tests use.
@@ -64,6 +68,70 @@ async fn pass_that_handles_every_stream_reports_no_stream_errors() {
     let report = run_pass(&cluster).await;
 
     assert_eq!(report.streams_with_errors, 0);
+}
+
+/// What a pass runs into when somebody deletes a stream between its listing and its turn: the steps find no stream.
+#[tokio::test(start_paused = true)]
+async fn handling_a_stream_that_was_deleted_meanwhile_fails_as_not_found() {
+    let cluster = Cluster::start(3).await;
+    create_stream(&cluster).await;
+    let listed_stream = stream(&cluster).await;
+    let controller = controller_named(&cluster, CONTROLLER_IDENTITY);
+    let survey = controller.survey().await.expect("the cluster can be surveyed");
+    cluster
+        .metadata()
+        .delete_stream(STREAM)
+        .await
+        .expect("the stream is deleted");
+
+    let handled = controller
+        .handle_stream(&listed_stream, &survey, &mut PassReport::default())
+        .await;
+
+    assert_eq!(
+        handled,
+        Err(MetaError::StreamNotFound {
+            name: STREAM.to_owned()
+        })
+    );
+}
+
+/// A stream that is gone has nothing left to handle. Counting it would raise an alert on every deletion.
+#[test]
+fn stream_deleted_during_the_pass_is_not_an_error_of_the_pass() {
+    let mut report = PassReport::default();
+    let deleted_meanwhile = MetaError::StreamNotFound {
+        name: STREAM.to_owned(),
+    };
+
+    note_unhandled_stream(STREAM, &deleted_meanwhile, &mut report);
+
+    assert_eq!(report.streams_with_errors, 0);
+}
+
+#[test]
+fn stream_that_could_not_be_handled_for_another_reason_is_counted() {
+    let mut report = PassReport::default();
+    let store_is_down = MetaError::Unavailable(StoreUnavailable {
+        reason: "the metadata store did not answer".to_owned(),
+    });
+
+    note_unhandled_stream(STREAM, &store_is_down, &mut report);
+
+    assert_eq!(report.streams_with_errors, 1);
+}
+
+/// Another stream going missing says nothing about this one.
+#[test]
+fn another_stream_that_is_not_found_is_counted() {
+    let mut report = PassReport::default();
+    let other_stream_missing = MetaError::StreamNotFound {
+        name: "payments".to_owned(),
+    };
+
+    note_unhandled_stream(STREAM, &other_stream_missing, &mut report);
+
+    assert_eq!(report.streams_with_errors, 1);
 }
 
 #[test]

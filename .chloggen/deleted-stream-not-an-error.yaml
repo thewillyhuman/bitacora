@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: controller
+note: "A stream that is deleted while a controller pass is at work is no longer counted as a stream error. The BitacoraControllerStreamErrors alert was raised by deletions."
+issues: [5]

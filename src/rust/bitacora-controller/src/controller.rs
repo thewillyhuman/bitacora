@@ -289,8 +289,7 @@ impl Controller {
         for stream in self.metadata.list_streams().await? {
             let handled = self.handle_stream(&stream, &survey, &mut report).await;
             if let Err(meta_error) = handled {
-                tracing::warn!(stream = %stream.name, %meta_error, "stream not fully handled");
-                report.streams_with_errors += 1;
+                note_unhandled_stream(&stream.name, &meta_error, &mut report);
             }
         }
         self.remove_leftover_copies(&survey, &mut report).await?;
@@ -299,7 +298,8 @@ impl Controller {
     }
 
     /// Takes the steps of a pass for one stream, in the order the file header gives, and then counts the stream's
-    /// segments that are short of good copies.
+    /// segments that are short of good copies. A stream that is deleted while the steps run makes them fail with
+    /// [`MetaError::StreamNotFound`], which [`note_unhandled_stream`] does not hold against the pass.
     ///
     /// # Arguments
     ///
@@ -470,6 +470,28 @@ fn unchanged_copy_mut<'record>(
     } else {
         None
     }
+}
+
+/// Records that the steps of a pass failed for the stream called `stream_name`, unless the stream was deleted while
+/// the pass was at work.
+///
+/// A pass lists the streams and then takes them one by one. A stream deleted in between is not found by the steps,
+/// and that is not a failure: there is nothing left to handle, and what the stream left on the replicas is removed
+/// by the leftover sweep. Counting it would raise the stream-errors alert on every deletion.
+///
+/// # Arguments
+///
+/// * `stream_name` - The stream the steps were taken for.
+/// * `meta_error` - What the steps failed with.
+/// * `report` - Counts the stream if the failure is one.
+fn note_unhandled_stream(stream_name: &str, meta_error: &MetaError, report: &mut PassReport) {
+    let was_deleted_meanwhile = matches!(meta_error, MetaError::StreamNotFound { name } if name == stream_name);
+    if was_deleted_meanwhile {
+        tracing::debug!(stream = stream_name, "stream was deleted during the pass");
+        return;
+    }
+    tracing::warn!(stream = stream_name, %meta_error, "stream not fully handled");
+    report.streams_with_errors += 1;
 }
 
 #[cfg(test)]
