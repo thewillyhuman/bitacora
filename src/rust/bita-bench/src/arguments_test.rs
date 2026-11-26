@@ -31,6 +31,7 @@ fn append_workload_has_its_defaults() {
             record_bytes: 1024,
             records_per_append: 1,
             appends_in_flight: 16,
+            request_bytes: 262_144,
             seconds: None,
             records: None,
             rate: None,
@@ -41,11 +42,20 @@ fn append_workload_has_its_defaults() {
     );
 }
 
+/// Without the option, a benchmark sends what an application with default settings sends.
+#[test]
+fn default_request_size_is_the_writers_default() {
+    assert_eq!(
+        DEFAULT_REQUEST_BYTES,
+        bitacora::WriterSettings::default().max_request_bytes
+    );
+}
+
 #[test]
 fn append_workload_takes_every_option() {
     let arguments = parse(
         "bita-bench append orders --record-bytes 4096 --records-per-append 8 --appends-in-flight 64 \
-         --seconds 30 --rate 50000 --streams 4 --create --force",
+         --request-bytes 1048576 --seconds 30 --rate 50000 --streams 4 --create --force",
     )
     .expect("a valid command line");
 
@@ -56,6 +66,7 @@ fn append_workload_takes_every_option() {
             record_bytes: 4096,
             records_per_append: 8,
             appends_in_flight: 64,
+            request_bytes: 1_048_576,
             seconds: Some(30),
             records: None,
             rate: Some(50_000),

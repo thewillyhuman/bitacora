@@ -44,6 +44,7 @@ the stream at once.
 | `--record-bytes <BYTES>` | 1024 | The payload size of every record. |
 | `--records-per-append <RECORDS>` | 1 | How many records one append carries. |
 | `--appends-in-flight <APPENDS>` | 16 | How many appends are in flight at any moment, per stream. |
+| `--request-bytes <BYTES>` | 262144 | The most bytes of records the writer sends a replica in one request. The default is the client library's. |
 | `--seconds <SECONDS>` | 10 | Stop after this long. |
 | `--records <RECORDS>` | | Stop after this many records per stream instead, rounded up to whole appends. |
 | `--rate <RECORDS_PER_SECOND>` | | Pace each stream to this rate instead of appending as fast as the cluster commits. |
@@ -55,7 +56,7 @@ the stream at once.
 
 ```console
 $ bita-bench --config cluster.toml append bench --create --seconds 30
-append      stream bench, 1 stream(s), 16 appends in flight each, 1 record(s) of 1024 B per append, as fast as the cluster commits
+append      stream bench, 1 stream(s), 16 appends in flight each, 1 record(s) of 1024 B per append, requests of up to 262144 B, as fast as the cluster commits
 elapsed     30.002 s
 appends     <count>
 records     <count> (<count> records/s)
@@ -73,6 +74,7 @@ The same run as JSON has these fields:
   "record_bytes": 1024,
   "records_per_append": 1,
   "appends_in_flight": 16,
+  "request_bytes": 262144,
   "target_records_per_second": null,
   "elapsed_milliseconds": 30002,
   "appends": 0,
@@ -84,6 +86,12 @@ The same run as JSON has these fields:
   "failure": null
 }
 ```
+
+`--request-bytes` is the one option that changes how the client works instead of what the workload asks
+of it. A writer sends each replica one request at a time, and a replica makes a request durable with one
+flush, so a stream moves at most one request per flush. Where a flush is slow, as on network block
+storage, a larger request raises the throughput of a stream; where it is fast, the default is not the
+limit.
 
 How to read the numbers:
 

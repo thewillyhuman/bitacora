@@ -65,6 +65,7 @@ fn append_workload(records: u64) -> AppendWorkload {
         record_bytes: 100,
         records_per_append: 1,
         appends_in_flight: 4,
+        request_bytes: 262_144,
         limit: WorkloadLimit::Records(records),
         target_records_per_second: None,
         takeover: TakeoverPolicy::Force,
@@ -297,6 +298,17 @@ async fn workload_on_a_stream_that_does_not_exist_cannot_start() {
     let refused = run_append_workloads(&client, &append_workload(5)).await;
 
     assert!(matches!(refused, Err(WorkloadError::CannotOpen { .. })));
+}
+
+#[tokio::test(start_paused = true)]
+async fn workload_with_requests_of_no_bytes_is_refused() {
+    let (_cluster, client) = cluster_with_stream().await;
+    let mut workload = append_workload(5);
+    workload.request_bytes = 0;
+
+    let refused = run_append_workloads(&client, &workload).await;
+
+    assert!(matches!(refused, Err(WorkloadError::InvalidWorkload { .. })));
 }
 
 #[tokio::test(start_paused = true)]

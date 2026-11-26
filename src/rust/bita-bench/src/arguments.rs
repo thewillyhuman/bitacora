@@ -41,6 +41,10 @@ use crate::workload::WorkloadLimit;
 /// How long a workload runs if the command line gives no limit.
 pub(crate) const DEFAULT_SECONDS: u64 = 10;
 
+/// The most bytes of records a writer sends a replica in one request if the command line does not say: what an
+/// application with default settings sends. A test holds it to the client's own default.
+pub(crate) const DEFAULT_REQUEST_BYTES: usize = 256 * 1024;
+
 /// Everything written after `bita-bench` on a command line.
 #[derive(Clone, Debug, PartialEq, Eq, Parser)]
 #[command(
@@ -87,6 +91,10 @@ pub(crate) enum WorkloadCommand {
         /// How many appends are in flight at any moment, per stream.
         #[arg(long, default_value_t = 16, value_name = "APPENDS")]
         appends_in_flight: usize,
+        /// The most bytes of records the writer sends a replica in one request. A replica makes a
+        /// request durable with one flush, so this bounds what one flush carries.
+        #[arg(long, default_value_t = DEFAULT_REQUEST_BYTES, value_name = "BYTES")]
+        request_bytes: usize,
         /// Stop after this many seconds. Without --seconds and --records, the workload runs for 10
         /// seconds.
         #[arg(long, conflicts_with = "records")]

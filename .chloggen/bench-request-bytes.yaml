@@ -1,0 +1,4 @@
+change_type: enhancement
+component: bench
+note: "bita-bench append takes --request-bytes, the most bytes of records a writer sends a replica in one request, and reports it. On storage with a slow flush that size bounds the throughput of a stream."
+issues: [5]

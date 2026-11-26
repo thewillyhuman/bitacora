@@ -25,6 +25,7 @@ fn workload() -> AppendWorkload {
         record_bytes: 1024,
         records_per_append: 1,
         appends_in_flight: 16,
+        request_bytes: 262_144,
         limit: WorkloadLimit::Duration(Duration::from_secs(2)),
         target_records_per_second: None,
         takeover: TakeoverPolicy::Force,
@@ -113,7 +114,7 @@ fn append_report_is_rendered_one_value_per_line() {
     assert_eq!(
         report.render_text(),
         "append      stream orders, 1 stream(s), 16 appends in flight each, 1 record(s) of 1024 B per \
-         append, as fast as the cluster commits\n\
+         append, requests of up to 262144 B, as fast as the cluster commits\n\
          elapsed     2.000 s\n\
          appends     4096\n\
          records     4096 (2048 records/s)\n\
@@ -160,6 +161,7 @@ fn append_report_as_json_has_stable_field_names_with_units() {
             "record_bytes": 1024,
             "records_per_append": 1,
             "appends_in_flight": 16,
+            "request_bytes": 262_144,
             "target_records_per_second": null,
             "elapsed_milliseconds": 2000,
             "appends": 4096,

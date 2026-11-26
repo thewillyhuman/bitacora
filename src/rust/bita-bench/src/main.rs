@@ -10,7 +10,8 @@
 //! # What it contains
 //!
 //! - `main`: parses the command line, finds the cluster, runs the workload and prints the report, with
-//!   one function per step: `print_usage_error`, `run`, `requested_workload`, `run_append`, `run_read`.
+//!   one function per step: `print_usage_error`, `run`, `client_settings`, `requested_workload`,
+//!   `run_append`, `run_read`.
 //! - The modules of the tool: `arguments` (the command line), `cluster` (finding the cluster), `workload`
 //!   (driving and measuring), `histogram` and `pacing` (the measuring instruments), `report` (the
 //!   output).
@@ -133,7 +134,7 @@ enum WorkloadOutcome {
 /// Returns the text to show if the cluster configuration cannot be used, the workload could not start,
 /// or the report could not be printed.
 async fn run(arguments: &Arguments, config: &ClusterConfig) -> Result<WorkloadOutcome, String> {
-    let client = match bitacora::connect(config, client_settings()).await {
+    let client = match bitacora::connect(config, client_settings(&arguments.workload)).await {
         Ok(client) => client,
         Err(connect_error) => return Err(connect_error.to_string()),
     };
@@ -154,12 +155,19 @@ async fn run(arguments: &Arguments, config: &ClusterConfig) -> Result<WorkloadOu
     }
 }
 
-/// The settings of the tool's client: an application's defaults, with the tool's name on its leases.
-fn client_settings() -> ClientSettings {
+/// The settings of the tool's client: an application's defaults, with the tool's name on its leases and, for an
+/// append workload, the request size the command line asks for.
+fn client_settings(command: &WorkloadCommand) -> ClientSettings {
+    let default_writer = WriterSettings::default();
+    let max_request_bytes = match command {
+        WorkloadCommand::Append { request_bytes, .. } => *request_bytes,
+        WorkloadCommand::Read { .. } => default_writer.max_request_bytes,
+    };
     ClientSettings {
         writer: WriterSettings {
             writer_identity: WRITER_IDENTITY.to_owned(),
-            ..WriterSettings::default()
+            max_request_bytes,
+            ..default_writer
         },
         ..ClientSettings::default()
     }
@@ -189,6 +197,7 @@ fn requested_workload(command: &WorkloadCommand) -> RequestedWorkload {
             record_bytes,
             records_per_append,
             appends_in_flight,
+            request_bytes,
             seconds,
             records,
             rate,
@@ -202,6 +211,7 @@ fn requested_workload(command: &WorkloadCommand) -> RequestedWorkload {
                 record_bytes: *record_bytes,
                 records_per_append: *records_per_append,
                 appends_in_flight: *appends_in_flight,
+                request_bytes: *request_bytes,
                 limit: workload_limit(*seconds, *records),
                 target_records_per_second: *rate,
                 takeover: takeover_policy(*force),
@@ -300,3 +310,7 @@ fn to_json<Report: serde::Serialize>(report: &Report) -> String {
     rendered.push('\n');
     rendered
 }
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;

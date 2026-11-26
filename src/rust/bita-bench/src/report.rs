@@ -129,6 +129,8 @@ pub(crate) struct AppendReport {
     pub(crate) records_per_append: u64,
     /// How many appends per stream were in flight.
     pub(crate) appends_in_flight: u64,
+    /// The most bytes of records the writers sent a replica in one request.
+    pub(crate) request_bytes: u64,
     /// The rate each stream was paced to, in records per second, if it was paced.
     pub(crate) target_records_per_second: Option<u64>,
     /// How long the workload ran.
@@ -160,6 +162,7 @@ impl AppendReport {
             record_bytes: workload.record_bytes as u64,
             records_per_append: workload.records_per_append as u64,
             appends_in_flight: workload.appends_in_flight as u64,
+            request_bytes: workload.request_bytes as u64,
             target_records_per_second: workload.target_records_per_second,
             elapsed_milliseconds,
             appends: measured.appends,
@@ -189,16 +192,22 @@ impl AppendReport {
         rendered
     }
 
-    /// What was asked for, as one phrase: the streams, the appends in flight, the size of an append and
-    /// the pace.
+    /// What was asked for, as one phrase: the streams, the appends in flight, the size of an append, the
+    /// size of a request and the pace.
     fn workload_text(&self) -> String {
         let pace = match self.target_records_per_second {
             Some(rate) => format!("paced to {rate} records/s per stream"),
             None => "as fast as the cluster commits".to_owned(),
         };
         format!(
-            "stream {}, {} stream(s), {} appends in flight each, {} record(s) of {} B per append, {pace}",
-            self.stream, self.streams, self.appends_in_flight, self.records_per_append, self.record_bytes
+            "stream {}, {} stream(s), {} appends in flight each, {} record(s) of {} B per append, requests of up \
+             to {} B, {pace}",
+            self.stream,
+            self.streams,
+            self.appends_in_flight,
+            self.records_per_append,
+            self.record_bytes,
+            self.request_bytes
         )
     }
 }

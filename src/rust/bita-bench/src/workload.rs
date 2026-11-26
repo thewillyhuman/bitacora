@@ -110,6 +110,9 @@ pub(crate) struct AppendWorkload {
     pub(crate) records_per_append: usize,
     /// How many appends per stream are in flight at any moment.
     pub(crate) appends_in_flight: usize,
+    /// The most bytes of records the writers send a replica in one request. It is a setting of the client the
+    /// workload is given, and is kept here for the report, which says everything about the run.
+    pub(crate) request_bytes: usize,
     /// When the workload stops, per stream.
     pub(crate) limit: WorkloadLimit,
     /// The rate to pace each stream's appends to, in records per second; `None` appends as fast as the
@@ -413,6 +416,8 @@ fn validate(workload: &AppendWorkload) -> Result<(), WorkloadError> {
         Some("the records per append")
     } else if workload.appends_in_flight == 0 {
         Some("the appends in flight")
+    } else if workload.request_bytes == 0 {
+        Some("the bytes per request")
     } else if workload.target_records_per_second == Some(0) {
         Some("the target rate")
     } else {
