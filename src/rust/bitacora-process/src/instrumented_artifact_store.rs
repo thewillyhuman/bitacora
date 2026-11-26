@@ -11,6 +11,7 @@
 //!
 //! - [`InstrumentedArtifactStore`]: an [`ArtifactStore`] that forwards to another one and records
 //!   metrics.
+//! - `InstrumentedUpload`: the same for an object that is handed over piece by piece.
 //! - `kind_of_artifact_error`: the value of the `error` label for each [`ArtifactError`].
 //!
 //! # How it works
@@ -23,14 +24,16 @@
 //! - `bitacora_object_store_request_failures_total{operation,error}`
 //!
 //! `operation` is the name of the interface's method: `put_object`, `get_object`, `get_range`,
-//! `delete_object`, `list_prefix`. `error` is `not_found`, `range_out_of_bounds`, `invalid_key` or
+//! `delete_object`, `list_prefix`, `start_upload`. The steps of an upload that was started are
+//! `upload_write`, `upload_complete` and `upload_abort`: one request each as far as the caller can see,
+//! whatever the store makes of them. `error` is `not_found`, `range_out_of_bounds`, `invalid_key` or
 //! `unavailable`. Only the last one means the store itself is in trouble; the others are answers a
 //! caller can get from a healthy store, and are counted so that a wrong key or a missing object is
 //! visible too.
 //!
 //! `bitacora_object_store_transferred_bytes_total{direction}` counts the bytes of stored objects
 //! (`uploaded`) and of the objects and ranges that were read (`downloaded`), for requests that
-//! succeeded.
+//! succeeded. An object that was uploaded piece by piece is counted when its upload is completed.
 //!
 //! # Invariants
 //!
@@ -45,7 +48,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bitacora_artifact::{ArtifactError, ArtifactStore, ObjectInfo};
+use bitacora_artifact::{ArtifactError, ArtifactStore, ObjectInfo, ObjectUpload};
 use bytes::Bytes;
 use prometheus_client::metrics::counter::Counter as LibraryCounter;
 use prometheus_client::metrics::family::Family;
@@ -193,6 +196,73 @@ impl ArtifactStore for InstrumentedArtifactStore {
                 self.store.list_prefix(key_prefix),
                 kind_of_artifact_error,
             )
+            .await
+    }
+
+    async fn start_upload(&self, object_key: &str) -> Result<Box<dyn ObjectUpload>, ArtifactError> {
+        let upload = self
+            .metrics
+            .observe(
+                "start_upload",
+                self.store.start_upload(object_key),
+                kind_of_artifact_error,
+            )
+            .await?;
+        Ok(Box::new(InstrumentedUpload {
+            upload,
+            instruments: self.clone(),
+            written_bytes: 0,
+        }))
+    }
+}
+
+/// An upload of the wrapped store, with every step recorded.
+///
+/// The steps are recorded as the operations `upload_write`, `upload_complete` and `upload_abort`. The
+/// bytes of the object are counted as uploaded when the upload is completed, and not before: an upload
+/// that is aborted or fails has stored nothing.
+struct InstrumentedUpload {
+    /// The upload that does the work.
+    upload: Box<dyn ObjectUpload>,
+    /// The store this upload was started through, for its metrics.
+    instruments: InstrumentedArtifactStore,
+    /// How many bytes were handed over so far.
+    written_bytes: usize,
+}
+
+#[async_trait]
+impl ObjectUpload for InstrumentedUpload {
+    async fn write(&mut self, piece: Bytes) -> Result<(), ArtifactError> {
+        let piece_bytes = piece.len();
+        self.instruments
+            .metrics
+            .observe("upload_write", self.upload.write(piece), kind_of_artifact_error)
+            .await?;
+        self.written_bytes += piece_bytes;
+        Ok(())
+    }
+
+    async fn complete(self: Box<Self>) -> Result<(), ArtifactError> {
+        let Self {
+            upload,
+            instruments,
+            written_bytes,
+        } = *self;
+        instruments
+            .metrics
+            .observe("upload_complete", upload.complete(), kind_of_artifact_error)
+            .await?;
+        instruments.count_transferred(UPLOADED, written_bytes);
+        Ok(())
+    }
+
+    async fn abort(self: Box<Self>) -> Result<(), ArtifactError> {
+        let Self {
+            upload, instruments, ..
+        } = *self;
+        instruments
+            .metrics
+            .observe("upload_abort", upload.abort(), kind_of_artifact_error)
             .await
     }
 }

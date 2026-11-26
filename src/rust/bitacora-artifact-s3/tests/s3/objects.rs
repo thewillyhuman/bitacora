@@ -7,16 +7,20 @@
 //! - Keys with characters that need care in a URL keep their exact name.
 //! - Stores with different key prefixes share one bucket without seeing each other.
 //! - The bucket is addressed in the path of the URL, which is what S3-compatible services expect.
+//! - Objects that the store sends as a multipart upload: the server puts the parts together in order, an
+//!   object is not listed while its parts arrive, and an upload aborted after it sent a part leaves
+//!   nothing and does not block its key.
 //!
 //! # How the fixtures work
 //!
 //! `large_object` is five mebibytes in which every byte depends on its position, so a range that comes back
 //! shifted or from the wrong place is noticed. Each test works under a key prefix of its own on the shared
-//! server.
+//! server. `upload_pattern` hands the same pattern to an upload in pieces of a mebibyte and a little: 18 MiB
+//! of it make three parts, 9 MiB make one part sent and a rest that is held back.
 
 use std::ops::Range;
 
-use bitacora_artifact::{ArtifactError, ArtifactStore};
+use bitacora_artifact::{ArtifactError, ArtifactStore, ObjectInfo, ObjectUpload};
 use bitacora_artifact_s3::S3ArtifactStore;
 use bytes::Bytes;
 
@@ -322,4 +326,122 @@ async fn bucket_is_reached_with_path_style_addressing() {
     let stored = store.put_object("a", Bytes::from_static(b"x")).await;
 
     assert_eq!(stored, Ok(()));
+}
+
+/// The size of the object the upload tests hand over: 18 MiB, which the store sends as two parts of
+/// 8 MiB and a last one of 2 MiB.
+const UPLOADED_OBJECT_BYTES: u64 = 18 * 1024 * 1024;
+
+/// How much the tests that stop half way hand over: 9 MiB, which sends one whole part.
+const ONE_PART_AND_A_LITTLE_BYTES: u64 = 9 * 1024 * 1024;
+
+/// Where the second part of an uploaded object begins: one part of 8 MiB into it.
+const SECOND_PART_START: u64 = 8 * 1024 * 1024;
+
+/// The size of the pieces the upload tests hand over: a mebibyte and a little, so that no part ends where
+/// a piece does.
+const UPLOADED_PIECE_BYTES: u64 = 1024 * 1024 + 11;
+
+/// The key the upload tests store their object under.
+const UPLOADED_OBJECT_KEY: &str = "streams/7/segments/00000000000000000004";
+
+/// Starts an upload to [`UPLOADED_OBJECT_KEY`] and hands it the first `object_bytes` bytes of the pattern
+/// of the large object, piece by piece.
+async fn upload_pattern(store: &S3ArtifactStore, object_bytes: u64) -> Box<dyn ObjectUpload> {
+    let mut upload = store
+        .start_upload(UPLOADED_OBJECT_KEY)
+        .await
+        .expect("an upload to a valid key starts");
+    let mut handed_over = 0;
+    while handed_over < object_bytes {
+        let piece_end = object_bytes.min(handed_over + UPLOADED_PIECE_BYTES);
+        upload
+            .write(expected_bytes(handed_over..piece_end))
+            .await
+            .expect("the server takes the piece");
+        handed_over = piece_end;
+    }
+    upload
+}
+
+/// A real server puts the parts of a multipart upload together itself. A range across the place where two
+/// parts meet shows that it put them in order and lost nothing between them.
+#[tokio::test]
+async fn object_uploaded_in_parts_is_read_across_the_place_where_two_parts_meet() {
+    let Some(server) = shared_s3_server().await else {
+        return;
+    };
+    let store = server.store_in_fresh_namespace();
+    let upload = upload_pattern(&store, UPLOADED_OBJECT_BYTES).await;
+    upload.complete().await.expect("the server completes the upload");
+    let across_two_parts = SECOND_PART_START - 100..SECOND_PART_START + 100;
+
+    let contents = store.get_range(UPLOADED_OBJECT_KEY, across_two_parts.clone()).await;
+
+    assert_eq!(contents, Ok(expected_bytes(across_two_parts)));
+}
+
+#[tokio::test]
+async fn object_uploaded_in_parts_is_listed_with_its_whole_size() {
+    let Some(server) = shared_s3_server().await else {
+        return;
+    };
+    let store = server.store_in_fresh_namespace();
+    let upload = upload_pattern(&store, UPLOADED_OBJECT_BYTES).await;
+    upload.complete().await.expect("the server completes the upload");
+
+    let listed = store.list_prefix(UPLOADED_OBJECT_KEY).await;
+
+    assert_eq!(
+        listed,
+        Ok(vec![ObjectInfo {
+            object_key: UPLOADED_OBJECT_KEY.to_owned(),
+            size_bytes: UPLOADED_OBJECT_BYTES,
+        }])
+    );
+}
+
+/// The contract aborts an upload too, but a small one, which never reaches the server. This one has sent
+/// a whole part when it is aborted.
+#[tokio::test]
+async fn upload_aborted_after_it_sent_a_part_leaves_no_object() {
+    let Some(server) = shared_s3_server().await else {
+        return;
+    };
+    let store = server.store_in_fresh_namespace();
+    let upload = upload_pattern(&store, ONE_PART_AND_A_LITTLE_BYTES).await;
+    upload.abort().await.expect("the server drops the parts");
+
+    let listed = store.list_prefix("").await;
+
+    assert_eq!(listed, Ok(Vec::new()));
+}
+
+#[tokio::test]
+async fn object_is_not_listed_while_its_parts_are_being_sent() {
+    let Some(server) = shared_s3_server().await else {
+        return;
+    };
+    let store = server.store_in_fresh_namespace();
+    let _upload_in_progress = upload_pattern(&store, ONE_PART_AND_A_LITTLE_BYTES).await;
+
+    let listed = store.list_prefix("").await;
+
+    assert_eq!(listed, Ok(Vec::new()));
+}
+
+/// What a replica does after a failed upload: it uploads the segment again, to the same key.
+#[tokio::test]
+async fn key_of_an_aborted_upload_can_be_uploaded_to_again() {
+    let Some(server) = shared_s3_server().await else {
+        return;
+    };
+    let store = server.store_in_fresh_namespace();
+    let first_attempt = upload_pattern(&store, ONE_PART_AND_A_LITTLE_BYTES).await;
+    first_attempt.abort().await.expect("the server drops the parts");
+    let second_attempt = upload_pattern(&store, UPLOADED_OBJECT_BYTES).await;
+
+    let completed = second_attempt.complete().await;
+
+    assert_eq!(completed, Ok(()));
 }

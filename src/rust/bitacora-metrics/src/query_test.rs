@@ -22,7 +22,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use bitacora_artifact::{ArtifactStore, MemoryArtifactStore, ObjectInfo};
+use bitacora_artifact::{ArtifactStore, MemoryArtifactStore, ObjectInfo, ObjectUpload};
 use bitacora_materializer::Materializer;
 use bytes::Bytes;
 
@@ -761,6 +761,10 @@ impl ArtifactStore for GoneOnce {
 
     async fn list_prefix(&self, key_prefix: &str) -> Result<Vec<ObjectInfo>, ArtifactError> {
         self.objects.list_prefix(key_prefix).await
+    }
+
+    async fn start_upload(&self, object_key: &str) -> Result<Box<dyn ObjectUpload>, ArtifactError> {
+        self.objects.start_upload(object_key).await
     }
 }
 

@@ -7,11 +7,14 @@
 //! - Each fault switch does what it says and nothing more: an outage fails every operation and changes no
 //!   object; a hang never answers, not even with a failure; corruption changes one byte of one object.
 //! - The range read counter counts range reads that returned bytes, and nothing else.
+//! - An upload passes the fault switches at every step: an outage or a hang can meet it at its start, at
+//!   a piece, at its completion and at its abort, and an upload that was not completed stores nothing.
 //!
 //! # How the fixtures work
 //!
 //! `store_with_object` gives a store that holds the three bytes `abc` under [`OBJECT_KEY`]. Tests of the
 //! hang run on a paused clock, so the hour they wait for an answer takes no real time.
+//! `upload_with_one_piece` gives an upload to [`UPLOAD_KEY`] that is under way when the fault begins.
 
 use std::time::Duration;
 
@@ -23,6 +26,9 @@ const OBJECT_KEY: &str = "layers/0001";
 
 /// The contents stored under [`OBJECT_KEY`].
 const OBJECT_CONTENTS: &[u8] = b"abc";
+
+/// The key the tests of uploads store under.
+const UPLOAD_KEY: &str = "streams/7/segments/3";
 
 /// How long a test waits for a store that is not expected to answer. On a paused clock it costs nothing.
 const LONGER_THAN_ANY_ANSWER: Duration = Duration::from_hours(1);
@@ -205,4 +211,115 @@ async fn refused_range_reads_are_not_counted() {
     let _refused_range = artifact_store.get_range(OBJECT_KEY, range_past_the_end).await;
 
     assert_eq!(artifact_store.served_range_reads(""), 0);
+}
+
+/// An upload to [`UPLOAD_KEY`] that was started on a store without faults and handed one piece.
+async fn upload_with_one_piece(artifact_store: &MemoryArtifactStore) -> Box<dyn ObjectUpload> {
+    let mut upload = artifact_store
+        .start_upload(UPLOAD_KEY)
+        .await
+        .expect("a store without faults starts an upload");
+    upload
+        .write(Bytes::from_static(b"the first piece"))
+        .await
+        .expect("a store without faults takes a piece");
+    upload
+}
+
+#[tokio::test]
+async fn unavailable_store_does_not_start_an_upload() {
+    let artifact_store = MemoryArtifactStore::new();
+    artifact_store.set_unavailable(true);
+
+    let started = artifact_store.start_upload(UPLOAD_KEY).await;
+
+    assert!(matches!(started, Err(ArtifactError::Unavailable { .. })));
+}
+
+/// The outage begins while the object is on its way: the next piece is what finds out.
+#[tokio::test]
+async fn outage_during_an_upload_fails_the_next_piece() {
+    let artifact_store = MemoryArtifactStore::new();
+    let mut upload = upload_with_one_piece(&artifact_store).await;
+    artifact_store.set_unavailable(true);
+
+    let written = upload.write(Bytes::from_static(b"the second piece")).await;
+
+    assert!(matches!(written, Err(ArtifactError::Unavailable { .. })));
+}
+
+#[tokio::test]
+async fn outage_at_the_end_of_an_upload_fails_its_completion() {
+    let artifact_store = MemoryArtifactStore::new();
+    let upload = upload_with_one_piece(&artifact_store).await;
+    artifact_store.set_unavailable(true);
+
+    let completed = upload.complete().await;
+
+    assert!(matches!(completed, Err(ArtifactError::Unavailable { .. })));
+}
+
+/// A completion refused during an outage must not have happened after all.
+#[tokio::test]
+async fn upload_whose_completion_failed_stores_nothing() {
+    let artifact_store = MemoryArtifactStore::new();
+    let upload = upload_with_one_piece(&artifact_store).await;
+    artifact_store.set_unavailable(true);
+    let _refused_completion = upload.complete().await;
+
+    artifact_store.set_unavailable(false);
+
+    assert_eq!(artifact_store.list_prefix("").await, Ok(Vec::new()));
+}
+
+#[tokio::test]
+async fn outage_fails_the_abort_of_an_upload() {
+    let artifact_store = MemoryArtifactStore::new();
+    let upload = upload_with_one_piece(&artifact_store).await;
+    artifact_store.set_unavailable(true);
+
+    let aborted = upload.abort().await;
+
+    assert!(matches!(aborted, Err(ArtifactError::Unavailable { .. })));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unresponsive_store_never_takes_a_piece_of_an_upload() {
+    let artifact_store = MemoryArtifactStore::new();
+    let mut upload = upload_with_one_piece(&artifact_store).await;
+    artifact_store.set_unresponsive(true);
+
+    let answer = tokio::time::timeout(LONGER_THAN_ANY_ANSWER, upload.write(Bytes::from_static(b"more"))).await;
+
+    assert!(answer.is_err(), "{answer:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn unresponsive_store_never_completes_an_upload() {
+    let artifact_store = MemoryArtifactStore::new();
+    let upload = upload_with_one_piece(&artifact_store).await;
+    artifact_store.set_unresponsive(true);
+
+    let answer = tokio::time::timeout(LONGER_THAN_ANY_ANSWER, upload.complete()).await;
+
+    assert!(answer.is_err(), "{answer:?}");
+}
+
+/// The store is a handle, and so is what an upload keeps of it: an object uploaded through one clone is
+/// read through another.
+#[tokio::test]
+async fn object_uploaded_through_one_clone_is_read_through_another() {
+    let artifact_store = MemoryArtifactStore::new();
+    let second_handle = artifact_store.clone();
+    let upload = upload_with_one_piece(&second_handle).await;
+
+    upload
+        .complete()
+        .await
+        .expect("a store without faults completes an upload");
+
+    assert_eq!(
+        artifact_store.get_object(UPLOAD_KEY).await,
+        Ok(Bytes::from_static(b"the first piece"))
+    );
 }

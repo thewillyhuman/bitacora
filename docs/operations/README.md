@@ -53,6 +53,35 @@ These hold for every way of deploying, and nothing checks most of them for you.
   when it is not. Run NTP or chrony everywhere.
 - **A private network.** There is no TLS and no authentication between clients, replicas, controllers
   and etcd. Whoever reaches port 7000 can read and write every stream.
+- **A lifecycle rule on the bucket, for uploads that were never finished.** A large object reaches an S3
+  bucket as a multipart upload. If the process dies in the middle, or the store is unreachable when the
+  process gives up, the parts that were sent stay in the bucket: no listing shows them, nothing in the
+  cluster removes them, and they are billed. Have the bucket abort them itself:
+
+  ```json
+  {
+    "Rules": [
+      {
+        "ID": "abort-incomplete-multipart-uploads",
+        "Status": "Enabled",
+        "Filter": { "Prefix": "" },
+        "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+      }
+    ]
+  }
+  ```
+
+  ```sh
+  aws s3api put-bucket-lifecycle-configuration --bucket <bucket> \
+    --lifecycle-configuration file://lifecycle.json
+  ```
+
+  Amazon S3 and Ceph take this rule as it is; other services have their own name for it. One day is
+  the shortest S3 offers and is safe: the rule counts from the start of an upload, and no upload of a
+  segment runs that long. To see whether it is needed, `aws s3api list-multipart-uploads` shows what is
+  waiting, and `bitacora_object_store_request_failures_total{operation="upload_abort"}` counts the
+  uploads a process could not abort itself. A local directory as the object store needs nothing: it
+  removes its own leftovers after a day.
 - **Memory for uploads.** A replica holds a whole segment in memory while it uploads it, twice for a
   moment. With the writer's default segment size of 1 GiB that is more than 2 GiB per upload in
   progress: give replicas that much room, or have applications use smaller segments

@@ -55,7 +55,7 @@ use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientOptions, RetryConfig};
 
 use crate::settings::{InvalidS3Settings, S3Credentials, S3Settings};
-use crate::store::S3ArtifactStore;
+use crate::store::{S3ArtifactStore, UPLOAD_PART_BYTES};
 
 /// How many times a failed request is tried again before the failure is reported. Two, so that a single
 /// dropped connection or a `503` during a deployment of the service is not an incident.
@@ -167,6 +167,7 @@ fn open_with_client_builder(
             Arc::new(client),
             &settings.key_prefix,
             settings.request_timeout,
+            UPLOAD_PART_BYTES,
         )),
         Err(refusal) => Err(InvalidS3Settings::because(refusal.to_string())),
     }

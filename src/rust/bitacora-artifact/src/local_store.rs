@@ -11,6 +11,7 @@
 //!
 //! - [`LocalArtifactStore`]: the store.
 //! - `StoreDirectories`: where the store keeps things, and the blocking file operations on them.
+//! - `ScratchFile` and `LocalUpload`: an object being built, and one that is built a piece at a time.
 //! - `remove_stale_scratch` and `remove_if_present`: the removal of what crashed processes left behind.
 //! - `RangeReadError`: why a range could not be read from a file.
 //! - `run_blocking` and the error mappers: the plumbing between async callers, blocking system calls and
@@ -30,6 +31,13 @@
 //! a reader finds either the whole old object, the whole new object, or nothing; and an object that has a
 //! name has all of its contents on disk. The scratch directory is outside `objects/`, so a half-written
 //! object can never be read or listed, and no object key can collide with a scratch file.
+//!
+//! An object that is handed over piece by piece goes the same way, with the steps apart: the scratch file
+//! is created when the upload starts, each piece is appended to it, and the flush and the rename happen
+//! when the upload is completed. So an upload holds none of the object in memory, and a put and an upload
+//! cannot differ in what a reader sees. An upload that ends any other way than by a completion removes
+//! its scratch file, which may hold a gigabyte: when it is aborted, when its completion fails, and when
+//! it is dropped, in which case the removal runs on the blocking pool because a drop cannot wait.
 //!
 //! One root directory can be opened by several processes at once, and several times by one process: the
 //! replicas, the controller and the clients of a cluster on one machine all share it, as they would share
@@ -76,8 +84,9 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::runtime::Handle;
 
-use crate::store::{ArtifactError, ArtifactStore, KEY_SEPARATOR, ObjectInfo, validate_key};
+use crate::store::{ArtifactError, ArtifactStore, KEY_SEPARATOR, ObjectInfo, ObjectUpload, validate_key};
 
 /// The directory, below the store's root, that holds one file per object.
 const OBJECTS_DIRECTORY_NAME: &str = "objects";
@@ -259,6 +268,22 @@ impl StoreDirectories {
     /// Fails with the file system's error. A common one: the key names a path below an existing object,
     /// or the path of an existing directory, which a file system cannot represent.
     fn store_object(&self, object_key: &str, contents: &[u8]) -> io::Result<()> {
+        let mut scratch = self.create_scratch_file(object_key)?;
+        scratch.file.write_all(contents)?;
+        self.publish_scratch_file(&scratch, object_key)
+    }
+
+    /// Creates the empty scratch file that the object for `object_key` is built in, and the directory the
+    /// object will be renamed into.
+    ///
+    /// The object's directory is made first, so that a key the file system cannot represent is refused
+    /// before a byte of the object is written.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the file system's error. A common one: the key names a path below an existing object,
+    /// which a file system cannot represent.
+    fn create_scratch_file(&self, object_key: &str) -> io::Result<ScratchFile> {
         let object_path = self.object_path(object_key);
         let parent_directory = object_path
             .parent()
@@ -268,13 +293,26 @@ impl StoreDirectories {
         // The scratch directory is created again if it is gone: a store that wrote nothing for a day
         // looks like a leftover to another store that opens the root, which then removes it.
         fs::create_dir_all(&self.scratch_directory)?;
-        let scratch_path = self.next_scratch_path();
-        let mut scratch_file = File::create(&scratch_path)?;
-        scratch_file.write_all(contents)?;
+        let path = self.next_scratch_path();
+        let file = File::create(&path)?;
+        Ok(ScratchFile { path, file })
+    }
+
+    /// Makes a scratch file the object stored under `object_key`: flushes it, renames it into place and
+    /// flushes the directory that received the name.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the file system's error. A common one: the key names the path of an existing directory.
+    fn publish_scratch_file(&self, scratch: &ScratchFile, object_key: &str) -> io::Result<()> {
+        let object_path = self.object_path(object_key);
+        let parent_directory = object_path
+            .parent()
+            .expect("an object path is below the objects directory");
         // The contents must be on disk before the name is: a reader that finds the name must find all of
         // the object.
-        scratch_file.sync_all()?;
-        fs::rename(&scratch_path, &object_path)?;
+        scratch.file.sync_all()?;
+        fs::rename(&scratch.path, &object_path)?;
         // The new name is an entry of the parent directory, which has to be flushed like any other data.
         File::open(parent_directory)?.sync_all()
     }
@@ -432,6 +470,151 @@ impl StoreDirectories {
             object_key.push_str(key_component);
         }
         Ok(object_key)
+    }
+}
+
+/// A file in a store's scratch directory that an object is being built in.
+#[derive(Debug)]
+struct ScratchFile {
+    /// Where the file is.
+    path: PathBuf,
+    /// The file, open for writing at its end.
+    file: File,
+}
+
+/// An object on its way into a [`LocalArtifactStore`]: a scratch file that grows by a piece at a time and
+/// is renamed into place when the upload is completed.
+///
+/// Nothing of the object is kept in memory beyond the piece that is being written. The scratch file is
+/// removed by every end of the upload but a completion: an abort, a completion that fails, and a drop.
+/// What is left is the file of an upload whose process died; it is removed with the other leftovers once
+/// it is a day old.
+struct LocalUpload {
+    /// The directories of the store the object goes into.
+    directories: Arc<StoreDirectories>,
+    /// The key the object will be stored under.
+    object_key: String,
+    /// Where the scratch file is. Kept apart from the open file, so that an abort can remove the file
+    /// after a write that failed and lost it.
+    scratch_path: PathBuf,
+    /// The scratch file, open for writing at its end. `None` while a write has it on the blocking pool,
+    /// and for good after a write that failed.
+    scratch_file: Option<File>,
+    /// Whether the scratch file is no longer there to remove: it became the object, or was removed.
+    has_ended: bool,
+}
+
+impl LocalUpload {
+    /// Flushes the scratch file and renames it into place.
+    ///
+    /// # Errors
+    ///
+    /// Fails with `Unavailable` if an earlier write failed, or with the file system's error. The scratch
+    /// file may still be there then.
+    async fn try_to_publish(&mut self) -> Result<(), ArtifactError> {
+        let Some(scratch_file) = self.scratch_file.take() else {
+            return Err(self.failed_earlier());
+        };
+        let scratch = ScratchFile {
+            path: self.scratch_path.clone(),
+            file: scratch_file,
+        };
+        let directories = Arc::clone(&self.directories);
+        let object_key = self.object_key.clone();
+        let published = run_blocking(move || directories.publish_scratch_file(&scratch, &object_key)).await;
+        published.map_err(|io_error| unavailable(&io_error))
+    }
+
+    /// Closes the scratch file and removes it. Whatever the file system answers, the upload does not try
+    /// again when it is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the file system's error. The scratch file may still be there then, for the removal of
+    /// leftovers.
+    async fn remove_scratch_file(&mut self) -> Result<(), ArtifactError> {
+        drop(self.scratch_file.take());
+        let scratch_path = self.scratch_path.clone();
+        let removed = run_blocking(move || remove_if_present(&scratch_path)).await;
+        self.has_ended = true;
+        removed.map_err(|io_error| unavailable(&io_error))
+    }
+
+    /// The error of a step that comes after a write that failed: the file is in an unknown state, so the
+    /// upload cannot go on and cannot be completed.
+    fn failed_earlier(&self) -> ArtifactError {
+        ArtifactError::Unavailable {
+            reason: format!(
+                "the upload of {:?} failed at an earlier piece and cannot go on",
+                self.object_key
+            ),
+        }
+    }
+}
+
+impl Drop for LocalUpload {
+    /// Removes the scratch file of an upload that was dropped before it ended: one whose caller failed
+    /// and did not abort it, or was itself given up on half way, as a request that is cancelled.
+    ///
+    /// A drop cannot wait for the file system, so the removal runs on the blocking pool and nobody hears
+    /// how it went. Without a runtime to run it, for example while the process shuts down, the file is
+    /// left for the removal of leftovers, as it is when the process dies.
+    fn drop(&mut self) {
+        if self.has_ended {
+            return;
+        }
+        let Ok(runtime) = Handle::try_current() else {
+            return;
+        };
+        let scratch_path = std::mem::take(&mut self.scratch_path);
+        runtime.spawn_blocking(move || {
+            let _removed = remove_if_present(&scratch_path);
+        });
+    }
+}
+
+#[async_trait]
+impl ObjectUpload for LocalUpload {
+    /// Appends the piece to the scratch file. It is not flushed yet: one flush when the upload is completed
+    /// covers all of it.
+    async fn write(&mut self, piece: Bytes) -> Result<(), ArtifactError> {
+        let Some(mut scratch_file) = self.scratch_file.take() else {
+            return Err(self.failed_earlier());
+        };
+        let appended = run_blocking(move || {
+            scratch_file.write_all(&piece)?;
+            Ok::<File, io::Error>(scratch_file)
+        })
+        .await;
+        match appended {
+            Ok(scratch_file) => {
+                self.scratch_file = Some(scratch_file);
+                Ok(())
+            }
+            Err(io_error) => Err(unavailable(&io_error)),
+        }
+    }
+
+    /// Flushes the scratch file and renames it into place. Returns once the object and its name are
+    /// flushed.
+    ///
+    /// A completion that fails removes the scratch file before it returns: the upload ends here either
+    /// way, and nobody could abort it afterwards.
+    async fn complete(mut self: Box<Self>) -> Result<(), ArtifactError> {
+        let published = self.try_to_publish().await;
+        if published.is_ok() {
+            // The scratch file is the object now.
+            self.has_ended = true;
+            return Ok(());
+        }
+        // The failure of the completion is what the caller must hear, whatever the removal says.
+        let _removed = self.remove_scratch_file().await;
+        published
+    }
+
+    /// Closes the scratch file and removes it.
+    async fn abort(mut self: Box<Self>) -> Result<(), ArtifactError> {
+        self.remove_scratch_file().await
     }
 }
 
@@ -628,6 +811,24 @@ impl ArtifactStore for LocalArtifactStore {
         let owned_prefix = key_prefix.to_owned();
         let listed = run_blocking(move || directories.list_objects(&owned_prefix)).await;
         listed.map_err(|io_error| unavailable(&io_error))
+    }
+
+    /// Creates the scratch file that the object's pieces will be appended to.
+    async fn start_upload(&self, object_key: &str) -> Result<Box<dyn ObjectUpload>, ArtifactError> {
+        validate_key(object_key)?;
+        let directories = Arc::clone(&self.directories);
+        let owned_key = object_key.to_owned();
+        let created = run_blocking(move || directories.create_scratch_file(&owned_key)).await;
+        match created {
+            Ok(scratch) => Ok(Box::new(LocalUpload {
+                directories: Arc::clone(&self.directories),
+                object_key: object_key.to_owned(),
+                scratch_path: scratch.path,
+                scratch_file: Some(scratch.file),
+                has_ended: false,
+            })),
+            Err(io_error) => Err(unavailable(&io_error)),
+        }
     }
 }
 

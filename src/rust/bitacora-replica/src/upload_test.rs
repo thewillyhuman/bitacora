@@ -18,7 +18,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bitacora_artifact::{MemoryArtifactStore, ObjectInfo};
+use bitacora_artifact::{MemoryArtifactStore, ObjectInfo, ObjectUpload};
 use bitacora_segment::MemoryDisk;
 use bitacora_segment::tiered::{TieredFooter, TieredIndex};
 use bitacora_types::SequenceNumber;
@@ -91,6 +91,10 @@ impl ArtifactStore for FaultyStore {
 
     async fn list_prefix(&self, key_prefix: &str) -> Result<Vec<ObjectInfo>, ArtifactError> {
         self.objects.list_prefix(key_prefix).await
+    }
+
+    async fn start_upload(&self, object_key: &str) -> Result<Box<dyn ObjectUpload>, ArtifactError> {
+        self.objects.start_upload(object_key).await
     }
 }
 

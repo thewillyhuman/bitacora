@@ -2,9 +2,12 @@
 //!
 //! # What is covered
 //!
-//! - Each of the five operations is recorded under its own name and reaches the wrapped store.
+//! - Each of the five operations on whole objects is recorded under its own name and reaches the wrapped
+//!   store.
 //! - Failures are counted by kind and passed on unchanged.
 //! - Transferred bytes are counted by direction, for successful requests only.
+//! - An upload: its start and each of its steps are recorded under their own names, the object reaches
+//!   the wrapped store, and its bytes are counted as uploaded when it is completed and at no other time.
 //!
 //! # How the fixtures work
 //!
@@ -239,6 +242,127 @@ async fn bytes_of_a_failed_upload_are_not_counted() {
             .contains("bitacora_object_store_transferred_bytes_total{"),
         "{}",
         registry.encode()
+    );
+}
+
+/// Starts an upload to [`OBJECT_KEY`] through `store` and hands it the ten bytes `0123456789` in two
+/// pieces.
+async fn upload_ten_bytes(store: &dyn ArtifactStore) -> Box<dyn ObjectUpload> {
+    let mut upload = store.start_upload(OBJECT_KEY).await.expect("the upload starts");
+    for piece in [&b"01234"[..], b"56789"] {
+        upload
+            .write(Bytes::from_static(piece))
+            .await
+            .expect("the piece is taken");
+    }
+    upload
+}
+
+/// The bytes counted as uploaded, as the exposition shows them.
+fn uploaded_bytes(registry: &MetricsRegistry) -> Option<String> {
+    exposition_value(
+        registry,
+        "bitacora_object_store_transferred_bytes_total{direction=\"uploaded\"} ",
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn object_uploaded_through_the_decorator_is_in_the_wrapped_store() {
+    let (memory_store, instrumented_store, _registry) = instrumented_memory_store();
+    let upload = upload_ten_bytes(&instrumented_store).await;
+
+    upload.complete().await.expect("the upload is completed");
+
+    assert_eq!(
+        memory_store.get_object(OBJECT_KEY).await,
+        Ok(Bytes::from_static(b"0123456789"))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn start_of_an_upload_is_counted_under_its_name() {
+    let (_memory_store, instrumented_store, registry) = instrumented_memory_store();
+
+    let _upload = upload_ten_bytes(&instrumented_store).await;
+
+    assert_eq!(requests_of(&registry, "start_upload"), Some("1".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_piece_of_an_upload_is_counted_as_a_write() {
+    let (_memory_store, instrumented_store, registry) = instrumented_memory_store();
+
+    let _upload = upload_ten_bytes(&instrumented_store).await;
+
+    assert_eq!(requests_of(&registry, "upload_write"), Some("2".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_of_an_upload_is_counted_under_its_name() {
+    let (_memory_store, instrumented_store, registry) = instrumented_memory_store();
+    let upload = upload_ten_bytes(&instrumented_store).await;
+
+    upload.complete().await.expect("the upload is completed");
+
+    assert_eq!(requests_of(&registry, "upload_complete"), Some("1".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn abort_of_an_upload_is_counted_under_its_name() {
+    let (_memory_store, instrumented_store, registry) = instrumented_memory_store();
+    let upload = upload_ten_bytes(&instrumented_store).await;
+
+    upload.abort().await.expect("the upload is aborted");
+
+    assert_eq!(requests_of(&registry, "upload_abort"), Some("1".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn bytes_of_a_completed_upload_are_counted_as_uploaded() {
+    let (_memory_store, instrumented_store, registry) = instrumented_memory_store();
+    let upload = upload_ten_bytes(&instrumented_store).await;
+
+    upload.complete().await.expect("the upload is completed");
+
+    assert_eq!(uploaded_bytes(&registry), Some("10".to_owned()));
+}
+
+/// The pieces left the process, but no object came of them: `uploaded` counts stored objects.
+#[tokio::test(start_paused = true)]
+async fn bytes_of_an_aborted_upload_are_not_counted() {
+    let (_memory_store, instrumented_store, registry) = instrumented_memory_store();
+    let upload = upload_ten_bytes(&instrumented_store).await;
+
+    upload.abort().await.expect("the upload is aborted");
+
+    assert_eq!(uploaded_bytes(&registry), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bytes_of_an_upload_whose_completion_failed_are_not_counted() {
+    let (memory_store, instrumented_store, registry) = instrumented_memory_store();
+    let upload = upload_ten_bytes(&instrumented_store).await;
+    memory_store.set_unavailable(true);
+
+    let _failed = upload.complete().await;
+
+    assert_eq!(uploaded_bytes(&registry), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn piece_refused_during_an_outage_is_counted_as_unavailable() {
+    let (memory_store, instrumented_store, registry) = instrumented_memory_store();
+    let mut upload = upload_ten_bytes(&instrumented_store).await;
+    memory_store.set_unavailable(true);
+
+    let _refused = upload.write(Bytes::from_static(b"more")).await;
+
+    assert_eq!(
+        exposition_value(
+            &registry,
+            "bitacora_object_store_request_failures_total{operation=\"upload_write\",error=\"unavailable\"} "
+        ),
+        Some("1".to_owned())
     );
 }
 

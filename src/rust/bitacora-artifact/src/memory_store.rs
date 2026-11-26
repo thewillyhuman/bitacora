@@ -12,6 +12,7 @@
 //!
 //! - [`MemoryArtifactStore`]: the store, with its fault switches and one counter.
 //! - `MemoryArtifacts`: the state behind the store's lock.
+//! - `MemoryUpload`: an object that is handed over piece by piece, until it is completed.
 //!
 //! # How it works
 //!
@@ -23,6 +24,11 @@
 //! the operation waits forever, so the caller's own timeout is what ends it. While the store is
 //! *unavailable* the operation fails with [`ArtifactError::Unavailable`]. An unresponsive store never
 //! gets as far as failing, so that switch wins when both are on. Neither fault changes any object.
+//!
+//! An object that arrives piece by piece is kept by its upload, not in the map, and enters the map in one
+//! step when the upload is completed. Each step of an upload passes the fault switches like any other
+//! operation. This store holds the whole object in memory while it is uploaded, which is what it does with
+//! every object; the bound on memory that an upload promises is for stores that keep objects elsewhere.
 //!
 //! The sorted map is not an optimization: a listing must be sorted by key, and iterating a sorted map from
 //! the prefix on gives exactly that. The workspace also forbids hash maps, whose iteration order would
@@ -47,9 +53,9 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
-use crate::store::{ArtifactError, ArtifactStore, ObjectInfo, slice_range, validate_key};
+use crate::store::{ArtifactError, ArtifactStore, ObjectInfo, ObjectUpload, slice_range, validate_key};
 
 /// What an operation is told while the outage switch is on. A test that prints the error sees at once
 /// that the failure was injected and not real.
@@ -368,6 +374,60 @@ impl ArtifactStore for MemoryArtifactStore {
             });
         }
         Ok(listed)
+    }
+
+    /// Starts an upload that keeps its pieces to itself until it is completed.
+    async fn start_upload(&self, object_key: &str) -> Result<Box<dyn ObjectUpload>, ArtifactError> {
+        validate_key(object_key)?;
+        drop(self.lock_when_available().await?);
+        Ok(Box::new(MemoryUpload {
+            artifact_store: self.clone(),
+            object_key: object_key.to_owned(),
+            contents: BytesMut::new(),
+        }))
+    }
+}
+
+/// An object on its way into a [`MemoryArtifactStore`].
+///
+/// The pieces are kept here, outside the store's map, so no reader and no listing can find them. Every
+/// step passes the store's fault switches first, as a request to a real store would: a test can fail or
+/// hang an upload at its start, at any piece, at its completion and at its abort.
+struct MemoryUpload {
+    /// The store the object goes into when the upload is completed.
+    artifact_store: MemoryArtifactStore,
+    /// The key the object will be stored under.
+    object_key: String,
+    /// The pieces handed over so far, end to end.
+    contents: BytesMut,
+}
+
+#[async_trait]
+impl ObjectUpload for MemoryUpload {
+    /// Appends the piece to what the upload holds. This copies it: the object must be one run of bytes in
+    /// the end.
+    async fn write(&mut self, piece: Bytes) -> Result<(), ArtifactError> {
+        drop(self.artifact_store.lock_when_available().await?);
+        self.contents.extend_from_slice(&piece);
+        Ok(())
+    }
+
+    /// Puts what the upload holds into the store's map, replacing any object under the same key.
+    async fn complete(self: Box<Self>) -> Result<(), ArtifactError> {
+        let Self {
+            artifact_store,
+            object_key,
+            contents,
+        } = *self;
+        let mut artifacts = artifact_store.lock_when_available().await?;
+        artifacts.objects_by_key.insert(object_key, contents.freeze());
+        Ok(())
+    }
+
+    /// Forgets the pieces. There is nothing else to remove.
+    async fn abort(self: Box<Self>) -> Result<(), ArtifactError> {
+        drop(self.artifact_store.lock_when_available().await?);
+        Ok(())
     }
 }
 

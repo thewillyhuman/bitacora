@@ -10,7 +10,8 @@
 //!
 //! # What it contains
 //!
-//! - [`ArtifactStore`]: the interface, with [`ArtifactError`], [`ObjectInfo`] and [`validate_key`].
+//! - [`ArtifactStore`]: the interface, with [`ObjectUpload`], [`ArtifactError`], [`ObjectInfo`] and
+//!   [`validate_key`].
 //! - [`MemoryArtifactStore`]: objects in memory, with switches to inject faults, for tests and simulation.
 //! - [`LocalArtifactStore`]: objects in a directory of the local file system, for development clusters.
 //! - [`contract::check`]: the behaviour every backend must have, as one function a backend runs against
@@ -46,4 +47,4 @@ mod store;
 
 pub use local_store::LocalArtifactStore;
 pub use memory_store::MemoryArtifactStore;
-pub use store::{ArtifactError, ArtifactStore, ObjectInfo, validate_key};
+pub use store::{ArtifactError, ArtifactStore, ObjectInfo, ObjectUpload, validate_key};

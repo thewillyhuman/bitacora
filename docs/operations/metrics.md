@@ -49,7 +49,7 @@ Label values:
 | --- | --- | --- |
 | `replica` | `append`, `read`, `fence`, `seal`, `repair_segment`, `upload_segment`, `delete_segment`, `list_segments`, `status`, `drain` | `fenced`, `sealed`, `out_of_order`, `conflicting_seal`, `segment_not_found`, `invalid_request`, `no_capacity`, `draining`, `storage`, `unavailable` |
 | `metadata_store` | `get`, `list`, `transact` | `unavailable` |
-| `object_store` | `put_object`, `get_object`, `get_range`, `delete_object`, `list_prefix` | `not_found`, `range_out_of_bounds`, `invalid_key`, `unavailable` |
+| `object_store` | `put_object`, `get_object`, `get_range`, `delete_object`, `list_prefix`, `start_upload`, `upload_write`, `upload_complete`, `upload_abort` | `not_found`, `range_out_of_bounds`, `invalid_key`, `unavailable` |
 
 Notes:
 
@@ -60,6 +60,11 @@ Notes:
 - A metadata store transaction whose condition did not hold was answered and is not a failure.
 - For the object store only `unavailable` means the store is in trouble; the other kinds are answers a
   healthy store gives to a wrong request.
+- A large object, such as a sealed segment, is stored piece by piece: one `start_upload`, one
+  `upload_write` for each piece the writer hands over, and then one `upload_complete` or, if the upload
+  is given up, one `upload_abort`. An `upload_write` that fills a part includes the time the store takes
+  to send it; one that does not takes no time. A segment that reached the object store is one
+  `upload_complete` without a failure.
 
 ## Metadata store
 
@@ -71,7 +76,7 @@ Notes:
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `bitacora_object_store_transferred_bytes_total` | counter | `direction` (`uploaded`, `downloaded`) | Bytes of objects stored and of objects and ranges read, for requests that succeeded |
+| `bitacora_object_store_transferred_bytes_total` | counter | `direction` (`uploaded`, `downloaded`) | Bytes of objects stored and of objects and ranges read, for requests that succeeded. An object stored piece by piece is counted when its upload is completed |
 
 ## Disk
 

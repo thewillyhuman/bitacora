@@ -144,9 +144,12 @@ program is a failure.
 
 ## Not covered
 
-- **Uploads in several parts.** An object is one `PUT`: it is held in memory
-  and limited to 5 GiB. The design lists a streaming upload next to
-  `put_object` as future work (section 19, "Logs and search").
+- **Uploads in several parts.** An object given to `put_object` is one
+  `PUT`: it is held in memory and limited to 5 GiB. Added since: the
+  streaming upload the design lists next to `put_object` (section 19, "Logs
+  and search") is `start_upload`, a multipart upload in parts of 8 MiB sent
+  one at a time. It leaves one thing to the bucket, a lifecycle rule for
+  multipart uploads that were never finished; see the crate's README.
 - **Server-side encryption settings** (SSE-KMS, SSE-C) and **object
   versioning**. A bucket's default encryption applies as usual.
 - **Amazon S3 itself.** The tests run against one S3-compatible server.

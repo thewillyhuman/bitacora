@@ -11,6 +11,9 @@
 //!   clients of a cluster on one machine do. Stores leave each other's writes in progress alone, see each
 //!   other's objects, can open and put at the same moment, and remove only what a crashed process left
 //!   behind long ago.
+//! - Uploads: an object on its way is one scratch file and no object; completing or aborting leaves no
+//!   scratch file, dropping leaves it as a leftover; a key the file system cannot take is refused at the
+//!   start; an upload that lost its file refuses to go on.
 //!
 //! # How the fixtures work
 //!
@@ -323,4 +326,190 @@ async fn object_cannot_be_stored_where_a_directory_is() {
     let refused = opened.artifact_store.put_object("a", Bytes::from_static(b"y")).await;
 
     assert!(matches!(refused, Err(ArtifactError::Unavailable { .. })));
+}
+
+/// An upload to `streams/7/segments/3` that was started on `artifact_store` and handed one piece.
+async fn upload_with_one_piece(artifact_store: &LocalArtifactStore) -> Box<dyn ObjectUpload> {
+    let mut upload = artifact_store
+        .start_upload("streams/7/segments/3")
+        .await
+        .expect("a store on a writable directory starts an upload");
+    upload
+        .write(Bytes::from_static(b"the first piece"))
+        .await
+        .expect("a store on a writable directory takes a piece");
+    upload
+}
+
+/// How many files the store has in its own scratch directory right now.
+fn scratch_file_count(artifact_store: &LocalArtifactStore) -> usize {
+    let scratch_directory = &artifact_store.directories.scratch_directory;
+    fs::read_dir(scratch_directory)
+        .expect("the store's scratch directory can be read")
+        .count()
+}
+
+/// An upload keeps what it was handed on disk, not in memory: that is the point of it.
+#[tokio::test]
+async fn upload_in_progress_keeps_its_pieces_in_one_scratch_file() {
+    let opened = open_store().await;
+
+    let _upload = upload_with_one_piece(&opened.artifact_store).await;
+
+    assert_eq!(scratch_file_count(&opened.artifact_store), 1);
+}
+
+#[tokio::test]
+async fn completed_upload_leaves_no_scratch_file() {
+    let opened = open_store().await;
+    let upload = upload_with_one_piece(&opened.artifact_store).await;
+
+    upload
+        .complete()
+        .await
+        .expect("a store on a writable directory completes an upload");
+
+    assert_eq!(scratch_file_count(&opened.artifact_store), 0);
+}
+
+#[tokio::test]
+async fn aborted_upload_removes_its_scratch_file() {
+    let opened = open_store().await;
+    let upload = upload_with_one_piece(&opened.artifact_store).await;
+
+    upload
+        .abort()
+        .await
+        .expect("a store on a writable directory aborts an upload");
+
+    assert_eq!(scratch_file_count(&opened.artifact_store), 0);
+}
+
+/// Whether the store's scratch directory is empty now, or becomes empty within a few seconds.
+///
+/// For what a drop removes: a drop cannot wait for the file system, so the removal runs on the blocking
+/// pool and is over a moment after the drop returns.
+async fn scratch_files_are_soon_gone(artifact_store: &LocalArtifactStore) -> bool {
+    for _attempt in 0..5_000 {
+        if scratch_file_count(artifact_store) == 0 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    false
+}
+
+/// What happens to an upload whose caller was itself given up on, for example a request that was
+/// cancelled: the gigabyte it wrote must not stay on the disk until the store is opened again.
+#[tokio::test]
+async fn dropped_upload_removes_its_scratch_file() {
+    let opened = open_store().await;
+    let upload = upload_with_one_piece(&opened.artifact_store).await;
+
+    drop(upload);
+
+    assert!(scratch_files_are_soon_gone(&opened.artifact_store).await);
+}
+
+/// An upload can be dropped where no runtime is left to do the removal, for example while a process shuts
+/// down. Its scratch file is then a leftover like that of a crashed process, and the drop must be quiet.
+#[test]
+fn upload_dropped_outside_a_runtime_leaves_its_scratch_file_to_the_removal_of_leftovers() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime without drivers can be built");
+    let opened = runtime.block_on(open_store());
+    let upload = runtime.block_on(upload_with_one_piece(&opened.artifact_store));
+    drop(runtime);
+
+    drop(upload);
+
+    assert_eq!(scratch_file_count(&opened.artifact_store), 1);
+}
+
+/// A completion takes the upload with it, so nobody could abort it afterwards: the completion that fails
+/// removes the scratch file itself. It fails here because the key has become a directory meanwhile.
+#[tokio::test]
+async fn completion_that_fails_removes_its_scratch_file() {
+    let opened = open_store().await;
+    let upload = upload_with_one_piece(&opened.artifact_store).await;
+    store_object(&opened.artifact_store, "streams/7/segments/3/below", b"x").await;
+
+    let completed = upload.complete().await;
+
+    assert!(matches!(completed, Err(ArtifactError::Unavailable { .. })));
+    assert_eq!(scratch_file_count(&opened.artifact_store), 0);
+}
+
+/// The key is tried against the file system when the upload starts, so that a gigabyte is not written
+/// before the store finds out that it has no place for it.
+#[tokio::test]
+async fn upload_to_a_key_below_an_object_is_refused_when_it_starts() {
+    let opened = open_store().await;
+    store_object(&opened.artifact_store, "a", b"x").await;
+
+    let refused = opened.artifact_store.start_upload("a/b").await;
+
+    assert!(matches!(refused, Err(ArtifactError::Unavailable { .. })));
+}
+
+#[tokio::test]
+async fn store_whose_scratch_directory_was_removed_can_still_upload() {
+    let opened = open_store().await;
+    fs::remove_dir_all(&opened.artifact_store.directories.scratch_directory)
+        .expect("the scratch directory is removed, as another store would remove a stale one");
+
+    let started = opened.artifact_store.start_upload("streams/1/a").await;
+
+    assert!(started.is_ok(), "{:?}", started.err());
+}
+
+#[tokio::test]
+async fn object_uploaded_through_one_store_is_read_through_another_on_the_same_root() {
+    let opened = open_store().await;
+    let second_store = open_store_in(&opened.root_directory).await;
+    let upload = upload_with_one_piece(&opened.artifact_store).await;
+
+    upload
+        .complete()
+        .await
+        .expect("a store on a writable directory completes an upload");
+
+    assert_eq!(
+        second_store.get_object("streams/7/segments/3").await,
+        Ok(Bytes::from_static(b"the first piece"))
+    );
+}
+
+/// An upload in the state a failed write leaves it in: its scratch file is gone from its hands, and what
+/// is in the file nobody knows.
+fn upload_that_lost_its_scratch_file(artifact_store: &LocalArtifactStore) -> LocalUpload {
+    LocalUpload {
+        directories: Arc::clone(&artifact_store.directories),
+        object_key: "streams/7/segments/3".to_owned(),
+        scratch_path: artifact_store.directories.next_scratch_path(),
+        scratch_file: None,
+        has_ended: false,
+    }
+}
+
+#[tokio::test]
+async fn upload_that_lost_its_scratch_file_takes_no_more_pieces() {
+    let opened = open_store().await;
+    let mut upload = upload_that_lost_its_scratch_file(&opened.artifact_store);
+
+    let written = upload.write(Bytes::from_static(b"more")).await;
+
+    assert!(matches!(written, Err(ArtifactError::Unavailable { .. })));
+}
+
+/// Above all, an upload whose file is in an unknown state must not make an object of it.
+#[tokio::test]
+async fn upload_that_lost_its_scratch_file_cannot_be_completed() {
+    let opened = open_store().await;
+    let upload = Box::new(upload_that_lost_its_scratch_file(&opened.artifact_store));
+
+    let completed = upload.complete().await;
+
+    assert!(matches!(completed, Err(ArtifactError::Unavailable { .. })));
 }

@@ -13,6 +13,7 @@
 //!
 //! - [`S3ArtifactStore`]: the store. It implements `ArtifactStore` over any
 //!   `object_store::ObjectStore`; `s3.rs` builds it for an S3 service.
+//! - `S3Upload`: an object on its way in piece by piece, as the parts of a multipart upload.
 //!
 //! # How it works
 //!
@@ -33,6 +34,16 @@
 //!   `logs/ab`. The interface lists by characters. The store lists the directory that the prefix names
 //!   (`logs` for `logs/a`) and keeps the keys that start with the prefix. A prefix that ends at a `/` is
 //!   therefore exact, and one that ends inside a name costs a listing of that name's directory.
+//! - **Uploads.** The interface takes a large object in pieces of any size and makes it appear at the end.
+//!   The service has multipart uploads for that, with rules of its own: every part but the last must be
+//!   at least 5 MiB, and the stricter services want them all of one size. The store gathers the pieces
+//!   into parts of 8 MiB and sends each when it is full, one after the other, so an upload keeps less
+//!   than a part and the piece it was just handed. An object that never fills a part is stored with one
+//!   plain `PUT`. The service keeps the parts of a multipart upload until it is completed or aborted, so
+//!   the store aborts every upload that ends any other way than by a completion: one that is aborted,
+//!   one whose completion fails, and one that is dropped, whose abort runs in a task of its own because
+//!   a drop cannot wait. The parts of an upload whose process died, or whose abort did not reach the
+//!   service, stay until a lifecycle rule of the bucket removes them.
 //! - **Deleting.** Deleting an object that is not there succeeds, whatever the service says.
 //! - **A missing bucket** answers `404` like a missing object does. The store looks at the error code in
 //!   the answer and reports a missing bucket as an outage, with the reason, and not as a missing object.
@@ -41,7 +52,10 @@
 //!
 //! # Invariants
 //!
-//! - No operation outlives the request timeout.
+//! - No operation outlives the request timeout. For an upload, each part, and its completion, is one
+//!   operation.
+//! - An upload that lost a part is never completed: the object would lack what the part held.
+//! - An upload that sent a part and does not end in a completion asks the service to drop its parts, once.
 //! - A key that comes back from a listing is a key that can be passed to every other method.
 //! - The store reports `NotFound` only for an object that the service says is absent from a bucket that
 //!   exists. The one exception is an empty or inverted range: it is answered from a `HEAD`, whose answer
@@ -59,16 +73,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bitacora_artifact::{ArtifactError, ArtifactStore, ObjectInfo, validate_key};
-use bytes::Bytes;
+use bitacora_artifact::{ArtifactError, ArtifactStore, ObjectInfo, ObjectUpload, validate_key};
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt as _;
 use object_store::path::Path;
-use object_store::{GetOptions, ObjectStore, ObjectStoreExt as _, PutPayload};
+use object_store::{GetOptions, MultipartUpload, ObjectStore, ObjectStoreExt as _, PutPayload, UploadPart};
+use tokio::runtime::Handle;
 use tokio::time::timeout;
 
 /// The error code an S3 service puts in its answer when the bucket of a request does not exist. The `404`
 /// status alone does not tell a missing bucket from a missing object.
 const MISSING_BUCKET_CODE: &str = "<Code>NoSuchBucket</Code>";
+
+/// How many bytes of an upload go to the service as one part: 8 MiB.
+///
+/// S3 refuses a part smaller than 5 MiB unless it is the last one, and takes at most 10,000 parts, so this
+/// size stores objects of up to 78 GiB; a segment is 1 GiB. It is also the most an upload keeps in memory,
+/// next to the piece it was just handed. Every part but the last has exactly this size, which the stricter
+/// S3-compatible services insist on.
+pub(crate) const UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 
 /// An artifact store that keeps its objects in an object store service.
 ///
@@ -103,6 +126,10 @@ pub struct S3ArtifactStore {
 
     /// The longest one operation may take, the retries the client makes included.
     request_timeout: Duration,
+
+    /// How many bytes of an upload are sent to the service as one part. Always [`UPLOAD_PART_BYTES`]
+    /// outside the tests of this file, which use small parts to send many of them.
+    upload_part_bytes: usize,
 }
 
 impl S3ArtifactStore {
@@ -117,7 +144,14 @@ impl S3ArtifactStore {
     /// * `key_prefix` - The path inside the service that every key is put under: empty, or a plain
     ///   relative path without a leading or trailing `/`.
     /// * `request_timeout` - The longest one operation may take.
-    pub(crate) fn over(object_store: Arc<dyn ObjectStore>, key_prefix: &str, request_timeout: Duration) -> Self {
+    /// * `upload_part_bytes` - The size of the parts an upload is sent in. At least one byte; an S3
+    ///   service wants at least 5 MiB.
+    pub(crate) fn over(
+        object_store: Arc<dyn ObjectStore>,
+        key_prefix: &str,
+        request_timeout: Duration,
+        upload_part_bytes: usize,
+    ) -> Self {
         let key_namespace = if key_prefix.is_empty() {
             String::new()
         } else {
@@ -127,6 +161,8 @@ impl S3ArtifactStore {
             object_store,
             key_namespace,
             request_timeout,
+            // A part of no bytes would never be full of anything else, and sending would never end.
+            upload_part_bytes: upload_part_bytes.max(1),
         }
     }
 
@@ -361,12 +397,240 @@ fn unavailable(operation: &str, subject: &str, error: &object_store::Error) -> A
     }
 }
 
+/// An object on its way into the service piece by piece.
+///
+/// The pieces are gathered into parts of the store's part size, and each part is sent as soon as it is
+/// full, as one part of a multipart upload of the service. What the upload keeps is what was handed over
+/// since the last full part: less than a part once [`ObjectUpload::write`] has returned. The multipart
+/// upload is opened when the first part is full, so an object smaller than a part costs one `PUT` and
+/// leaves nothing to clean up.
+///
+/// A multipart upload exists at the service until it is completed or aborted, and its parts are billed
+/// meanwhile although no listing shows them. The upload aborts it when it is told to, when its completion
+/// fails, and when it is dropped. What it cannot cover is a process that dies and a service that cannot be
+/// reached for the abort: those parts stay until a lifecycle rule of the bucket removes them.
+struct S3Upload {
+    /// The store the object goes into.
+    store: S3ArtifactStore,
+    /// Where the object will live in the service.
+    location: Path,
+    /// The key the object will be stored under, for error messages.
+    object_key: String,
+    /// What was handed over and not sent yet.
+    unsent: BytesMut,
+    /// The multipart upload of the service, from the moment the first part is sent.
+    multipart: Option<Box<dyn MultipartUpload>>,
+    /// Whether a part could not be sent. The service then holds a part less than it was handed, so the
+    /// upload must not go on, and above all must not be completed.
+    has_lost_a_part: bool,
+}
+
+impl S3Upload {
+    /// Sends one part to the service, opening the multipart upload first if this is the first part.
+    ///
+    /// # Errors
+    ///
+    /// Fails with `Unavailable` if the service fails or does not answer in time. The part is lost then,
+    /// and the upload remembers it.
+    async fn send_part(&mut self, part: Bytes) -> Result<(), ArtifactError> {
+        let sent = self.try_to_send_part(part).await;
+        if sent.is_err() {
+            self.has_lost_a_part = true;
+        }
+        sent
+    }
+
+    /// Opens the multipart upload if there is none yet, and sends `part` as its next part.
+    async fn try_to_send_part(&mut self, part: Bytes) -> Result<(), ArtifactError> {
+        if self.multipart.is_none() {
+            let opening = open_multipart_at(&self.store.object_store, &self.location, &self.object_key);
+            let opened = self.store.within_deadline("store", &self.object_key, opening).await?;
+            self.multipart = Some(opened);
+        }
+        let multipart = self
+            .multipart
+            .as_mut()
+            .expect("the multipart upload was opened above if there was none");
+        let sending = send_part_of(multipart.put_part(PutPayload::from(part)), &self.object_key);
+        self.store.within_deadline("store", &self.object_key, sending).await
+    }
+
+    /// Sends what is left as the last part and completes the multipart upload; or, if no part was ever
+    /// full, stores the whole object with one `PUT`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with `Unavailable` if a part was lost earlier, or if the service fails or does not answer in
+    /// time. The multipart upload, if there is one, is still open at the service then.
+    async fn try_to_complete(&mut self) -> Result<(), ArtifactError> {
+        if self.has_lost_a_part {
+            return Err(self.lost_a_part());
+        }
+        let rest = self.unsent.split().freeze();
+        if self.multipart.is_none() {
+            let request = self.store.store_at(&self.location, &self.object_key, rest);
+            return self.store.within_deadline("store", &self.object_key, request).await;
+        }
+        if !rest.is_empty() {
+            self.send_part(rest).await?;
+        }
+        let multipart = self
+            .multipart
+            .as_mut()
+            .expect("the case of no multipart upload returned above");
+        let completing = complete_multipart(multipart.as_mut(), &self.object_key);
+        self.store.within_deadline("store", &self.object_key, completing).await
+    }
+
+    /// Tells the service to drop the parts of the multipart upload, if one was opened.
+    ///
+    /// The service is asked once. Whatever it answers, the upload forgets the multipart upload, so that
+    /// its drop does not ask again.
+    ///
+    /// # Errors
+    ///
+    /// Fails with `Unavailable` if the service fails or does not answer in time. The parts may still be
+    /// there then.
+    async fn drop_the_parts(&mut self) -> Result<(), ArtifactError> {
+        let Some(multipart) = self.multipart.as_mut() else {
+            return Ok(());
+        };
+        let aborting = abort_multipart(multipart.as_mut(), &self.object_key);
+        let aborted = self
+            .store
+            .within_deadline("abort the upload of", &self.object_key, aborting)
+            .await;
+        self.multipart = None;
+        aborted
+    }
+
+    /// The error of a step that comes after a part was lost.
+    fn lost_a_part(&self) -> ArtifactError {
+        ArtifactError::Unavailable {
+            reason: format!(
+                "cannot store {:?}: an earlier part of the upload could not be sent",
+                self.object_key
+            ),
+        }
+    }
+}
+
+/// Opens a multipart upload at the service. Any failure is an outage.
+async fn open_multipart_at(
+    object_store: &Arc<dyn ObjectStore>,
+    location: &Path,
+    object_key: &str,
+) -> Result<Box<dyn MultipartUpload>, ArtifactError> {
+    match object_store.put_multipart(location).await {
+        Ok(multipart) => Ok(multipart),
+        Err(error) => Err(unavailable("store", object_key, &error)),
+    }
+}
+
+/// Waits for one part to reach the service. Any failure is an outage.
+async fn send_part_of(part_being_sent: UploadPart, object_key: &str) -> Result<(), ArtifactError> {
+    match part_being_sent.await {
+        Ok(()) => Ok(()),
+        Err(error) => Err(unavailable("store", object_key, &error)),
+    }
+}
+
+/// Makes the parts of a multipart upload the object. Any failure is an outage.
+async fn complete_multipart(multipart: &mut dyn MultipartUpload, object_key: &str) -> Result<(), ArtifactError> {
+    match multipart.complete().await {
+        Ok(_version) => Ok(()),
+        Err(error) => Err(unavailable("store", object_key, &error)),
+    }
+}
+
+/// Tells the service to drop the parts of a multipart upload. Any failure is an outage.
+async fn abort_multipart(multipart: &mut dyn MultipartUpload, object_key: &str) -> Result<(), ArtifactError> {
+    match multipart.abort().await {
+        Ok(()) => Ok(()),
+        Err(error) => Err(unavailable("abort the upload of", object_key, &error)),
+    }
+}
+
+#[async_trait]
+impl ObjectUpload for S3Upload {
+    /// Adds the piece to what is not sent yet, and sends every full part there is then.
+    async fn write(&mut self, piece: Bytes) -> Result<(), ArtifactError> {
+        if self.has_lost_a_part {
+            return Err(self.lost_a_part());
+        }
+        self.unsent.extend_from_slice(&piece);
+        while self.unsent.len() >= self.store.upload_part_bytes {
+            let part = self.unsent.split_to(self.store.upload_part_bytes).freeze();
+            self.send_part(part).await?;
+        }
+        Ok(())
+    }
+
+    /// Sends what is left as the last part and completes the multipart upload; or, if no part was ever
+    /// full, stores the whole object with one `PUT`.
+    ///
+    /// A completion that fails tells the service to drop the parts before it returns: the upload ends
+    /// here either way, and nobody could abort it afterwards.
+    async fn complete(mut self: Box<Self>) -> Result<(), ArtifactError> {
+        let completed = self.try_to_complete().await;
+        if completed.is_ok() {
+            // The parts are the object now. Nothing is left that a drop would have to abort.
+            self.multipart = None;
+            return Ok(());
+        }
+        // The failure of the completion is what the caller must hear, whatever the abort says.
+        let _aborted = self.drop_the_parts().await;
+        completed
+    }
+
+    /// Tells the service to drop the parts it was sent. An upload that never sent a part has nothing
+    /// there.
+    async fn abort(mut self: Box<Self>) -> Result<(), ArtifactError> {
+        self.drop_the_parts().await
+    }
+}
+
+impl Drop for S3Upload {
+    /// Aborts an upload that was dropped while the service holds parts of it: one whose caller failed
+    /// and did not abort it, or was itself given up on half way, as a request that is cancelled.
+    ///
+    /// A drop cannot wait for the service, so the abort runs in a task of its own and nobody hears how
+    /// it went. Without a runtime to run it, for example while the process shuts down, the parts stay
+    /// for the lifecycle rule of the bucket, as they do when the process dies.
+    fn drop(&mut self) {
+        let Some(mut multipart) = self.multipart.take() else {
+            return;
+        };
+        let Ok(runtime) = Handle::try_current() else {
+            return;
+        };
+        let request_timeout = self.store.request_timeout;
+        runtime.spawn(async move {
+            let _aborted = timeout(request_timeout, multipart.abort()).await;
+        });
+    }
+}
+
 #[async_trait]
 impl ArtifactStore for S3ArtifactStore {
     async fn put_object(&self, object_key: &str, contents: Bytes) -> Result<(), ArtifactError> {
         let location = self.location_of(object_key)?;
         let request = self.store_at(&location, object_key, contents);
         self.within_deadline("store", object_key, request).await
+    }
+
+    /// Sends nothing yet: the service hears of the upload when its first part is full, or when it is
+    /// completed.
+    async fn start_upload(&self, object_key: &str) -> Result<Box<dyn ObjectUpload>, ArtifactError> {
+        let location = self.location_of(object_key)?;
+        Ok(Box::new(S3Upload {
+            store: self.clone(),
+            location,
+            object_key: object_key.to_owned(),
+            unsent: BytesMut::new(),
+            multipart: None,
+            has_lost_a_part: false,
+        }))
     }
 
     async fn get_object(&self, object_key: &str) -> Result<Bytes, ArtifactError> {

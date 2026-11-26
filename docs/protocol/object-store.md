@@ -39,3 +39,23 @@ agree on where they are:
 A file below `objects/` is a whole object: it is written below `scratch/`,
 flushed, and renamed into place. A reader opens `objects/<object key>` and
 never looks at `scratch/`.
+
+## Objects that are being written
+
+An object is under its key when it is complete, and not before. A small
+object is stored with one request. A large one, such as a tiered segment,
+is handed to the store piece by piece, and what the store holds meanwhile
+is not an object: no read finds it and no listing shows it.
+
+| Store | What a write in progress is | What a writer that died leaves |
+| --- | --- | --- |
+| Local directory | A file below `scratch/` | That file. A program that opens the directory removes scratch files that were not touched for a day |
+| S3 | The parts of a multipart upload, 8 MiB each | Those parts. Only the service can remove them |
+
+In a bucket, the parts of a multipart upload that was never completed are
+kept, and billed, until the upload is aborted. A writer aborts the upload
+when it gives up; one that died cannot. The bucket therefore needs a
+lifecycle rule that aborts incomplete multipart uploads
+(`AbortIncompleteMultipartUpload`); `docs/operations/README.md` gives one.
+Nothing in a cluster lists or removes them, and nothing breaks while they
+are there: they are no object of any key.

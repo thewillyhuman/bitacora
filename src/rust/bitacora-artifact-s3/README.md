@@ -27,6 +27,27 @@ thinking is, because they disagree where it matters to callers:
 | A listing prefix | Whole path components | Characters | Lists the directory the prefix names and keeps the keys that start with the prefix |
 | Deleting a missing object | Depends on the service | Succeeds | Succeeds |
 | A missing bucket | `404`, like a missing object | An outage | Reads the error code in the answer and reports `Unavailable` |
+| An object handed over in pieces | A multipart upload: parts of at least 5 MiB except the last, at most 10,000 of them | Pieces of any size | Gathers the pieces into parts of 8 MiB and sends each when it is full; an object below one part is one plain `PUT` |
+
+An upload keeps what it was handed since the last full part, which is less
+than 8 MiB once a piece has been taken, and sends one part at a time. That
+is the whole of its memory, whatever the size of the object: a segment of
+1 GiB is 128 parts. The object is in the bucket when the service has
+completed the multipart upload and not before. An upload that lost a part
+refuses to go on, so that an object with a hole in it is never completed.
+
+The service keeps the parts of a multipart upload until it is completed or
+aborted. The store therefore aborts every upload that ends any other way
+than by a completion: one that is aborted, one whose completion fails, and
+one that is dropped, which is what happens when the request it serves is
+cancelled. A drop cannot wait, so that abort runs in a task of its own.
+
+One thing only the service can do. A multipart upload whose process died,
+or whose abort did not reach the service, leaves its parts in the bucket:
+no listing shows them, and they are billed.
+**Give the bucket a lifecycle rule that aborts incomplete multipart uploads
+after a day or more** (`AbortIncompleteMultipartUpload` with
+`DaysAfterInitiation`); `docs/operations/README.md` has the rule.
 
 `s3.rs` builds the S3 client from `S3Settings`: timeouts, bounded retries
 (two, for server errors and broken connections), one plain `DELETE` per
@@ -49,7 +70,13 @@ of it for nothing. See `docs/decisions/0005-s3-backend.md`.
 - The store behaves like every other artifact store. It passes
   `bitacora_artifact::contract::check` over an in-memory service and against
   a real S3 server.
-- No operation outlives `S3Settings::request_timeout`.
+- No operation outlives `S3Settings::request_timeout`. For an upload, each
+  part and the completion are one operation each.
+- An upload holds less than one part of 8 MiB between two pieces, and every
+  part but the last has exactly that size.
+- An upload that could not send a part is never completed.
+- An upload that sent a part and does not end in a completion asks the
+  service to drop its parts, once.
 - A setting always wins over an environment variable about the same thing.
 - A missing bucket is never reported as a missing object (one documented
   exception: an empty range, which is answered from a `HEAD`).
@@ -90,9 +117,13 @@ bitacora-artifact  <-  bitacora-artifact-s3  <-  binaries
 
 ## Not covered
 
-- Uploads in several parts. An object is stored with one `PUT`, so it is held
-  in memory and cannot exceed S3's limit of 5 GiB for a single request. The
-  design lists a streaming upload as future work.
+- Parts sent side by side. An upload sends one part at a time, which keeps
+  its memory at one part and costs throughput on a fast link.
+- An object given to `put_object` is still one `PUT`: it is held in memory by
+  its caller and cannot exceed S3's limit of 5 GiB for a single request.
+  Large objects go through `start_upload`.
+- Removing the parts of multipart uploads that were never finished. That is
+  the bucket's lifecycle rule, see above.
 - Server-side encryption settings and object versioning. A bucket's own
   default encryption applies as usual.
 - Listing by characters costs a listing of the whole directory the prefix

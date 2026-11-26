@@ -9,14 +9,20 @@
 //! - Listings by characters on top of a client that lists by path components, and the rule that picks the
 //!   directory to ask the client for.
 //! - A service that fails or never answers is reported as unavailable, within the request timeout.
+//! - Uploads: which requests an object costs (one `PUT` below a part; otherwise parts of one size and a
+//!   shorter last one), that less than a part is held back between pieces, what an abort asks of the
+//!   service, and that an upload which lost a part is never completed.
 //!
 //! # How the fixtures work
 //!
 //! The store under test runs over `object_store`'s in-memory store, which has the semantics of S3 for
 //! everything this file translates. [`BrokenService`] is a client whose every request fails in one named
-//! way. The tests against a real S3 server are in `tests/s3/`.
+//! way. [`RecordingService`] is the in-memory store with a list of what was asked of it to store an
+//! object, and can lose one part; the stores over it send parts of [`SMALL_PART_BYTES`], so that a line of
+//! text is several parts. The tests against a real S3 server are in `tests/s3/`.
 
 use std::fmt;
+use std::sync::Mutex;
 
 use bitacora_artifact::contract;
 use futures_util::stream::{self, BoxStream};
@@ -38,7 +44,221 @@ fn store() -> S3ArtifactStore {
 /// A store over `service` that keeps its objects under `key_prefix`.
 fn store_in(service: &Arc<InMemory>, key_prefix: &str) -> S3ArtifactStore {
     let object_store: Arc<dyn ObjectStore> = Arc::<InMemory>::clone(service);
-    S3ArtifactStore::over(object_store, key_prefix, REQUEST_TIMEOUT)
+    S3ArtifactStore::over(object_store, key_prefix, REQUEST_TIMEOUT, UPLOAD_PART_BYTES)
+}
+
+/// The part size of the stores in the tests of uploads: small, so that a few bytes make several parts.
+const SMALL_PART_BYTES: usize = 10;
+
+/// One thing a store asked of a [`RecordingService`] while it stored an object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoreRequest {
+    /// A whole object in one request.
+    Put {
+        /// The size of the object.
+        object_bytes: usize,
+    },
+    /// The start of a multipart upload.
+    OpenMultipart,
+    /// One part of a multipart upload.
+    Part {
+        /// The size of the part.
+        part_bytes: usize,
+    },
+    /// The request that makes the parts of a multipart upload the object.
+    CompleteMultipart,
+    /// The request that makes the service drop the parts of a multipart upload.
+    AbortMultipart,
+}
+
+/// What a [`RecordingService`] and its multipart uploads share.
+#[derive(Debug, Default)]
+struct Recording {
+    /// What was asked so far, in order.
+    requests: Vec<StoreRequest>,
+    /// How many parts were sent so far, over all uploads.
+    parts_sent: usize,
+}
+
+/// An in-memory service that writes down how objects are stored in it, and can lose one part.
+#[derive(Debug)]
+struct RecordingService {
+    /// The service that does the work.
+    service: InMemory,
+    /// What was asked of the service.
+    recording: Arc<Mutex<Recording>>,
+    /// Which part fails to arrive, counted from zero over all uploads; `None` for a service that takes
+    /// every part.
+    lost_part_number: Option<usize>,
+}
+
+impl RecordingService {
+    /// A service that takes everything, or loses the part with the given number.
+    fn losing(lost_part_number: Option<usize>) -> Self {
+        Self {
+            service: InMemory::new(),
+            recording: Arc::new(Mutex::new(Recording::default())),
+            lost_part_number,
+        }
+    }
+}
+
+impl fmt::Display for RecordingService {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RecordingService")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for RecordingService {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        record(
+            &self.recording,
+            StoreRequest::Put {
+                object_bytes: payload.content_length(),
+            },
+        );
+        self.service.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        record(&self.recording, StoreRequest::OpenMultipart);
+        let multipart = self.service.put_multipart_opts(location, options).await?;
+        Ok(Box::new(RecordingMultipart {
+            multipart,
+            recording: Arc::clone(&self.recording),
+            lost_part_number: self.lost_part_number,
+        }))
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
+        self.service.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.service.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.service.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.service.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
+        self.service.copy_opts(from, to, options).await
+    }
+}
+
+/// A multipart upload of a [`RecordingService`].
+#[derive(Debug)]
+struct RecordingMultipart {
+    /// The multipart upload of the service that does the work.
+    multipart: Box<dyn MultipartUpload>,
+    /// What was asked of the service.
+    recording: Arc<Mutex<Recording>>,
+    /// Which part fails to arrive, as in the service.
+    lost_part_number: Option<usize>,
+}
+
+#[async_trait]
+impl MultipartUpload for RecordingMultipart {
+    fn put_part(&mut self, payload: PutPayload) -> UploadPart {
+        let part_number = {
+            let mut recording = self.recording.lock().expect("no test panics while it records");
+            recording.requests.push(StoreRequest::Part {
+                part_bytes: payload.content_length(),
+            });
+            recording.parts_sent += 1;
+            recording.parts_sent - 1
+        };
+        if self.lost_part_number == Some(part_number) {
+            return Box::pin(std::future::ready(Err(server_error())));
+        }
+        self.multipart.put_part(payload)
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        record(&self.recording, StoreRequest::CompleteMultipart);
+        self.multipart.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        record(&self.recording, StoreRequest::AbortMultipart);
+        self.multipart.abort().await
+    }
+}
+
+/// Writes down one request.
+fn record(recording: &Mutex<Recording>, request: StoreRequest) {
+    recording
+        .lock()
+        .expect("no test panics while it records")
+        .requests
+        .push(request);
+}
+
+/// A store that sends parts of [`SMALL_PART_BYTES`], and the record of what it asked of its service.
+struct RecordedStore {
+    /// The store under test.
+    store: S3ArtifactStore,
+    /// What the store asked of the service.
+    recording: Arc<Mutex<Recording>>,
+}
+
+impl RecordedStore {
+    /// What the store asked of the service so far, in order.
+    fn requests(&self) -> Vec<StoreRequest> {
+        self.recording
+            .lock()
+            .expect("no test panics while it records")
+            .requests
+            .clone()
+    }
+}
+
+/// A store with small parts over a recording service that loses the part with the given number, if any.
+fn recorded_store_losing(lost_part_number: Option<usize>) -> RecordedStore {
+    let service = RecordingService::losing(lost_part_number);
+    let recording = Arc::clone(&service.recording);
+    RecordedStore {
+        store: S3ArtifactStore::over(Arc::new(service), "", REQUEST_TIMEOUT, SMALL_PART_BYTES),
+        recording,
+    }
+}
+
+/// A store with small parts over a recording service that takes every part.
+fn recorded_store() -> RecordedStore {
+    recorded_store_losing(None)
+}
+
+/// Starts an upload to `streams/7/segments/3` and hands it `pieces` in order.
+async fn upload_of(store: &S3ArtifactStore, pieces: &[&'static [u8]]) -> Box<dyn ObjectUpload> {
+    let mut upload = store
+        .start_upload("streams/7/segments/3")
+        .await
+        .expect("an upload to a valid key starts");
+    for piece in pieces {
+        upload
+            .write(Bytes::from_static(piece))
+            .await
+            .expect("the service takes the piece");
+    }
+    upload
 }
 
 /// Stores `contents` under `object_key`.
@@ -150,9 +370,10 @@ impl ObjectStore for BrokenService {
     }
 }
 
-/// A store over a service with the given fault.
+/// A store over a service with the given fault. Its parts are small, so that an upload reaches the
+/// service with its first few bytes.
 fn store_over_broken_service(fault: ServiceFault) -> S3ArtifactStore {
-    S3ArtifactStore::over(Arc::new(BrokenService { fault }), "", REQUEST_TIMEOUT)
+    S3ArtifactStore::over(Arc::new(BrokenService { fault }), "", REQUEST_TIMEOUT, SMALL_PART_BYTES)
 }
 
 /// Whether `outcome` is an `Unavailable` error.
@@ -724,4 +945,329 @@ fn directory_with_an_empty_component_cannot_be_addressed() {
     let directory = directory_holding("streams//segments/0000");
 
     assert!(directory.is_err(), "{directory:?}");
+}
+
+// Uploads.
+
+/// The contract's large object is 20 MiB, which is three parts for a store as it is opened. Here it is
+/// several hundred, so the gathering of pieces into parts is held to the contract as well.
+#[tokio::test]
+async fn store_with_small_parts_honours_the_artifact_store_contract() {
+    let parts_of_64_kibibytes = 64 * 1024;
+    let store = S3ArtifactStore::over(Arc::new(InMemory::new()), "", REQUEST_TIMEOUT, parts_of_64_kibibytes);
+
+    contract::check(&store).await;
+}
+
+#[tokio::test]
+async fn object_smaller_than_a_part_is_stored_with_one_request() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"12345", b"6789"]).await;
+
+    upload.complete().await.expect("the service stores the object");
+
+    assert_eq!(recorded.requests(), [StoreRequest::Put { object_bytes: 9 }]);
+}
+
+/// Twenty-five bytes in pieces that do not fit the parts: two full parts go out while the pieces come in,
+/// and the rest goes out as the last part when the upload is completed.
+#[tokio::test]
+async fn upload_is_sent_in_parts_of_one_size_and_a_shorter_last_one() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"1234567", b"890abcdefghi", b"jklmno"]).await;
+
+    upload.complete().await.expect("the service stores the object");
+
+    assert_eq!(
+        recorded.requests(),
+        [
+            StoreRequest::OpenMultipart,
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::Part { part_bytes: 5 },
+            StoreRequest::CompleteMultipart,
+        ]
+    );
+}
+
+/// The bound on what an upload keeps in memory: once a piece has been taken, every full part of what was
+/// handed over is with the service, so less than a part is held back.
+#[tokio::test]
+async fn upload_holds_back_less_than_a_part_between_pieces() {
+    let recorded = recorded_store();
+
+    let _upload = upload_of(&recorded.store, &[b"1234567", b"890abcdefghi", b"jklmno"]).await;
+
+    assert_eq!(
+        recorded.requests(),
+        [
+            StoreRequest::OpenMultipart,
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::Part { part_bytes: 10 },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn piece_of_several_parts_is_sent_as_whole_parts_at_once() {
+    let recorded = recorded_store();
+
+    let _upload = upload_of(&recorded.store, &[b"1234567890abcdefghijklmnopqrstuvwxy"]).await;
+
+    assert_eq!(
+        recorded.requests(),
+        [
+            StoreRequest::OpenMultipart,
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::Part { part_bytes: 10 },
+        ]
+    );
+}
+
+/// An object that ends exactly at a part has no shorter last part: an empty one would be refused by a
+/// real service.
+#[tokio::test]
+async fn object_of_whole_parts_is_completed_without_an_empty_last_part() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"1234567890", b"abcdefghij"]).await;
+
+    upload.complete().await.expect("the service stores the object");
+
+    assert_eq!(
+        recorded.requests(),
+        [
+            StoreRequest::OpenMultipart,
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::CompleteMultipart,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn object_sent_in_parts_is_read_back_whole() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"1234567", b"890abcdefghi", b"jklmno"]).await;
+
+    upload.complete().await.expect("the service stores the object");
+
+    assert_eq!(
+        recorded.store.get_object("streams/7/segments/3").await,
+        Ok(Bytes::from_static(b"1234567890abcdefghijklmno"))
+    );
+}
+
+#[tokio::test]
+async fn aborted_upload_tells_the_service_to_drop_its_parts() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"1234567890abc"]).await;
+
+    upload.abort().await.expect("the service drops the parts");
+
+    assert_eq!(
+        recorded.requests(),
+        [
+            StoreRequest::OpenMultipart,
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::AbortMultipart,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn aborted_upload_that_sent_no_part_asks_nothing_of_the_service() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"12345"]).await;
+
+    upload.abort().await.expect("there is nothing to drop");
+
+    assert_eq!(recorded.requests(), []);
+}
+
+#[tokio::test]
+async fn piece_that_fills_a_part_the_service_loses_is_refused() {
+    let recorded = recorded_store_losing(Some(0));
+    let mut upload = upload_of(&recorded.store, &[b"12345"]).await;
+
+    let written = upload.write(Bytes::from_static(b"67890")).await;
+
+    assert!(is_unavailable(&written), "{written:?}");
+}
+
+#[tokio::test]
+async fn upload_that_lost_a_part_takes_no_more_pieces() {
+    let recorded = recorded_store_losing(Some(0));
+    let mut upload = upload_of(&recorded.store, &[b"12345"]).await;
+    let _lost_part = upload.write(Bytes::from_static(b"67890")).await;
+
+    let written = upload.write(Bytes::from_static(b"abcde")).await;
+
+    assert!(is_unavailable(&written), "{written:?}");
+}
+
+/// The service holds a part less than the upload was handed. Completing would make an object with a hole
+/// in it, under a key that a reader trusts.
+#[tokio::test]
+async fn upload_that_lost_a_part_is_never_completed() {
+    let recorded = recorded_store_losing(Some(1));
+    let mut upload = upload_of(&recorded.store, &[b"1234567890abc"]).await;
+    let _lost_part = upload.write(Bytes::from_static(b"defghijklm")).await;
+
+    let completed = upload.complete().await;
+
+    assert!(is_unavailable(&completed), "{completed:?}");
+    assert!(!recorded.requests().contains(&StoreRequest::CompleteMultipart));
+}
+
+#[tokio::test]
+async fn upload_that_lost_its_last_part_is_not_completed() {
+    let recorded = recorded_store_losing(Some(1));
+    let upload = upload_of(&recorded.store, &[b"1234567890abc"]).await;
+
+    let completed = upload.complete().await;
+
+    assert!(is_unavailable(&completed), "{completed:?}");
+    assert!(!recorded.requests().contains(&StoreRequest::CompleteMultipart));
+}
+
+/// A completion takes the upload with it, so nobody could abort it afterwards: the completion that fails
+/// does it itself.
+#[tokio::test]
+async fn completion_that_fails_tells_the_service_to_drop_the_parts() {
+    let recorded = recorded_store_losing(Some(1));
+    let upload = upload_of(&recorded.store, &[b"1234567890abc"]).await;
+
+    let _failed = upload.complete().await;
+
+    assert_eq!(
+        recorded.requests(),
+        [
+            StoreRequest::OpenMultipart,
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::Part { part_bytes: 3 },
+            StoreRequest::AbortMultipart,
+        ]
+    );
+}
+
+/// What happens to an upload whose caller was itself given up on, for example a request that was
+/// cancelled. A drop cannot wait, so the abort runs in a task of its own; the test lets it run.
+#[tokio::test]
+async fn upload_dropped_after_it_sent_a_part_tells_the_service_to_drop_its_parts() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"1234567890abc"]).await;
+
+    drop(upload);
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        recorded.requests(),
+        [
+            StoreRequest::OpenMultipart,
+            StoreRequest::Part { part_bytes: 10 },
+            StoreRequest::AbortMultipart,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn upload_dropped_before_it_sent_a_part_asks_nothing_of_the_service() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"12345"]).await;
+
+    drop(upload);
+    tokio::task::yield_now().await;
+
+    assert_eq!(recorded.requests(), []);
+}
+
+#[tokio::test]
+async fn completed_upload_is_not_aborted_when_it_is_dropped() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"1234567890abc"]).await;
+
+    upload.complete().await.expect("the service stores the object");
+    tokio::task::yield_now().await;
+
+    assert!(!recorded.requests().contains(&StoreRequest::AbortMultipart));
+}
+
+#[tokio::test]
+async fn aborted_upload_is_aborted_once() {
+    let recorded = recorded_store();
+    let upload = upload_of(&recorded.store, &[b"1234567890abc"]).await;
+
+    upload.abort().await.expect("the service drops the parts");
+    tokio::task::yield_now().await;
+
+    let aborts = recorded
+        .requests()
+        .into_iter()
+        .filter(|request| *request == StoreRequest::AbortMultipart)
+        .count();
+    assert_eq!(aborts, 1);
+}
+
+/// An upload can be dropped where no runtime is left to run the abort, for example while a process shuts
+/// down. Then the parts stay for the bucket's lifecycle rule, and the drop must still be quiet.
+#[test]
+fn upload_dropped_outside_a_runtime_is_dropped_quietly() {
+    let recorded = recorded_store();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a runtime with a clock can be built");
+    let upload = runtime.block_on(upload_of(&recorded.store, &[b"1234567890abc"]));
+    drop(runtime);
+
+    drop(upload);
+
+    assert!(!recorded.requests().contains(&StoreRequest::AbortMultipart));
+}
+
+#[tokio::test]
+async fn failing_service_makes_the_first_part_of_an_upload_unavailable() {
+    let store = store_over_broken_service(ServiceFault::FailsEveryRequest);
+    let mut upload = store.start_upload("a").await.expect("starting an upload sends nothing");
+
+    let outcome = upload.write(Bytes::from_static(b"1234567890")).await;
+
+    assert!(is_unavailable(&outcome), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn failing_service_makes_the_completion_of_a_small_upload_unavailable() {
+    let store = store_over_broken_service(ServiceFault::FailsEveryRequest);
+    let upload = upload_of(&store, &[b"12345"]).await;
+
+    let outcome = upload.complete().await;
+
+    assert!(is_unavailable(&outcome), "{outcome:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn part_sent_to_a_service_that_never_answers_fails_at_the_request_timeout() {
+    let store = store_over_broken_service(ServiceFault::NeverAnswers);
+    let mut upload = store.start_upload("a").await.expect("starting an upload sends nothing");
+    let asked_at = tokio::time::Instant::now();
+
+    let outcome = upload.write(Bytes::from_static(b"1234567890")).await;
+
+    assert!(is_unavailable(&outcome), "{outcome:?}");
+    assert_eq!(asked_at.elapsed(), REQUEST_TIMEOUT);
+}
+
+#[tokio::test]
+async fn upload_to_a_key_with_a_control_character_is_refused() {
+    let outcome = store().start_upload("reports/a\u{7}b").await;
+
+    assert!(matches!(outcome, Err(ArtifactError::InvalidKey { .. })));
+}
+
+#[tokio::test]
+async fn store_never_sends_a_part_of_no_bytes() {
+    let store = S3ArtifactStore::over(Arc::new(InMemory::new()), "", REQUEST_TIMEOUT, 0);
+
+    assert_eq!(store.upload_part_bytes, 1);
 }
