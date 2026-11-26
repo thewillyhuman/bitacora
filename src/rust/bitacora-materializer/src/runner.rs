@@ -13,7 +13,9 @@
 //! - [`MaterializerRunner`]: takes a materializer over, restores it and runs it.
 //! - [`RunnerDependencies`] and [`RunnerSettings`]: what a runner is built from.
 //! - [`RunnerProgress`] and [`Progress`]: where a runner is, readable from any task without waiting.
-//! - [`RunnerError`] and [`RunnerStopped`]: why a runner stopped.
+//! - [`RunnerError`] and [`RunnerStopped`]: why a runner stopped. A progress handle gives the reason
+//!   to whoever waits on the runner ([`RunnerProgress::stop_reason`]), so that a front end does not have
+//!   to carry it out of the runner's task by itself.
 //!
 //! # How it works
 //!
@@ -54,7 +56,7 @@
 //! - `sweeper.rs`: the deletion of artifacts no manifest names.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bitacora_artifact::ArtifactStore;
@@ -161,9 +163,24 @@ pub enum RunnerError {
 }
 
 /// The runner whose progress was being watched has stopped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
-#[error("the materializer runner has stopped")]
-pub struct RunnerStopped;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunnerStopped {
+    /// Why the runner stopped: what [`MaterializerRunner::run`] returned. `None` if the runner did not
+    /// stop by itself: its task was cancelled, or it was dropped before it ran.
+    pub reason: Option<RunnerError>,
+}
+
+impl std::fmt::Display for RunnerStopped {
+    /// Says that the runner stopped and, if it is known, why.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.reason {
+            Some(reason) => write!(formatter, "the materializer runner has stopped: {reason}"),
+            None => write!(formatter, "the materializer runner was stopped from outside"),
+        }
+    }
+}
+
+impl std::error::Error for RunnerStopped {}
 
 /// Where a runner is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +221,8 @@ impl Progress {
 pub struct RunnerProgress {
     /// The receiving end of the channel the runner publishes its progress on.
     receiver: watch::Receiver<Progress>,
+    /// Why the runner stopped, once it has. The runner writes it before it lets go of the channel.
+    stop_reason: Arc<OnceLock<RunnerError>>,
 }
 
 impl RunnerProgress {
@@ -211,6 +230,25 @@ impl RunnerProgress {
     #[must_use]
     pub fn latest(&self) -> Progress {
         *self.receiver.borrow()
+    }
+
+    /// Why the runner stopped.
+    ///
+    /// # Returns
+    ///
+    /// What [`MaterializerRunner::run`] returned, from the moment it returns. `None` while the runner
+    /// runs, and for a runner that did not stop by itself: one whose task was cancelled, or that was
+    /// dropped before it ran.
+    #[must_use]
+    pub fn stop_reason(&self) -> Option<RunnerError> {
+        self.stop_reason.get().cloned()
+    }
+
+    /// The error for a waiter whose runner let go of the progress channel.
+    fn stopped(&self) -> RunnerStopped {
+        RunnerStopped {
+            reason: self.stop_reason(),
+        }
     }
 
     /// Waits until the runner has applied the record at `sequence`.
@@ -221,17 +259,15 @@ impl RunnerProgress {
     ///
     /// # Errors
     ///
-    /// Returns [`RunnerStopped`] if the runner stopped before it got there. The caller bounds the wait
-    /// with a timeout if the record may never be committed.
+    /// Returns [`RunnerStopped`], with the reason, if the runner stopped before it got there. The caller
+    /// bounds the wait with a timeout if the record may never be committed.
     pub async fn wait_until_applied(&mut self, sequence: SequenceNumber) -> Result<Progress, RunnerStopped> {
         let reached = self
             .receiver
             .wait_for(|progress| progress.applied_sequence >= sequence)
-            .await;
-        match reached {
-            Ok(progress) => Ok(*progress),
-            Err(_sender_dropped) => Err(RunnerStopped),
-        }
+            .await
+            .map(|progress| *progress);
+        reached.map_err(|_sender_dropped| self.stopped())
     }
 
     /// Waits until a checkpoint at or above `sequence` is committed.
@@ -242,16 +278,14 @@ impl RunnerProgress {
     ///
     /// # Errors
     ///
-    /// Returns [`RunnerStopped`] if the runner stopped before it got there.
+    /// Returns [`RunnerStopped`], with the reason, if the runner stopped before it got there.
     pub async fn wait_until_committed(&mut self, sequence: SequenceNumber) -> Result<Progress, RunnerStopped> {
         let reached = self
             .receiver
             .wait_for(|progress| progress.committed_checkpoint >= sequence)
-            .await;
-        match reached {
-            Ok(progress) => Ok(*progress),
-            Err(_sender_dropped) => Err(RunnerStopped),
-        }
+            .await
+            .map(|progress| *progress);
+        reached.map_err(|_sender_dropped| self.stopped())
     }
 }
 
@@ -301,6 +335,8 @@ pub struct MaterializerRunner<M: Materializer> {
     retry_not_before: Instant,
     /// Where progress is published.
     progress: watch::Sender<Progress>,
+    /// Where the reason for stopping is left for the progress handles, before the channel closes.
+    stop_reason: Arc<OnceLock<RunnerError>>,
 }
 
 impl<M: Materializer> MaterializerRunner<M> {
@@ -382,6 +418,7 @@ impl<M: Materializer> MaterializerRunner<M> {
             committed_checkpoint: checkpoint.checkpoint,
             bytes_since_checkpoint: 0,
             progress,
+            stop_reason: Arc::new(OnceLock::new()),
         })
     }
 
@@ -397,6 +434,7 @@ impl<M: Materializer> MaterializerRunner<M> {
     pub fn progress(&self) -> RunnerProgress {
         RunnerProgress {
             receiver: self.progress.subscribe(),
+            stop_reason: Arc::clone(&self.stop_reason),
         }
     }
 
@@ -420,6 +458,15 @@ impl<M: Materializer> MaterializerRunner<M> {
     /// - [`RunnerError::Materializer`]: a record could not be applied, or a checkpoint failed for good.
     /// - [`RunnerError::Read`] or [`RunnerError::StreamEnded`]: the stream was deleted.
     pub async fn run(mut self) -> RunnerError {
+        let reason = self.run_until_stopped().await;
+        // Left for the progress handles before the runner, and with it the progress channel, is dropped:
+        // whoever is woken by the channel closing finds the reason there.
+        drop(self.stop_reason.set(reason.clone()));
+        reason
+    }
+
+    /// Follows the stream, applies and checkpoints until something stops the runner, and returns what.
+    async fn run_until_stopped(&mut self) -> RunnerError {
         loop {
             if let Err(stop) = self.checkpoint_if_due().await {
                 return stop;

@@ -1,0 +1,4 @@
+change_type: breaking
+component: materializer
+note: "RunnerProgress says why its runner stopped: stop_reason returns what run returned, and RunnerStopped carries it to whoever was waiting."
+issues: [6]

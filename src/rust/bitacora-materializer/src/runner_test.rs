@@ -382,8 +382,74 @@ async fn progress_of_a_stopped_runner_reports_that_it_stopped() {
 
     assert_eq!(
         progress.wait_until_applied(SequenceNumber::new(1)).await,
-        Err(RunnerStopped)
+        Err(RunnerStopped { reason: None })
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_of_a_running_runner_has_no_reason_for_stopping() {
+    let harness = Harness::start().await;
+
+    let running = start_and_spawn(&harness, checkpoint_by_time()).await;
+
+    assert_eq!(running.progress.stop_reason(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_of_a_replaced_runner_says_that_it_was_replaced() {
+    let harness = Harness::start().await;
+    let writer = harness.open_writer().await;
+    let replaced = start_and_spawn(&harness, checkpoint_by_time()).await;
+    let progress_of_the_replaced_runner = replaced.progress.clone();
+    let _successor = start_and_spawn(&harness, checkpoint_by_time()).await;
+    append_numbered(&writer, 5).await;
+
+    let returned_by_run = replaced.stopped().await;
+
+    assert_eq!(progress_of_the_replaced_runner.stop_reason(), Some(returned_by_run));
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiter_is_told_why_the_runner_stopped() {
+    let harness = Harness::start().await;
+    let writer = harness.open_writer().await;
+    let replaced = start_and_spawn(&harness, checkpoint_by_time()).await;
+    let mut progress_of_the_replaced_runner = replaced.progress.clone();
+    let _successor = start_and_spawn(&harness, checkpoint_by_time()).await;
+    append_numbered(&writer, 5).await;
+
+    // A checkpoint the replaced runner will never commit.
+    let waited = timeout(
+        PATIENCE,
+        progress_of_the_replaced_runner.wait_until_committed(SequenceNumber::new(5)),
+    )
+    .await
+    .expect("the waiter is woken when the runner stops");
+
+    let fenced = RunnerError::Fenced {
+        held_token: 1,
+        current_token: 2,
+    };
+    assert_eq!(waited, Err(RunnerStopped { reason: Some(fenced) }));
+}
+
+#[test]
+fn stopped_runner_with_a_reason_says_the_reason() {
+    let stopped = RunnerStopped {
+        reason: Some(RunnerError::StreamEnded),
+    };
+
+    assert_eq!(
+        stopped.to_string(),
+        "the materializer runner has stopped: the stream ended"
+    );
+}
+
+#[test]
+fn runner_stopped_from_outside_says_so() {
+    let stopped = RunnerStopped { reason: None };
+
+    assert_eq!(stopped.to_string(), "the materializer runner was stopped from outside");
 }
 
 // ---- checkpointing ----
