@@ -22,21 +22,20 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      # Most of the runner's disk is taken by toolchains this build never
-      # uses. What is left was once not enough for the Bazel caches, the
-      # toolchains Bazel downloads and the outputs of a build: a link step
-      # failed with nothing but an exit status, and only the upload of the
-      # cache afterwards said that the disk was full. Each line this step
-      # prints says what removing one of those toolchains cost and what it
-      # left free, so the list can be kept to what pays for its time.
+      # The runner starts with 16 GB free; the rest of its disk holds
+      # toolchains this build never uses. A build once needed more: a link
+      # step failed with nothing but an exit status, and only the upload of
+      # the cache afterwards said that the disk was full. Removing the
+      # Haskell toolchain frees 4 GB in 5 seconds. If the last step of the
+      # job shows the room shrinking, these are the next candidates, as
+      # measured on this runner image: /usr/share/dotnet (6 GB, 25 s),
+      # /usr/local/lib/android (11 GB, 99 s), /opt/hostedtoolcache/CodeQL
+      # (1 GB, 12 s).
       - name: Free disk space
         run: |
           df -h /
-          for directory in /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android; do
-            started_at="$(date +%s)"
-            sudo rm -rf "${directory}"
-            echo "removed ${directory} in $(($(date +%s) - started_at))s, $(df --output=avail -h / | tail -n 1 | tr -d ' ') free"
-          done
+          sudo rm -rf /usr/local/.ghcup
+          df -h /
       # Restores Bazel itself, the downloaded dependencies and the action
       # cache, so an unchanged crate is neither rebuilt nor retested.
       - uses: bazel-contrib/setup-bazel@0.19.2
