@@ -13,9 +13,11 @@ readonly cluster="development/cluster.sh"
 state="${TEST_TMPDIR:?the test needs a temporary directory}/cluster"
 export BITA_DEV_STATE="${state}"
 # A range of ports nothing else on the machine is likely to use: below the
-# ports the system hands out by itself, and different for tests that run at
-# the same time.
-export BITA_DEV_BASE_PORT="$((20000 + ($$ % 9000)))"
+# ports the system hands out by itself. The cluster uses fewer than forty
+# ports from its base, so the bases are forty apart: two copies of this test
+# that start at the same moment have neighbouring process numbers, and
+# their ranges must not overlap.
+export BITA_DEV_BASE_PORT="$((20000 + ($$ % 225) * 40))"
 
 current_step="nothing yet"
 
