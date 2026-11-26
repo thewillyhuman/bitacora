@@ -6,6 +6,7 @@ message on any other.
 """
 
 exports_files([
+    "metrics_reference.sh",
     "rejection_test.sh",
     "shellcheck_test.sh",
 ])
@@ -73,6 +74,34 @@ alias(
             ":linux_arm64": "@helm_linux_arm64//:helm",
             ":linux_x86_64": "@helm_linux_x86_64//:helm",
             ":macos_arm64": "@helm_macos_arm64//:helm",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# pint, which lints the alert rules and parses the queries of the dashboard.
+alias(
+    name = "pint",
+    actual = select(
+        {
+            ":linux_arm64": "@pint_linux_arm64//:pint-linux-arm64",
+            ":linux_x86_64": "@pint_linux_x86_64//:pint-linux-amd64",
+            ":macos_arm64": "@pint_macos_arm64//:pint-darwin-arm64",
+        },
+        no_match_error = _NO_PINNED_RELEASE,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# jq, which reads the dashboard.
+alias(
+    name = "jq",
+    actual = select(
+        {
+            ":linux_arm64": "@jq_linux_arm64//file",
+            ":linux_x86_64": "@jq_linux_x86_64//file",
+            ":macos_arm64": "@jq_macos_arm64//file",
         },
         no_match_error = _NO_PINNED_RELEASE,
     ),

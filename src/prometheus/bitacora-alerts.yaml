@@ -1,0 +1,281 @@
+# Default alert rules for a bitacora cluster, for Prometheus or any system
+# that reads its rule files.
+#
+# Every alert is written against docs/operations/metrics.md and nothing else,
+# and uses only the labels Prometheus adds to every target: `job` and
+# `instance`. The rules assume one scrape job per bitacora cluster, or one
+# for its replicas and one for its controllers: alerts about a cluster as a
+# whole are grouped by `job`.
+#
+# `severity` is `critical` when durability or the write path is at risk now
+# and a person must act, `warning` when something will become a problem if it
+# is left alone. docs/operations/alerts.md lists every alert with what to do
+# first, and says what these rules cannot see.
+#
+# The thresholds and the texts quote the defaults of the daemons. If you
+# change `refuse_new_segments_at_used_percent`,
+# `refuse_appends_at_used_percent`, `replica_lost_after_seconds`,
+# `liveness_window_seconds` or `registration_interval_seconds`, change the
+# alerts that quote them. alerts_test.sh fails when the shipped defaults move.
+groups:
+  - name: bitacora-replica
+    rules:
+      - alert: BitacoraReplicaFlushSlow
+        expr: |
+          histogram_quantile(0.99, sum by (job, instance, le) (rate(bitacora_disk_flush_duration_seconds_bucket[5m])))
+            > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replica {{ $labels.instance }} takes more than 10 ms to flush"
+          description: >-
+            The 99th percentile of the time replica {{ $labels.instance }} needs to make an append
+            durable has been {{ $value | humanizeDuration }} for 10 minutes. An append waits for the
+            second-fastest flush of its three replicas, so one slow replica is absorbed and two are
+            not: the 10 ms append target is at risk. Look at the disk of this machine (wear, a
+            degraded array, a noisy neighbour, a volume without power-loss protection). If it does
+            not recover, drain the replica with `bita replica drain` and replace the disk.
+
+      - alert: BitacoraReplicaDiskErrors
+        expr: sum by (job, instance) (rate(bitacora_disk_operation_failures_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replica {{ $labels.instance }} gets errors from its disk"
+          description: >-
+            Disk operations on replica {{ $labels.instance }} have been failing for 10 minutes. The
+            `operation` label of `bitacora_disk_operation_failures_total` says which. Check the
+            kernel log, the health of the disk and the permissions of the data directory. A disk
+            that returns errors is about to fail: drain the replica before it does.
+
+      - alert: BitacoraReplicaDiskFilling
+        expr: 1 - bitacora_disk_free_bytes / bitacora_disk_capacity_bytes > 0.80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The disk of replica {{ $labels.instance }} is {{ $value | humanizePercentage }} full"
+          description: >-
+            At 85% a replica takes no new segment, so new segments land on the other replicas and
+            fill them faster. Find out why space is not coming back: is the object store reachable
+            and are segments being tiered and released (`bita segment list <stream>`), does a
+            retention policy or a materializer that stopped checkpointing pin the log, or does the
+            cluster simply need more replicas?
+
+      - alert: BitacoraReplicaDiskAlmostFull
+        expr: 1 - bitacora_disk_free_bytes / bitacora_disk_capacity_bytes > 0.90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The disk of replica {{ $labels.instance }} is {{ $value | humanizePercentage }} full"
+          description: >-
+            At 95% a replica refuses every append. Streams whose segments are on it then roll to
+            other replicas, and when too few replicas have room, appends fail. Add replicas now or
+            free space: check that tiering to the object store works, and truncate what is no
+            longer needed with `bita stream truncate-before`.
+
+      - alert: BitacoraReplicaDamagedCopies
+        expr: bitacora_replica_damaged_segment_copies > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replica {{ $labels.instance }} holds {{ $value }} damaged segment copies"
+          description: >-
+            Copies on replica {{ $labels.instance }} failed a checksum or a flush more than 30
+            minutes ago and have not been replaced. The controller normally rebuilds a damaged copy
+            from a good one within minutes. Check that a controller leads
+            (`bita controller status`) and that the other replicas are alive
+            (`bita replica list`). Damage that keeps appearing on one replica means its disk is
+            failing.
+
+      - alert: BitacoraReplicaRegistrationFailing
+        expr: rate(bitacora_replica_registration_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replica {{ $labels.instance }} fails to renew its registration"
+          description: >-
+            Replica {{ $labels.instance }} could not renew its registration in the metadata store
+            for 5 minutes, at least some of the time. A replica that does not renew for 15 seconds
+            gets no new segments. Check the metadata store alerts and the network between this
+            replica and etcd.
+
+      - alert: BitacoraReplicaNotRegistered
+        expr: increase(bitacora_replica_registrations_total[2m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replica {{ $labels.instance }} has not registered for minutes"
+          description: >-
+            Replica {{ $labels.instance }} runs but has not renewed its registration for more than
+            two minutes. After five minutes without a registration the controller gives the replica
+            up and rebuilds all its copies elsewhere, which is a lot of copying if the replica is in
+            fact healthy. Restore its connection to etcd before that; if the replica is truly lost,
+            let the controller proceed or remove it at once with `bita replica remove`.
+
+  - name: bitacora-metadata-store
+    rules:
+      - alert: BitacoraMetadataStoreUnavailable
+        expr: bitacora_metadata_store_available == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} cannot reach the metadata store"
+          description: >-
+            The last request of {{ $labels.instance }} to etcd failed, and it has stayed that way
+            for a minute. Appends to open segments continue, but nothing that needs the metadata
+            store does: a writer cannot roll to a new segment or take over a stream, replicas cannot
+            register, the controller cannot work. If every instance reports this, etcd is down or
+            has lost its quorum; if one does, look at its network.
+
+      - alert: BitacoraMetadataStoreErrors
+        expr: |
+          sum by (job, instance) (rate(bitacora_metadata_store_request_failures_total[5m]))
+            / sum by (job, instance) (rate(bitacora_metadata_store_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of the metadata store requests of {{ $labels.instance }} fail"
+          description: >-
+            More than 5% of the requests of {{ $labels.instance }} to etcd have failed for 10
+            minutes. etcd answers, but not reliably: look for leader elections, a slow disk or a
+            full database on the etcd members, and for packet loss on the way.
+
+      - alert: BitacoraMetadataStoreSlow
+        expr: |
+          histogram_quantile(0.99, sum by (job, instance, le) (rate(bitacora_metadata_store_request_duration_seconds_bucket[5m])))
+            > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Metadata store requests of {{ $labels.instance }} take {{ $value | humanizeDuration }}"
+          description: >-
+            The 99th percentile of the requests of {{ $labels.instance }} to etcd has been above
+            half a second for 10 minutes. Rolling to a new segment and taking over a stream after a
+            failure both wait for etcd, so writes pause for that long when they happen. Check the
+            disk latency and the load of the etcd members.
+
+  - name: bitacora-object-store
+    rules:
+      - alert: BitacoraObjectStoreUnavailable
+        expr: sum by (job, instance) (rate(bitacora_object_store_request_failures_total{error="unavailable"}[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} cannot use the object store"
+          description: >-
+            Requests of {{ $labels.instance }} to the object store have been failing as unavailable
+            for 15 minutes. Nothing is lost: sealed segments stay on the replicas. But they are not
+            tiered, the disks of the replicas fill, metadata snapshots are not written, and reads of
+            segments that are only in the object store fail. Check the service, the endpoint and
+            the credentials of this process.
+
+      - alert: BitacoraMetadataSnapshotsStopped
+        expr: |
+          increase(bitacora_controller_metadata_snapshots_written_total[30m]) == 0
+            and on (job, instance) bitacora_controller_leading == 1
+            and on (job, instance) count by (job, instance) (bitacora_object_store_requests_total) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No snapshot of the metadata store has been written for 30 minutes"
+          description: >-
+            The leading controller {{ $labels.instance }} uses an object store but has not written a
+            snapshot of the metadata store there for 30 minutes; it writes one every five. The
+            snapshots are what `bita metadata restore` restores if etcd is lost, so the cluster is
+            losing its fallback. See the object store alerts, and list what exists with
+            `bita metadata snapshot list`.
+
+  - name: bitacora-controller
+    rules:
+      - alert: BitacoraControllerAbsent
+        expr: absent(bitacora_controller_leading)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No bitacora controller reports metrics"
+          description: >-
+            Prometheus has had no controller metrics for 5 minutes: no controller runs, or none is
+            scraped. Without a controller, streams keep appending and reading, but no standby
+            segment is placed, no copy is repaired, nothing is tiered and nothing is deleted. Rolls
+            stop when the standby segments run out. Start the controllers, or fix the scrape
+            configuration.
+
+      - alert: BitacoraControllerNoLeader
+        expr: sum by (job) (bitacora_controller_leading) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No bitacora controller leads"
+          description: >-
+            Controllers run but none has led for 2 minutes, so nobody looks after the cluster: no
+            standby segment is placed, no copy is repaired, nothing is tiered and nothing is
+            deleted. Appends and reads continue; rolls stop when the standby segments run out. A
+            controller that cannot lead cannot reach the metadata store: see
+            `bita controller status` and the metadata store alerts.
+
+      - alert: BitacoraControllerRoundsFailing
+        expr: rate(bitacora_controller_round_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rounds of controller {{ $labels.instance }} fail"
+          description: >-
+            Controller {{ $labels.instance }} has had rounds fail for 5 minutes because it could not
+            use the metadata store. If it is the leader it will lose the leadership and another
+            instance takes over; if all of them report this, see the metadata store alerts.
+
+      - alert: BitacoraControllerStreamErrors
+        expr: rate(bitacora_controller_stream_errors_total[10m]) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Controller {{ $labels.instance }} cannot fully handle some streams"
+          description: >-
+            For 30 minutes every pass of controller {{ $labels.instance }} has left work undone on
+            at least one stream and retried it on the next. Its log names the stream and the
+            reason, usually a replica that does not answer or an object store that refuses. Until
+            it is fixed, that stream is not repaired, tiered or cleaned up.
+
+      - alert: BitacoraSegmentsMissingCopies
+        expr: max by (job) (bitacora_controller_segments_missing_copies) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} sealed segments have fewer good copies than they should"
+          description: >-
+            For 15 minutes, longer than a repair normally takes, sealed segments have had fewer good
+            copies than their stream asks for. The data is still there but with less redundancy.
+            Check that enough replicas are alive and have room (`bita replica list`): the
+            controller needs a replica in another failure domain to rebuild a copy on. Find the
+            segments with `bita segment list <stream>`.
+
+      - alert: BitacoraSegmentsMissingCopiesForLong
+        expr: max by (job) (bitacora_controller_segments_missing_copies) > 0
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} sealed segments have been short of good copies for an hour"
+          description: >-
+            Repair is not making progress: sealed segments have had fewer good copies than their
+            stream asks for during a whole hour. One more failure in the wrong place loses data.
+            Bring back the missing replicas or add new ones in another failure domain, and check
+            that the controller leads and that its log shows no error for the affected streams.

@@ -1,0 +1,74 @@
+"""The Grafana dashboard, and the tests that check it without a Grafana or a Prometheus server."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
+
+# What dashboard_test.sh checks the dashboard with and against.
+_CHECKED_AGAINST = {
+    "JQ": "//hack/tools:jq",
+    "METRICS_LIBRARY": "//hack/tools:metrics_reference.sh",
+    "METRICS_REFERENCE": "//docs:operations/metrics.md",
+    "PINT": "//hack/tools:pint",
+}
+
+_CHECK_ENVIRONMENT = {
+    variable: "$(rootpath {})".format(label)
+    for variable, label in _CHECKED_AGAINST.items()
+}
+
+# The dashboard read panel by panel: each can be understood and laid out,
+# each query is PromQL, selects the chosen cluster and uses the metrics of
+# the reference, and every metric of the reference is on the dashboard.
+sh_test(
+    name = "dashboard_test",
+    size = "small",
+    srcs = ["dashboard_test.sh"],
+    data = ["bitacora-dashboard.json"] + _CHECKED_AGAINST.values(),
+    env = _CHECK_ENVIRONMENT | {"DASHBOARD": "$(rootpath bitacora-dashboard.json)"},
+)
+
+# The dashboard with one mistake of each kind the checker looks for: a metric
+# and a label value that do not exist, a panel without description, a panel
+# id used twice, a query that leaves the job out, a metric that no panel
+# shows any more, a query that is not PromQL, and a panel tied to one data
+# source.
+genrule(
+    name = "broken_dashboard",
+    srcs = ["bitacora-dashboard.json"],
+    outs = ["broken/bitacora-dashboard.json"],
+    cmd = """sed \\
+        -e 's/bitacora_disk_written_bytes_total/bitacora_disk_bytes_written_total/' \\
+        -e 's/operation=\\\\"append\\\\"/operation=\\\\"write\\\\"/' \\
+        -e '/"title": "Draining replicas"/,/"targets"/{/"description":/d;}' \\
+        -e 's/^      "id": 4,$$/      "id": 3,/' \\
+        -e 's/max(bitacora_controller_segments_missing_copies{job=~\\\\"$$job\\\\"})\\(",\\)$$/max(bitacora_controller_segments_missing_copies)\\1/' \\
+        -e 's/bitacora_replica_scrubs_total/bitacora_replica_segment_copies/' \\
+        -e 's/sum(bitacora_replica_damaged_segment_copies{job=~\\\\"$$job\\\\"})/sum(bitacora_replica_damaged_segment_copies{job=~\\\\"$$job\\\\"}/' \\
+        -e '/"title": "Who leads"/,/"gridPos"/!b' -e 's/"uid": "$${datasource}"/"uid": "prometheus-prod"/' \\
+        $< >$@""",
+)
+
+# The checker must fail on the broken dashboard and name every mistake in it.
+rejection_test(
+    name = "dashboard_rejection_test",
+    args = [],
+    checker = "dashboard_test.sh",
+    data = [":broken_dashboard"] + _CHECKED_AGAINST.values(),
+    env = _CHECK_ENVIRONMENT | {"DASHBOARD": "$(rootpath :broken_dashboard)"},
+    findings = [
+        "panel id 3 is used 2 times",
+        "the panel \"Draining replicas\" has no description",
+        "the panel \"Who leads\" does not use the data source chosen at the top",
+        "a query of the panel \"Segments missing copies\" does not select the job for every metric",
+        "the dashboard uses bitacora_disk_bytes_written_total, which docs/operations/metrics.md does not list",
+        "the dashboard selects operation=\"write\", a value docs/operations/metrics.md does not have",
+        "no panel shows bitacora_replica_scrubs_total, which docs/operations/metrics.md lists",
+        "a query of the dashboard is not valid PromQL",
+        "unclosed left parenthesis",
+    ],
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = ["dashboard_test.sh"],
+)

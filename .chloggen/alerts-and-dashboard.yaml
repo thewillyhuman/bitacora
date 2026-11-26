@@ -1,0 +1,4 @@
+change_type: enhancement
+component: deploy
+note: "Ship default Prometheus alert rules and a Grafana dashboard, both written against the metrics reference and checked against it by tests, and a page that lists every alert with what to do first."
+issues: [5]

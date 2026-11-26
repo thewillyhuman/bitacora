@@ -1,0 +1,90 @@
+"""The default alert rules, and the tests that check them without a Prometheus server."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
+
+# What alerts_test.sh checks the rules with and against.
+_CHECKED_AGAINST = {
+    "ALERTS_PAGE": "//docs:operations/alerts.md",
+    "CONTROLLER_CONFIG": "//src/rust/bita-controller:example.toml",
+    "METRICS_LIBRARY": "//hack/tools:metrics_reference.sh",
+    "METRICS_REFERENCE": "//docs:operations/metrics.md",
+    "PINT": "//hack/tools:pint",
+    "PINT_CONFIG": "pint.hcl",
+    "REPLICA_CONFIG": "//src/rust/bita-replica:example.toml",
+}
+
+_CHECK_ENVIRONMENT = {
+    variable: "$(rootpath {})".format(label)
+    for variable, label in _CHECKED_AGAINST.items()
+}
+
+# The rules linted, and checked against the metrics reference, the page that
+# describes the alerts and the defaults of the daemons that they quote.
+sh_test(
+    name = "alerts_test",
+    size = "small",
+    srcs = ["alerts_test.sh"],
+    data = ["bitacora-alerts.yaml"] + _CHECKED_AGAINST.values(),
+    env = _CHECK_ENVIRONMENT | {"RULES": "$(rootpath bitacora-alerts.yaml)"},
+)
+
+# The rules with one mistake of each kind the checker looks for: a metric and
+# a label value that do not exist, an alert under another name, one with
+# another severity and one with none, an expression that is not PromQL, and
+# an alert without its summary.
+genrule(
+    name = "broken_alerts",
+    srcs = ["bitacora-alerts.yaml"],
+    outs = ["broken/bitacora-alerts.yaml"],
+    cmd = """sed \\
+        -e 's/bitacora_disk_flush_duration_seconds_bucket/bitacora_disk_flush_seconds_bucket/' \\
+        -e 's/error="unavailable"/error="down"/' \\
+        -e 's/alert: BitacoraControllerNoLeader/alert: BitacoraControllerLeaderless/' \\
+        -e '/alert: BitacoraReplicaDiskFilling/,/annotations:/s/severity: warning/severity: critical/' \\
+        -e '/alert: BitacoraMetadataStoreSlow/,/annotations:/{/severity: warning/d;}' \\
+        -e 's/rate(bitacora_controller_round_failures_total\\[5m\\]) > 0/rate(bitacora_controller_round_failures_total) > 0/' \\
+        -e '/alert: BitacoraControllerStreamErrors/,/description:/{/summary:/d;}' \\
+        $< >$@""",
+)
+
+# The example configuration of a replica with one default moved, as after a
+# change of the daemon that nobody carried over to the rules.
+genrule(
+    name = "moved_default",
+    srcs = ["//src/rust/bita-replica:example.toml"],
+    outs = ["broken/replica.toml"],
+    cmd = "sed -e 's/^refuse_appends_at_used_percent = 95$$/refuse_appends_at_used_percent = 90/' $< >$@",
+)
+
+# The checker must fail on the broken rules and name every mistake in them.
+rejection_test(
+    name = "alerts_rejection_test",
+    args = [],
+    checker = "alerts_test.sh",
+    data = [
+        ":broken_alerts",
+        ":moved_default",
+    ] + _CHECKED_AGAINST.values(),
+    env = _CHECK_ENVIRONMENT | {
+        "REPLICA_CONFIG": "$(rootpath :moved_default)",
+        "RULES": "$(rootpath :broken_alerts)",
+    },
+    findings = [
+        "PromQL syntax error",
+        "`severity` label is required",
+        "`summary` annotation is required",
+        "the rules use bitacora_disk_flush_seconds_bucket, which docs/operations/metrics.md does not list",
+        "the rules select error=\"down\", a value docs/operations/metrics.md does not have",
+        "BitacoraControllerLeaderless is not described in docs/operations/alerts.md",
+        "docs/operations/alerts.md describes BitacoraControllerNoLeader, which the rules do not have",
+        "BitacoraReplicaDiskFilling is critical in the rules and warning in docs/operations/alerts.md",
+        "BitacoraMetadataStoreSlow is none in the rules and warning in docs/operations/alerts.md",
+        "the rules quote refuse_appends_at_used_percent = 95, but the example configuration says '90'",
+    ],
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = ["alerts_test.sh"],
+)

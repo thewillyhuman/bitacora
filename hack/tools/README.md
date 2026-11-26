@@ -9,6 +9,8 @@ same answer on every machine and needs nothing installed.
 | `//hack/tools:shellcheck` | shellcheck | Every shell script of the repository |
 | `//hack/tools:hadolint` | hadolint | The Dockerfile of the container images |
 | `//hack/tools:helm` | helm | The Helm chart: lints it and renders it |
+| `//hack/tools:pint` | pint | The alert rules, and the queries of the dashboard as PromQL |
+| `//hack/tools:jq` | jq | The dashboard, which is JSON |
 
 The releases and their checksums are in `//:MODULE.bazel`; the aliases in `BUILD.bazel` pick the right
 one for macOS arm64, Linux x86-64 and Linux arm64. To add a platform, add its archive there and its
@@ -26,3 +28,7 @@ and does not pass unchecked, on a Mac without Rosetta.
   an input that was broken on purpose and requires it to fail and to name every mistake. Every checker
   of deployment files has one, because a checker that accepts everything looks exactly like one that
   works.
+
+`metrics_reference.sh` is a library of shell functions that compare the metrics and label values a
+text uses with the metrics reference, `docs/operations/metrics.md`. The tests of the alert rules and of
+the dashboard source it.
