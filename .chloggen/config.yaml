@@ -37,4 +37,5 @@ components:
   - replica
   - segment
   - sim
+  - soak
   - types

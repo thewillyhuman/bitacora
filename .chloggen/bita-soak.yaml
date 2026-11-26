@@ -1,0 +1,4 @@
+change_type: new_component
+component: soak
+note: "Add bita-soak, which drives a cluster on Kubernetes for days in rounds: a workload of writers and readers, faults injected through the Kubernetes API (kills of replica, controller and etcd pods; network cuts of a replica or a zone, counted only once they are seen to be in effect), and the simulator's checker as the judge of every round. It comes with a fifth container image, bita-soak, and with development/kubernetes/soak.yaml, a Job with the four permissions the faults need."
+issues: [5]

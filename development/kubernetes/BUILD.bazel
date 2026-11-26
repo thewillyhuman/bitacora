@@ -1,7 +1,7 @@
 """What a developer needs to try bitacora on a Kubernetes cluster."""
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//hack/tools:defs.bzl", "shellcheck_test")
+load("//hack/tools:defs.bzl", "rejection_test", "shellcheck_test")
 
 # Rendered by the test of the chart, so that the values stay ones the chart
 # and the daemons accept.
@@ -19,10 +19,68 @@ sh_test(
     data = ["run.sh"],
 )
 
+# What soak_test.sh checks the manifest of a soak against: the tool itself.
+_SOAK_CHECKED_AGAINST = {
+    "BITA_SOAK_BINARY": "//src/rust/bita-soak",
+}
+
+# The manifest of a soak: its Role grants what the tool asks of the API and
+# nothing more, and its Job starts the tool with arguments it accepts.
+sh_test(
+    name = "soak_test",
+    size = "small",
+    srcs = ["soak_test.sh"],
+    data = ["soak.yaml"] + _SOAK_CHECKED_AGAINST.values(),
+    env = {
+        variable: "$(rootpath {})".format(label)
+        for variable, label in _SOAK_CHECKED_AGAINST.items()
+    } | {"SOAK_MANIFEST": "$(rootpath soak.yaml)"},
+)
+
+# The manifest with one mistake of each kind the checker looks for.
+genrule(
+    name = "broken_soak",
+    srcs = ["soak.yaml"],
+    outs = ["broken/soak.yaml"],
+    cmd = """sed \\
+        -e 's/verbs: \\[list, delete\\]/verbs: [list, delete, deletecollection]/' \\
+        -e 's/serviceAccountName: bita-soak/serviceAccountName: default/' \\
+        -e 's/name: bita-soak, namespace: bitacora/name: someone-else, namespace: bitacora/' \\
+        -e 's/--linger-seconds=/--stay-seconds=/' \\
+        -e 's|mountPath: /dumps|mountPath: /data|' \\
+        -e 's/bita-soak:BITA_VERSION/bita-soak:latest/' \\
+        -e 's/backoffLimit: 0/backoffLimit: 3/' \\
+        -e 's/terminationGracePeriodSeconds: 120/terminationGracePeriodSeconds: 5/' \\
+        $< >$@""",
+)
+
+# The checker must fail on the broken manifest and name every mistake in it.
+rejection_test(
+    name = "soak_rejection_test",
+    args = [],
+    checker = "soak_test.sh",
+    data = [":broken_soak"] + _SOAK_CHECKED_AGAINST.values(),
+    env = {
+        variable: "$(rootpath {})".format(label)
+        for variable, label in _SOAK_CHECKED_AGAINST.items()
+    } | {"SOAK_MANIFEST": "$(rootpath :broken_soak)"},
+    findings = [
+        "the Role does not grant exactly what bita-soak asks of the API",
+        "the Job runs as the service account 'default', which the Role is not bound to",
+        "the RoleBinding does not bind the service account 'bita-soak'",
+        "the Job starts bita-soak with arguments it does not accept",
+        "the histories are written to '/dumps', which is not a mounted volume",
+        "is not bita-soak with the placeholder BITA_VERSION as its version",
+        "a run that failed would be started again",
+        "too few to remove a network cut",
+    ],
+)
+
 shellcheck_test(
     name = "shellcheck_test",
     srcs = [
         "run.sh",
         "run_test.sh",
+        "soak_test.sh",
     ],
 )

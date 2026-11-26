@@ -1,0 +1,97 @@
+# A soak of the bitacora cluster in this namespace: bita-soak drives it for a
+# night, injects faults through the Kubernetes API, and judges what its
+# clients saw. docs/soak.md is the reference of the tool.
+#
+#   sed "s/BITA_VERSION/<version>/" soak.yaml |
+#       kubectl --context <context> --namespace bitacora apply --filename -
+#
+# Three things are written here and must match the cluster:
+#
+# - The version of the image, which the sed above fills in.
+# - The namespace `bitacora`, once, in the subject of the RoleBinding: a
+#   RoleBinding names the namespace of a service account in full.
+# - The etcd members, as etcd.yaml and values.yaml in this directory name
+#   them.
+#
+# One soak per namespace at a time: the network policies of a cut have fixed
+# names. A Job is not started twice, so delete the Job of the run before.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bita-soak
+  labels: {app.kubernetes.io/name: bita-soak}
+---
+# Exactly what the tool asks of the API: list the etcd pods, delete a pod for
+# a kill, create and delete a network policy for a cut. It reads no secret
+# and changes no workload.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bita-soak
+  labels: {app.kubernetes.io/name: bita-soak}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [list, delete]}
+  - {apiGroups: [networking.k8s.io], resources: [networkpolicies], verbs: [create, delete]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bita-soak
+  labels: {app.kubernetes.io/name: bita-soak}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: bita-soak}
+subjects: [{kind: ServiceAccount, name: bita-soak, namespace: bitacora}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bita-soak
+  labels: {app.kubernetes.io/name: bita-soak}
+spec:
+  # The exit code of the run is its result, and the streams of a round that
+  # was not clean are evidence: a run that failed is not started again.
+  backoffLimit: 0
+  template:
+    metadata:
+      # None of the labels the cuts select: a cut never isolates the tool.
+      labels: {app.kubernetes.io/name: bita-soak}
+    spec:
+      serviceAccountName: bita-soak
+      restartPolicy: Never
+      # On SIGTERM the tool removes its network cut, deletes the streams of
+      # the round it was in and prints its last lines. That takes seconds;
+      # the rest is for an API server that answers slowly.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bita-soak
+          image: ghcr.io/thewillyhuman/bitacora/bita-soak:BITA_VERSION
+          args:
+            - --etcd-endpoint=http://etcd-0.etcd-headless:2379
+            - --etcd-endpoint=http://etcd-1.etcd-headless:2379
+            - --etcd-endpoint=http://etcd-2.etcd-headless:2379
+            # A night. The defaults do the rest: rounds of ten minutes, four
+            # streams at twenty appends a second, a fault a minute.
+            - --seconds=28800
+            - --metrics-listen-address=0.0.0.0:9102
+            - --dump-directory=/dumps
+            # After a run that was not clean the pod stays for a day, so
+            # that the histories can be read before they go with it.
+            - --linger-seconds=86400
+          ports:
+            - {name: metrics, containerPort: 9102}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: dumps, mountPath: /dumps}
+      volumes:
+        # The histories of a round that was not clean. They live as long as
+        # the pod; use a volume claim to keep them longer.
+        - name: dumps
+          emptyDir: {sizeLimit: 1Gi}

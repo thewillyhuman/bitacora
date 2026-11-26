@@ -9,6 +9,7 @@ object store. [docs/operations](../../docs/operations/README.md) is the guide fo
 | `etcd.yaml` | A three-member etcd, one member per zone, each on a 10 GiB volume |
 | `values.yaml` | Values of the chart for that etcd: three replicas with 100 GiB each, no object store |
 | `run.sh` | Runs `bita` or `bita-bench` in a pod next to the cluster and prints its output |
+| `soak.yaml` | A Job that runs `bita-soak` next to the cluster for a night, with the permissions its faults need |
 
 ## The images
 
@@ -75,6 +76,54 @@ kubectl --context "$BITA_KUBE_CONTEXT" get --raw \
     /api/v1/namespaces/bitacora/pods/bitacora-replica-0:9100/proxy/metrics | grep disk_flush_duration
 ```
 
+## Soaking
+
+[`bita-soak`](../../docs/soak.md) drives the cluster for hours, kills its pods and cuts them off the
+network, and has the simulator's checker judge what clients saw. `soak.yaml` runs it as a Job for eight
+hours, with a service account that may do what the faults need and nothing else: list and delete pods,
+create and delete network policies.
+
+```sh
+sed "s/BITA_VERSION/$BITA_VERSION/" development/kubernetes/soak.yaml |
+    kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora apply --filename -
+kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora logs --follow job/bita-soak
+```
+
+The log has one line of JSON per round on standard output and a summary at the end. The run was clean if
+the Job succeeded; the exit code of its pod says how it ended otherwise (`docs/soak.md` lists them):
+
+```sh
+kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora get pods --selector job-name=bita-soak \
+    --output jsonpath='{.items[0].status.containerStatuses[0].state.terminated.exitCode}'
+```
+
+What to know before the first night:
+
+- **Try the alarm once.** Add `- --drill-lost-record` to the arguments and apply: the first round must
+  end as `violated` and the pod with exit code 3. It says nothing about the cluster; it shows that a
+  violation reaches whoever watches the Job. Remove the argument afterwards.
+- **Network cuts need a network that enforces policies.** Where it does not, the tool finds out within
+  a minute, says so, gives the cuts up and goes on with the kills. Every line then lists the kinds under
+  `faults_disabled`. A clean night on such a cluster is a night of kills survived, not of partitions.
+- **Three replicas are enough, more are better.** A stream has three copies. With exactly three replicas
+  a writer that needs a new segment while one replica is down may have to wait for it, which slows a
+  round down and breaks nothing.
+- **Another namespace.** The namespace is written once in `soak.yaml`, in the subject of the
+  RoleBinding. Change it there and in the command.
+- **A soak without faults** needs no permissions: `- --no-faults` in the arguments.
+- **After a run that was not clean** the streams of the last round are kept, the pod stays up for a day,
+  and the histories of the round are in `/dumps` in the pod. The image has no shell, so they are read
+  through a debug container that shares the tool's processes:
+
+  ```sh
+  kubectl --context "$BITA_KUBE_CONTEXT" --namespace bitacora debug <pod> --image=busybox \
+      --target=bita-soak --profile=general --stdin --tty -- ls /proc/1/root/dumps
+  ```
+
+- **Before the next run** delete the Job: `kubectl ... delete job bita-soak`. A tool that was killed
+  outright may have left a network cut; the next run removes it when it starts, and
+  `kubectl ... delete networkpolicy bita-soak-cut-replica bita-soak-cut-etcd` does it by hand.
+
 ## Removing it
 
 ```sh
@@ -92,5 +141,12 @@ volumes behind them go too is up to the reclaim policy of their StorageClass.
   removed afterwards, and the exit code says how the tool ended.
 - `//src/helm:chart_test` renders the chart with `values.yaml` and hands the rendered configuration to
   the daemons, like it does for the chart's own examples.
+- `//development/kubernetes:soak_test` checks `soak.yaml` against the tool: the Role grants exactly the
+  four permissions the tool uses, the Job starts the tool with arguments it accepts and as the service
+  account the Role is bound to, the histories go to a mounted volume, and a failed run is not started
+  again. `//development/kubernetes:soak_rejection_test` hands the same checker a manifest with eight
+  known mistakes and requires each to be named. Neither needs a cluster, and neither shows that a
+  cluster accepts the manifest. `soak.yaml` and the commands of the section above had not been applied
+  to a cluster when they were written: apply with `--dry-run=server` first.
 - `etcd.yaml` has no test: it was applied to a real cluster when this directory was written. Apply it
   again, with `--dry-run=server` first, after changing it.

@@ -52,4 +52,5 @@ and what follows from it.
 | [0015](decisions/0015-metrics-materializer.md) | The second materializer and what it found in the interface |
 | [0016](decisions/0016-go-client.md) | A native Go client, written from the protocol documents |
 | [0017](decisions/0017-request-size.md) | An append request carries up to 4 MiB |
+| [0018](decisions/0018-soak-tool.md) | A soak tool judges a real cluster with the simulator's checker |
 | [0019](decisions/0019-placement-spread.md) | Placement spreads over replicas that are equally good |

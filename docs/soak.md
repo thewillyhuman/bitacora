@@ -7,8 +7,9 @@ simulator's own checker as the judge. It exists for the exit gate of the hardeni
 section 18): a week of nightly runs on a real cluster with no invariant violation.
 
 This page is the reference: the options, the faults, the lines the tool prints, its exit codes and its
-metrics. Why the tool is built the way it is, is in the README of the crate,
-`src/rust/bita-soak/README.md`.
+metrics. Why the tool is built the way it is, is in
+[decision record 0018](decisions/0018-soak-tool.md) and in the README of the crate,
+`src/rust/bita-soak/README.md`. `development/kubernetes/soak.yaml` runs it as a Job.
 
 ## What a run does
 
@@ -167,8 +168,9 @@ The service account of the tool's pod needs exactly this, in the cluster's names
 | core | `pods` | `list`, `delete` | Finding the etcd members; the kills. |
 | `networking.k8s.io` | `networkpolicies` | `create`, `delete` | The cuts and their removal. |
 
-A run begins by deleting the policies of an earlier run, so a missing permission ends it at once with
-exit code 1 and the API server's answer.
+`development/kubernetes/soak.yaml` has the Role, and a test keeps it at exactly these four. A run begins
+by deleting the policies of an earlier run, so a missing permission ends it within a minute with exit
+code 1 and the API server's answer.
 
 Every call to the API has a time limit of ten seconds and is sent up to three times. The service account's
 token is read from its file for every call, because Kubernetes replaces it every hour.
