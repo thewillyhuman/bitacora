@@ -44,7 +44,7 @@
 //!
 //! - `main.rs`: turns the command line into settings and the result of [`run`] into an exit code.
 //! - `metrics.rs`: what is recorded about each round.
-//! - `bitacora-controller/src/controller.rs`: what a round and a pass do.
+//! - `bitacora-controller/src/controller/round.rs` and `controller.rs`: what a round and a pass do.
 
 use std::future::Future;
 use std::sync::Arc;

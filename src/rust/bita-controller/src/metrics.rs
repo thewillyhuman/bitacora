@@ -44,7 +44,7 @@
 //! # See also
 //!
 //! - `daemon.rs`: the loop that calls [`ControllerMetrics::record_round`].
-//! - `bitacora-controller/src/controller.rs`: `Round` and `PassReport`.
+//! - `bitacora-controller/src/controller/report.rs`: `Round` and `PassReport`.
 
 use std::time::Duration;
 

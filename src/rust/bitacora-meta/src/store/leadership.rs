@@ -34,7 +34,7 @@
 //! # See also
 //!
 //! - `../records.rs`: [`LeaderRecord`].
-//! - `bitacora-controller/src/controller.rs`: `Controller::run_round`, the caller.
+//! - `bitacora-controller/src/controller/round.rs`: `Controller::run_round`, the caller.
 
 use bitacora_types::Timestamp;
 

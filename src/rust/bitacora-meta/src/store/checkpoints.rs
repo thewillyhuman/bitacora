@@ -44,7 +44,7 @@
 //!
 //! - `../store.rs`: the read-modify-write shape and the helpers used here.
 //! - `bitacora-materializer/src/runner.rs`: the caller.
-//! - `bitacora-controller/src/controller.rs`: truncation, which reads the checkpoints to move the mark.
+//! - `bitacora-controller/src/controller/truncation.rs`: reads the checkpoints to move the low-water mark.
 
 use bitacora_types::{SequenceNumber, StreamId};
 

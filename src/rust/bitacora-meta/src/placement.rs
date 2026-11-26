@@ -37,7 +37,7 @@
 //! # See also
 //!
 //! - `records.rs`: [`ReplicaRecord`], what a replica registers about itself.
-//! - `bitacora-controller/src/controller.rs`: the standby and repair passes that call this.
+//! - `bitacora-controller/src/controller/standby.rs` and `repair.rs`: the steps of a pass that call this.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
