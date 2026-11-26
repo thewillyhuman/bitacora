@@ -21,6 +21,10 @@ common --repository_cache=~/.cache/bitacora/bazel-repository
 build --@rules_rust//rust/settings:clippy.toml=//src/rust:clippy.toml
 build --@rules_rust//rust/settings:rustfmt.toml=//src/rust:rustfmt.toml
 
+# Go without cgo: the Go client has no C code, and pure Go needs no C
+# toolchain and links faster.
+build --@rules_go//go/config:pure
+
 test --test_output=errors
 
 # rustc supports macOS 10.12 and later; Bazel's default target is older.

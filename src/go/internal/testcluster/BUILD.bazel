@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+# Starts the real programs that tests of the Go client talk to. The test
+# targets that use it name the programs in their `data` and `env`.
+go_library(
+    name = "testcluster",
+    testonly = True,
+    srcs = glob(["*.go"]),
+    importpath = "github.com/thewillyhuman/bitacora/src/go/internal/testcluster",
+    visibility = ["//src/go:__subpackages__"],
+)
+
+filegroup(
+    name = "sources",
+    testonly = True,
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

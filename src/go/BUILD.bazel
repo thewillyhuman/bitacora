@@ -1,0 +1,37 @@
+"""The Go client of bitacora: one Go module, built and tested by Bazel.
+
+go.mod and go.sum are the source of truth for dependencies; Bazel reads them
+(see MODULE.bazel). The packages are under this directory, one BUILD file
+each.
+"""
+
+load("@rules_go//go:def.bzl", "go_test", "nogo")
+
+exports_files([
+    "go.mod",
+    "go.sum",
+])
+
+# `go vet`, run on every Go package of the workspace as it is compiled.
+nogo(
+    name = "vet",
+    vet = True,
+    visibility = ["//visibility:public"],
+)
+
+# gofmt, as a test: it fails if a Go file is not formatted. Every package
+# has a `sources` group; a new package must be added here.
+go_test(
+    name = "gofmt_test",
+    size = "small",
+    srcs = ["gofmt_test.go"],
+    data = [
+        "gofmt_test.go",
+        "//src/go/internal/frame:sources",
+        "//src/go/internal/metadata:sources",
+        "//src/go/internal/replica:sources",
+        "//src/go/internal/testcluster:sources",
+        "//src/go/internal/tiered:sources",
+        "//src/go/internal/wire:sources",
+    ],
+)

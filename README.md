@@ -31,6 +31,7 @@ cluster, start with [docs/operations](docs/operations/README.md).
 | `src/rust/` | The Cargo workspace: one crate per component |
 | `src/c/` | The C client: its header, an example and the C tests; see [docs/clients/c.md](docs/clients/c.md) |
 | `src/systemd/` | Units that run the daemons on a machine, and the archive that installs them |
+| `src/go/` | The Go client: one Go module |
 | `development/` | Scripts and files for working on bitacora locally |
 | `hack/` | Scripts that manage the repository: checks, changelog, releases |
 | `.chloggen/` | Pending changelog entries, one small file per change |

@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# The batch frame of docs/protocol/disk-format.md: how records travel and
+# are stored, under one CRC-32C.
+go_library(
+    name = "frame",
+    srcs = ["frame.go"],
+    importpath = "github.com/thewillyhuman/bitacora/src/go/internal/frame",
+    visibility = ["//src/go:__subpackages__"],
+)
+
+go_test(
+    name = "frame_test",
+    size = "small",
+    srcs = ["frame_test.go"],
+    embed = [":frame"],
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

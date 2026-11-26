@@ -43,6 +43,7 @@ shellcheck_test(
         "tests/build_images_test.sh",
         "tests/create_release_test.sh",
         "tests/rejection_test_test.sh",
+        "update_go_stubs.sh",
         "//hack/tools:metrics_reference.sh",
         "//hack/tools:rejection_test.sh",
         "//hack/tools:shellcheck_test.sh",

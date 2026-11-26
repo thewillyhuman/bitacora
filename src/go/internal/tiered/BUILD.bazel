@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# The footer and block index of a tiered segment object
+# (docs/protocol/tiered-object.md).
+go_library(
+    name = "tiered",
+    srcs = ["tiered.go"],
+    importpath = "github.com/thewillyhuman/bitacora/src/go/internal/tiered",
+    visibility = ["//src/go:__subpackages__"],
+    deps = ["//src/go/internal/frame"],
+)
+
+go_test(
+    name = "tiered_test",
+    size = "small",
+    srcs = ["tiered_test.go"],
+    embed = [":tiered"],
+    deps = ["//src/go/internal/frame"],
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

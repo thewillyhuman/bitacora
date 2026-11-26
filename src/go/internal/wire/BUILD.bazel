@@ -1,0 +1,85 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@rules_go//go:def.bzl", "go_library")
+
+# The gRPC stubs of the replica protocol, generated from
+# src/proto/bitacora/v1/replica.proto.
+#
+# The generated files are checked in, so that the module builds with plain
+# `go build` and `go get`, which know nothing of Bazel. The rules below
+# generate them again with the pinned tools and compare: a protocol file
+# that changed without its stubs fails `bazel test`. To bring them in step,
+# run hack/update_go_stubs.sh.
+go_library(
+    name = "wire",
+    srcs = [
+        "replica.pb.go",
+        "replica_grpc.pb.go",
+    ],
+    importpath = "github.com/thewillyhuman/bitacora/src/go/internal/wire",
+    visibility = ["//src/go:__subpackages__"],
+    deps = [
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
+        "@org_golang_google_protobuf//reflect/protoreflect",
+        "@org_golang_google_protobuf//runtime/protoimpl",
+    ],
+)
+
+# The stubs as the pinned tools generate them today: protoc from MODULE.bazel,
+# the two plugins at the versions of src/go/go.mod. The protocol file names
+# no Go package, because that would put one language's concern in a file
+# every language shares; the mapping is given here instead. It holds a
+# semicolon, so the command quotes it.
+_GO_PACKAGE = "Mbitacora/v1/replica.proto=github.com/thewillyhuman/bitacora/src/go/internal/wire;wire"
+
+genrule(
+    name = "generated_stubs",
+    srcs = ["//src/proto:protocol_files"],
+    outs = [
+        "generated/bitacora/v1/replica.pb.go",
+        "generated/bitacora/v1/replica_grpc.pb.go",
+    ],
+    cmd = " ".join([
+        "$(execpath //src/rust:protoc)",
+        "--proto_path=src/proto",
+        "--plugin=protoc-gen-go=$(execpath @org_golang_google_protobuf//cmd/protoc-gen-go)",
+        "--plugin=protoc-gen-go-grpc=$(execpath @org_golang_google_grpc_cmd_protoc_gen_go_grpc//:protoc-gen-go-grpc)",
+        "--go_out=$(RULEDIR)/generated",
+        "--go_opt=paths=source_relative",
+        "'--go_opt=" + _GO_PACKAGE + "'",
+        "--go-grpc_out=$(RULEDIR)/generated",
+        "--go-grpc_opt=paths=source_relative",
+        "'--go-grpc_opt=" + _GO_PACKAGE + "'",
+        "bitacora/v1/replica.proto",
+    ]),
+    tools = [
+        "//src/rust:protoc",
+        "@org_golang_google_grpc_cmd_protoc_gen_go_grpc//:protoc-gen-go-grpc",
+        "@org_golang_google_protobuf//cmd/protoc-gen-go",
+    ],
+)
+
+_OUT_OF_STEP = "The Go stubs are not what the protocol file generates. Run hack/update_go_stubs.sh and commit the result."
+
+diff_test(
+    name = "messages_in_step_test",
+    size = "small",
+    failure_message = _OUT_OF_STEP,
+    file1 = "replica.pb.go",
+    file2 = ":generated/bitacora/v1/replica.pb.go",
+)
+
+diff_test(
+    name = "services_in_step_test",
+    size = "small",
+    failure_message = _OUT_OF_STEP,
+    file1 = "replica_grpc.pb.go",
+    file2 = ":generated/bitacora/v1/replica_grpc.pb.go",
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

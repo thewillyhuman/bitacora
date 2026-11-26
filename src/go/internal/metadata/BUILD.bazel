@@ -1,0 +1,41 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# The records of docs/protocol/metadata.md, their keys in etcd, and the
+# conditional writes that change them.
+go_library(
+    name = "metadata",
+    srcs = [
+        "etcd.go",
+        "kv.go",
+        "records.go",
+        "store.go",
+    ],
+    importpath = "github.com/thewillyhuman/bitacora/src/go/internal/metadata",
+    visibility = ["//src/go:__subpackages__"],
+    deps = ["@io_etcd_go_etcd_client_v3//:client"],
+)
+
+# Small although one file starts an etcd: it answers within a second, and
+# the whole target finishes in about two.
+go_test(
+    name = "metadata_test",
+    size = "small",
+    srcs = [
+        "etcd_test.go",
+        "records_test.go",
+        "store_test.go",
+    ],
+    data = ["//src/rust:etcd"],
+    embed = [":metadata"],
+    env = {"BITA_ETCD_BINARY": "$(rootpath //src/rust:etcd)"},
+    deps = [
+        "//src/go/internal/testcluster",
+        "@io_etcd_go_etcd_client_v3//:client",
+    ],
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

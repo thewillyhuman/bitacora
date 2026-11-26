@@ -316,3 +316,46 @@ http_file(
     sha256 = "8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309",
     urls = ["https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-arm64"],
 )
+
+# The Go client (src/go). Everything it needs from Bazel is in this block.
+# rules_go builds and tests it; gazelle is here only for the extension that
+# reads the module's dependencies, not to generate build files.
+bazel_dep(name = "rules_go", version = "0.65.0")
+bazel_dep(name = "gazelle", version = "0.54.0")
+
+# Its toolchain is hermetic like the Rust one, and src/go/go.mod and go.sum
+# stay the single source of truth for its dependencies, so `go build` and
+# editors work there as in any Go module. The version is the oldest Go
+# release still supported, which is what go.mod promises to build with.
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(version = "1.26.11")
+
+# `go vet` runs on every Go package as it is compiled, so a finding fails the
+# build like a compiler error.
+go_sdk.nogo(nogo = "//src/go:vet")
+
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps.from_file(go_mod = "//src/go:go.mod")
+
+# Two modules the etcd client needs ship their generated Go files next to the
+# protocol files they come from. Use the Go files, as `go build` does.
+# Generating them again fails for etcd, whose protocol files import others
+# that are not there, and for grpc-gateway it would compile the protocol
+# buffer compiler from its C++ sources, which takes minutes. grpc-gateway
+# also ships build files that ask for exactly that, hence `clean`.
+go_deps.gazelle_override(
+    directives = ["gazelle:proto disable"],
+    path = "go.etcd.io/etcd/api/v3",
+)
+go_deps.gazelle_override(
+    build_file_generation = "clean",
+    directives = ["gazelle:proto disable"],
+    path = "github.com/grpc-ecosystem/grpc-gateway/v2",
+)
+use_repo(
+    go_deps,
+    "io_etcd_go_etcd_client_v3",
+    "org_golang_google_grpc",
+    "org_golang_google_grpc_cmd_protoc_gen_go_grpc",
+    "org_golang_google_protobuf",
+)
