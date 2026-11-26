@@ -1,6 +1,7 @@
 package bitacora
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -55,6 +56,10 @@ func fromMetadata(err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The caller's context ended. That is the caller's doing and its
+		// error; the cluster is not at fault.
+		return err
 	case errors.Is(err, metadata.ErrStreamNotFound):
 		return fmt.Errorf("%w: %w", ErrStreamNotFound, err)
 	case errors.Is(err, metadata.ErrStreamExists):

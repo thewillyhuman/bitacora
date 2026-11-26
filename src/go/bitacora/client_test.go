@@ -50,6 +50,35 @@ func TestAnEtcdThatIsDownShowsOnTheFirstOperation(t *testing.T) {
 	}
 }
 
+func TestAnOperationThatEndsWithItsContextReturnsTheContextsError(t *testing.T) {
+	client := connectToNothing(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, readErr := client.OpenReader("orders").ReadRange(ctx, 1, 10)
+	_, markErr := client.OpenReader("orders").LowWaterMark(ctx)
+	_, describeErr := client.DescribeStream(ctx, "orders")
+	_, createErr := client.CreateStream(ctx, "orders", StreamOptions{})
+	_, openErr := client.OpenWriter(ctx, "orders", WriterOptions{})
+	calls := map[string]error{
+		"ReadRange":              readErr,
+		"LowWaterMark":           markErr,
+		"DescribeStream":         describeErr,
+		"CreateStream":           createErr,
+		"OpenWriter":             openErr,
+		"DeleteStream":           client.DeleteStream(ctx, "orders"),
+		"TruncateBefore":         client.TruncateBefore(ctx, "orders", 5),
+		"RegisterMaterializer":   client.RegisterMaterializer(ctx, "orders", "pages"),
+		"UnregisterMaterializer": client.UnregisterMaterializer(ctx, "orders", "pages"),
+	}
+	for call, err := range calls {
+		// The caller gave up; nothing says that the cluster is at fault.
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnavailable) {
+			t.Errorf("%s with a cancelled context = %v, want context.Canceled and not ErrUnavailable", call, err)
+		}
+	}
+}
+
 func TestTheClientPrintsNothingOfItsOwn(t *testing.T) {
 	// The etcd client logs to standard error unless told otherwise, and it
 	// has something to say when its endpoint is down.

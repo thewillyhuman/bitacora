@@ -196,11 +196,17 @@ func TestAnEtcdThatCannotBeReachedIsUnavailable(t *testing.T) {
 		t.Errorf("Transact = %v, want unavailable", err)
 	}
 
-	// A context that is already done is the caller's own doing, but the
-	// store cannot tell the two apart and nothing was read: unavailable.
+	// A context that is done is the caller's own doing, not the store's:
+	// the caller gets its context's error back, and no "unavailable" that
+	// would send it looking for a fault in the cluster.
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := store.Get(cancelled, "streams/orders"); !errors.Is(err, ErrUnavailable) {
-		t.Errorf("Get with a cancelled context = %v, want unavailable", err)
+	_, getErr := store.Get(cancelled, "streams/orders")
+	_, listErr := store.List(cancelled, "streams/")
+	_, transactErr := store.Transact(cancelled, nil, []Mutation{{Key: "streams/orders", Value: []byte("x")}})
+	for call, err := range map[string]error{"Get": getErr, "List": listErr, "Transact": transactErr} {
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnavailable) {
+			t.Errorf("%s with a cancelled context = %v, want context.Canceled and not unavailable", call, err)
+		}
 	}
 }

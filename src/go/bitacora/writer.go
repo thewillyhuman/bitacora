@@ -164,6 +164,11 @@ func (client *Client) OpenWriter(ctx context.Context, streamName string, options
 			// The caller gave up; say so instead of blaming the cluster.
 			return nil, fmt.Errorf("opening a writer of %q was abandoned: %w (%v)", streamName, callerErr, err)
 		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			// The writer's own timeout ran out, not the caller's context.
+			return nil, fmt.Errorf("%w: stream %q could not be opened within %v: %v",
+				ErrUnavailable, streamName, resolved.openTimeout, err)
+		}
 		return nil, err
 	}
 

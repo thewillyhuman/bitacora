@@ -33,11 +33,11 @@ func NewEtcdStore(client *clientv3.Client, prefix string, requestTimeout time.Du
 
 // Get implements [KeyValueStore].
 func (store *EtcdStore) Get(ctx context.Context, key string) (*StoredValue, error) {
-	ctx, cancel := context.WithTimeout(ctx, store.requestTimeout)
+	requestCtx, cancel := context.WithTimeout(ctx, store.requestTimeout)
 	defer cancel()
-	response, err := store.client.Get(ctx, store.prefix+key)
+	response, err := store.client.Get(requestCtx, store.prefix+key)
 	if err != nil {
-		return nil, unavailable("read "+key, err)
+		return nil, failure(ctx, "read "+key, err)
 	}
 	if len(response.Kvs) == 0 {
 		return nil, nil
@@ -47,12 +47,12 @@ func (store *EtcdStore) Get(ctx context.Context, key string) (*StoredValue, erro
 
 // List implements [KeyValueStore].
 func (store *EtcdStore) List(ctx context.Context, prefix string) ([]StoredValue, error) {
-	ctx, cancel := context.WithTimeout(ctx, store.requestTimeout)
+	requestCtx, cancel := context.WithTimeout(ctx, store.requestTimeout)
 	defer cancel()
-	response, err := store.client.Get(ctx, store.prefix+prefix,
+	response, err := store.client.Get(requestCtx, store.prefix+prefix,
 		clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
 	if err != nil {
-		return nil, unavailable("list "+prefix, err)
+		return nil, failure(ctx, "list "+prefix, err)
 	}
 	listed := make([]StoredValue, 0, len(response.Kvs))
 	for _, stored := range response.Kvs {
@@ -67,7 +67,7 @@ func (store *EtcdStore) List(ctx context.Context, prefix string) ([]StoredValue,
 
 // Transact implements [KeyValueStore].
 func (store *EtcdStore) Transact(ctx context.Context, conditions []Condition, mutations []Mutation) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, store.requestTimeout)
+	requestCtx, cancel := context.WithTimeout(ctx, store.requestTimeout)
 	defer cancel()
 	comparisons := make([]clientv3.Cmp, 0, len(conditions))
 	for _, condition := range conditions {
@@ -87,14 +87,20 @@ func (store *EtcdStore) Transact(ctx context.Context, conditions []Condition, mu
 			operations = append(operations, clientv3.OpPut(key, string(mutation.Value)))
 		}
 	}
-	response, err := store.client.Txn(ctx).If(comparisons...).Then(operations...).Commit()
+	response, err := store.client.Txn(requestCtx).If(comparisons...).Then(operations...).Commit()
 	if err != nil {
-		return false, unavailable("transact", err)
+		return false, failure(ctx, "transact", err)
 	}
 	return response.Succeeded, nil
 }
 
-// unavailable wraps a failure of the store below as [ErrUnavailable].
-func unavailable(operation string, cause error) error {
+// failure turns an error of the etcd client into the store's. If the
+// caller's context is done, the error is that context's: the caller gave
+// up, and nothing says that the store is at fault. Anything else, a request
+// that ran into the store's own timeout included, is [ErrUnavailable].
+func failure(ctx context.Context, operation string, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("cannot %s: %w", operation, err)
+	}
 	return fmt.Errorf("%w: cannot %s: %v", ErrUnavailable, operation, cause)
 }
