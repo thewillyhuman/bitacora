@@ -400,7 +400,10 @@ command_logs() {
     fi
     name="${1:-}"
     [[ -n "${name}" ]] || fail "logs needs the name of a process: $(process_names | tr '\n' ' ')"
-    process_names | grep -qx -- "${name}" || fail "no process is called ${name}: $(process_names | tr '\n' ' ')"
+    # Not a pipeline into `grep -q`: grep stops reading at the first match,
+    # and under pipefail the writer it cuts off would count as a failure.
+    grep -qx -- "${name}" <<<"$(process_names)" ||
+        fail "no process is called ${name}: $(process_names | tr '\n' ' ')"
     [[ -f "$(log_file "${name}")" ]] || fail "${name} has not written a log yet"
     if [[ "${follow}" == yes ]]; then
         exec tail -n 100 -f "$(log_file "${name}")"
