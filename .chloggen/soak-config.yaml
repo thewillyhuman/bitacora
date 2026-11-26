@@ -1,0 +1,4 @@
+change_type: enhancement
+component: soak
+note: "bita-soak takes --config, a cluster configuration file. It is the only way to name the object store, which the tool's readers and its audit need on a cluster that tiers its segments."
+issues: [5]

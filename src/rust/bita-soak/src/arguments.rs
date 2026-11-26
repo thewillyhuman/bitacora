@@ -35,7 +35,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bitacora::DEFAULT_ETCD_KEY_PREFIX;
 use clap::Parser;
 
 use crate::cut_check::CutCheckSettings;
@@ -62,13 +61,20 @@ const RENEWALS_A_CUT_IS_GIVEN: u32 = 9;
     about = "Drive a bitacora cluster for days and judge what clients saw with the simulator's checker."
 )]
 pub(crate) struct Arguments {
-    /// The client URL of an etcd member that holds the cluster's metadata. Repeat it for every member.
-    #[arg(long = "etcd-endpoint", value_name = "URL", required = true)]
+    /// A TOML file with the cluster configuration: etcd endpoints, key prefix and object store. It is the only way
+    /// to name the object store, which the readers and the audit need on a cluster that tiers its segments.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) config: Option<PathBuf>,
+
+    /// The client URL of an etcd member that holds the cluster's metadata. Repeat it for every member. Required
+    /// without --config; with it, the option replaces the members the file names.
+    #[arg(long = "etcd-endpoint", value_name = "URL", required_unless_present = "config")]
     pub(crate) etcd_endpoints: Vec<String>,
 
-    /// The text in front of every key of this cluster in etcd.
-    #[arg(long, value_name = "PREFIX", default_value = DEFAULT_ETCD_KEY_PREFIX)]
-    pub(crate) etcd_key_prefix: String,
+    /// The text in front of every key of this cluster in etcd. Without it, the prefix is the file's, or
+    /// `/bitacora/` without a file.
+    #[arg(long, value_name = "PREFIX")]
+    pub(crate) etcd_key_prefix: Option<String>,
 
     /// The name of the run, which starts the name of every stream it makes. Without it, the run is named after the
     /// time it starts.

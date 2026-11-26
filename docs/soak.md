@@ -41,8 +41,9 @@ done: the checker accepts such a record in the stream and accepts its absence.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--etcd-endpoint <URL>` | required | The client URL of an etcd member that holds the cluster's metadata. Repeat it for every member. |
-| `--etcd-key-prefix <PREFIX>` | `/bitacora/` | The text in front of every key of this cluster in etcd. |
+| `--config <FILE>` | none | A TOML file with the cluster configuration, as [cli.md](cli.md) describes it. It is the only way to name the object store, which the readers and the audit need on a cluster that tiers its segments. |
+| `--etcd-endpoint <URL>` | required without `--config` | The client URL of an etcd member that holds the cluster's metadata. Repeat it for every member. With `--config` it replaces the members the file names. |
+| `--etcd-key-prefix <PREFIX>` | the file's, or `/bitacora/` | The text in front of every key of this cluster in etcd. |
 | `--run <NAME>` | `soak-<unix seconds>` | The name of the run, which starts the name of every stream it makes. Two runs on one cluster need two names. |
 | `--seconds <SECONDS>` | `3600` | How long the run lasts. A round that has begun is finished, so a run ends up to one round later. |
 | `--round-seconds <SECONDS>` | `600` | How long the workload and the nemesis of one round run. |

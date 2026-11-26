@@ -58,7 +58,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitacora::{ClientSettings, ClusterConfig, ObjectStoreConfig, WriterSettings};
+use bitacora::{ClientSettings, ClusterConfig, WriterSettings, resolve_cluster_config};
 use bitacora_process::{Readiness, ShutdownListener, serve_observability};
 use bitacora_types::{Clock, SystemClock};
 use clap::Parser;
@@ -228,17 +228,32 @@ fn kubernetes_faults(
     Ok(KubernetesFaults::new(api, targets))
 }
 
+/// The configuration of the cluster the command line names: its configuration file, if it names one, with the
+/// etcd options in place of the file's values.
+///
+/// # Errors
+///
+/// Returns the text to show if the file cannot be read or is not a cluster configuration, or if no etcd member
+/// is known in the end.
+fn cluster_config(arguments: &Arguments) -> Result<ClusterConfig, String> {
+    let resolved = resolve_cluster_config(
+        arguments.config.as_deref(),
+        &arguments.etcd_endpoints,
+        arguments.etcd_key_prefix.as_deref(),
+    );
+    match resolved {
+        Ok(config) => Ok(config),
+        Err(config_error) => Err(config_error.to_string()),
+    }
+}
+
 /// Connects a client and the metadata store of the cluster the command line names.
 ///
 /// # Errors
 ///
-/// Returns the text to show if the etcd endpoints can never work.
+/// Returns the text to show if the cluster configuration cannot be used.
 async fn connect(arguments: &Arguments, faults: Arc<dyn FaultInjector>) -> Result<SoakedCluster, String> {
-    let config = ClusterConfig {
-        etcd_endpoints: arguments.etcd_endpoints.clone(),
-        etcd_key_prefix: arguments.etcd_key_prefix.clone(),
-        object_store: ObjectStoreConfig::None,
-    };
+    let config = cluster_config(arguments)?;
     let client = match bitacora::connect(&config, client_settings()).await {
         Ok(client) => client,
         Err(connect_error) => return Err(connect_error.to_string()),

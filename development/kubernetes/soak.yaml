@@ -13,6 +13,16 @@
 # - The etcd members, as etcd.yaml and values.yaml in this directory name
 #   them.
 #
+# On a cluster that tiers its segments, as with s3.yaml and values-s3.yaml,
+# the tool needs the object store too: its readers and its audit read
+# segments that the replicas have released. Hand it the configuration that
+# names the store, and take the commented line below into the arguments:
+#
+#   kubectl --context <context> --namespace bitacora create configmap bita-soak-cluster \
+#       --from-file=cluster.toml=cluster-s3.toml
+#
+# The access key comes from the Secret `bitacora-s3`, if there is one.
+#
 # One soak per namespace at a time: the network policies of a cut have fixed
 # names. A Job is not started twice, so delete the Job of the run before.
 apiVersion: v1
@@ -83,6 +93,7 @@ spec:
             - --etcd-endpoint=http://etcd-0.etcd-headless:2379
             - --etcd-endpoint=http://etcd-1.etcd-headless:2379
             - --etcd-endpoint=http://etcd-2.etcd-headless:2379
+            # - --config=/etc/bitacora/cluster.toml
             # A night. The defaults do the rest: rounds of ten minutes, four
             # streams at twenty appends a second, a fault a minute.
             - --seconds=28800
@@ -91,6 +102,9 @@ spec:
             # After a run that was not clean the pod stays for a day, so
             # that the histories can be read before they go with it.
             - --linger-seconds=86400
+          # The access key of the object store, on a cluster that has one.
+          envFrom:
+            - secretRef: {name: bitacora-s3, optional: true}
           ports:
             - {name: metrics, containerPort: 9102}
           resources:
@@ -103,7 +117,12 @@ spec:
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: dumps, mountPath: /dumps}
+            - {name: cluster-config, mountPath: /etc/bitacora, readOnly: true}
       volumes:
+        # The cluster configuration, on a cluster whose object store the tool
+        # must reach; an empty directory otherwise.
+        - name: cluster-config
+          configMap: {name: bita-soak-cluster, optional: true}
         # The histories of a round that was not clean. They live as long as
         # the pod; use a volume claim to keep them longer.
         - name: dumps

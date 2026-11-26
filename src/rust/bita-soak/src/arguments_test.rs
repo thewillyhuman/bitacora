@@ -193,13 +193,37 @@ fn nemesis_of_the_rounds_is_the_one_handed_in() {
     assert_eq!(settings.round.nemesis, no_nemesis());
 }
 
+/// The option is only what the command line says. The default of a cluster is applied where the configuration is
+/// worked out, so that a prefix in a configuration file is not overridden by an option nobody gave.
 #[test]
-fn etcd_key_prefix_is_the_cluster_default_unless_given() {
+fn etcd_key_prefix_is_only_set_when_it_is_given() {
     let by_default = parse(&[]).expect("a valid command line");
     let given = parse(&["--etcd-key-prefix", "/staging"]).expect("a valid command line");
 
-    assert_eq!(by_default.etcd_key_prefix, DEFAULT_ETCD_KEY_PREFIX);
-    assert_eq!(given.etcd_key_prefix, "/staging");
+    assert_eq!(by_default.etcd_key_prefix, None);
+    assert_eq!(given.etcd_key_prefix, Some("/staging".to_owned()));
+}
+
+#[test]
+fn configuration_file_is_taken() {
+    let arguments = parse(&["--config", "/etc/bitacora/cluster.toml"]).expect("a valid command line");
+
+    assert_eq!(arguments.config, Some(PathBuf::from("/etc/bitacora/cluster.toml")));
+}
+
+/// A configuration file names the etcd members, so the option is not needed next to it.
+#[test]
+fn configuration_file_stands_in_for_the_etcd_endpoints() {
+    let parsed = Arguments::try_parse_from(["bita-soak", "--config", "/etc/bitacora/cluster.toml"]);
+
+    assert!(parsed.is_ok(), "{parsed:?}");
+}
+
+#[test]
+fn command_line_that_names_no_cluster_is_refused() {
+    let parsed = Arguments::try_parse_from(["bita-soak"]);
+
+    assert!(parsed.is_err(), "{parsed:?}");
 }
 
 #[test]

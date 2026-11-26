@@ -20,6 +20,8 @@
 
 use std::io::{Read as _, Write as _};
 
+use bitacora::ObjectStoreConfig;
+
 use super::*;
 use crate::kubernetes_stand_in::TEST_AUTHORITY_PEM;
 
@@ -152,6 +154,79 @@ fn arguments_with(options: &[&str]) -> Arguments {
     let mut command_line = vec!["bita-soak", "--etcd-endpoint", "http://etcd:2379"];
     command_line.extend_from_slice(options);
     Arguments::try_parse_from(command_line).expect("a valid command line")
+}
+
+/// Writes a cluster configuration that names one etcd member, the key prefix `/from-file/` and a local directory as
+/// object store, and returns its directory and its path.
+fn configuration_file() -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("cluster.toml");
+    let content = "etcd_endpoints = [\"http://file:2379\"]\netcd_key_prefix = \"/from-file/\"\n\n\
+                   [object_store]\nkind = \"local_directory\"\npath = \"/var/lib/bitacora/objects\"\n";
+    std::fs::write(&path, content).expect("the configuration is written");
+    (directory, path)
+}
+
+#[test]
+fn cluster_named_by_options_has_no_object_store() {
+    let config = cluster_config(&arguments_with(&[])).expect("a usable configuration");
+
+    assert_eq!(config.object_store, ObjectStoreConfig::None);
+}
+
+#[test]
+fn cluster_named_by_options_has_the_default_key_prefix() {
+    let config = cluster_config(&arguments_with(&[])).expect("a usable configuration");
+
+    assert_eq!(config.etcd_key_prefix, bitacora::DEFAULT_ETCD_KEY_PREFIX);
+}
+
+/// The reason the tool takes a file: readers and the audit need the object store once segments are tiered, and
+/// only a file can name it.
+#[test]
+fn object_store_of_the_configuration_file_is_used() {
+    let (_directory, path) = configuration_file();
+    let arguments =
+        Arguments::try_parse_from(["bita-soak", "--config", path.to_str().expect("a UTF-8 path")]).expect("valid");
+
+    let config = cluster_config(&arguments).expect("a usable configuration");
+
+    assert_eq!(
+        config.object_store,
+        ObjectStoreConfig::LocalDirectory {
+            path: "/var/lib/bitacora/objects".into()
+        }
+    );
+}
+
+#[test]
+fn key_prefix_of_the_configuration_file_is_kept_when_no_option_replaces_it() {
+    let (_directory, path) = configuration_file();
+    let arguments =
+        Arguments::try_parse_from(["bita-soak", "--config", path.to_str().expect("a UTF-8 path")]).expect("valid");
+
+    let config = cluster_config(&arguments).expect("a usable configuration");
+
+    assert_eq!(config.etcd_key_prefix, "/from-file/");
+}
+
+#[test]
+fn etcd_endpoints_given_as_options_replace_those_of_the_file() {
+    let (_directory, path) = configuration_file();
+    let arguments = arguments_with(&["--config", path.to_str().expect("a UTF-8 path")]);
+
+    let config = cluster_config(&arguments).expect("a usable configuration");
+
+    assert_eq!(config.etcd_endpoints, ["http://etcd:2379"]);
+}
+
+#[test]
+fn configuration_file_that_cannot_be_read_is_an_error_that_names_it() {
+    let arguments = arguments_with(&["--config", "/no/such/cluster.toml"]);
+
+    let refused = cluster_config(&arguments).expect_err("the file does not exist");
+
+    assert!(refused.contains("/no/such/cluster.toml"), "{refused}");
 }
 
 /// A directory with what a pod's service account mount holds, in the namespace `storage`.
