@@ -79,6 +79,9 @@ Repair, upload, scrubbing, opening and deletion are rare and written to be follo
 - A copy whose disk refused a write answers nothing, is not repaired, and is reported to the host. It
   is read back from the disk and judged again when the replica is next opened.
 - A repair never touches the old copy before the new one is complete and flushed.
+- An upload never holds a segment: it reads its copy a chunk at a time, twice, once to send it and once
+  to verify what the object store holds, and keeps a chunk or two of 8 MiB whatever the segment's size.
+  It answers only for an object that it read back and found to be what its copy encodes to.
 - The replica's identity never changes while it is open. No task is started after `stop`.
 - Reads, fences, seals and deletions are never refused for lack of space or for draining.
 - No lock is held across an `await`.

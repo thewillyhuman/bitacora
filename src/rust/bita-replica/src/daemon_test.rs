@@ -649,8 +649,9 @@ async fn uploads_of_the_daemon_are_visible_in_the_metrics() {
 
     let metrics = daemon.scraped_metrics().await;
 
+    // A segment goes to the object store piece by piece: one completed upload is one segment stored.
     assert!(
-        metrics.contains("bitacora_object_store_requests_total{operation=\"put_object\"} 1\n"),
+        metrics.contains("bitacora_object_store_requests_total{operation=\"upload_complete\"} 1\n"),
         "{metrics}"
     );
     daemon.terminate().await.expect("a clean stop");

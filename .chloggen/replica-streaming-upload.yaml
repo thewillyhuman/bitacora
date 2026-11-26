@@ -1,0 +1,10 @@
+change_type: enhancement
+component: replica
+note: "Upload a sealed segment to the object store without holding it in memory: about 16 MiB for one upload whatever the segment's size, where a segment of 1 GiB took more than 2 GiB."
+issues: [3]
+subtext: |
+  On S3 a segment is now a multipart upload in parts of 8 MiB. Give the bucket a lifecycle rule that
+  aborts incomplete multipart uploads (`AbortIncompleteMultipartUpload`), so that the parts of an upload
+  whose replica was killed half way do not stay there; `docs/operations/README.md` has the rule. The
+  object store metrics have four new values of `operation`: `start_upload`, `upload_write`,
+  `upload_complete` and `upload_abort`.

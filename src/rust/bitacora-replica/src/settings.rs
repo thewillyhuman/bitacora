@@ -103,8 +103,9 @@ pub struct ReplicaSettings {
     pub repair_bytes_per_second: u64,
     /// How long one read from a peer may take during a repair before the repair gives up.
     pub repair_request_timeout: Duration,
-    /// The target size, in bytes, of one read of a local copy, and of one read of the stored object,
-    /// while a sealed segment is uploaded.
+    /// The target size, in bytes, of one read of a local copy while a sealed segment is uploaded. The
+    /// object store is handed the copy in pieces of this size and is read back in ranges of this size,
+    /// so it is what an upload holds in memory, twice at most, whatever the size of the segment.
     pub upload_chunk_bytes: usize,
     /// How long one request to the object store may take before an upload gives up.
     pub object_store_timeout: Duration,

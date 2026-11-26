@@ -82,10 +82,11 @@ These hold for every way of deploying, and nothing checks most of them for you.
   waiting, and `bitacora_object_store_request_failures_total{operation="upload_abort"}` counts the
   uploads a process could not abort itself. A local directory as the object store needs nothing: it
   removes its own leftovers after a day.
-- **Memory for uploads.** A replica holds a whole segment in memory while it uploads it, twice for a
-  moment. With the writer's default segment size of 1 GiB that is more than 2 GiB per upload in
-  progress: give replicas that much room, or have applications use smaller segments
-  (`docs/decisions/0012-tiering.md`).
+- **Memory for uploads.** A replica uploads a sealed segment without holding it: it reads its copy
+  8 MiB at a time and sends that on. One upload in progress takes about 16 MiB, and under 32 MiB when
+  an application writes batches as large as a batch can be, whatever the size of the segment. The
+  controller asks for one upload at a time, so a replica has one in progress, or two for a moment
+  while the leading controller changes. A replica needs no memory set aside for segments.
 
 ## Deploying
 

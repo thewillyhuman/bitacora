@@ -47,10 +47,6 @@ The object's layout is in `docs/protocol/tiered-object.md`.
 
 - **Compression.** The design makes it optional and lists it as an open
   question.
-- **Streaming upload.** The artifact store takes an object in one piece, so
-  a replica holds a whole segment in memory while it uploads, twice for a
-  moment. The design lists a multipart write as future work; with segments
-  of 1 GiB it is the first thing to add.
 - **A block cache in readers.** A reader keeps the footer and index of the
   object it is reading and fetches blocks as it goes.
 - **Repair from the object store.** A tiered segment that loses local
@@ -64,3 +60,29 @@ The object's layout is in `docs/protocol/tiered-object.md`.
   tiering delay. A test does exactly that.
 - Tiering is off unless the controller, the replicas and the readers are
   given the same object store.
+- A replica uploads a segment without holding it. As first built, the
+  artifact store took an object in one piece, and a replica held a whole
+  segment in memory while it uploaded, twice for a moment: more than 2 GiB
+  for a segment of 1 GiB. Since then the artifact store takes an object
+  piece by piece (`start_upload`), and the replica sends its copy as it
+  reads it, a chunk of 8 MiB at a time. An upload takes about 16 MiB
+  whatever the size of the segment.
+- "Reads it back and compares" no longer means comparing with an object in
+  memory, because there is none. The replica reads its local copy a second
+  time and compares each chunk with the same bytes of the stored object,
+  and the object's index and footer with what that second reading says they
+  must be. A checksum taken while sending would have saved the second read
+  and been weaker in 32 bits, or a new dependency in more; the copy is
+  there and a comparison is exact. The price is one more sequential read
+  of a segment, once in its life.
+- The object appears under its key when the upload is completed and not
+  before. An upload that fails, or whose copy turns out short or damaged
+  half way, is aborted and leaves nothing under the key.
+- One thing is now left for the bucket to do. On S3 a segment is a
+  multipart upload, and the parts of one that was neither completed nor
+  aborted stay in the bucket, unseen by any listing. A replica aborts the
+  uploads it gives up on; it cannot abort the one it was killed in the
+  middle of. So "no listing of the object store is ever needed to find
+  garbage" holds for objects, and for parts the bucket needs a lifecycle
+  rule that aborts incomplete multipart uploads
+  (`docs/operations/README.md`, "Before you deploy").
