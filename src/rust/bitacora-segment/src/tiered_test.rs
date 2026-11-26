@@ -4,6 +4,9 @@
 //!
 //! - Encoding: the object starts with the frames unchanged, and a copy that is not exactly the sealed
 //!   segment (short, long, misplaced, empty or damaged) is refused.
+//! - Encoding piece by piece: an object built from the frames in chunks, however they are cut between two
+//!   frames, is byte for byte the object built in one go, and what is wrong with a chunk is reported as it
+//!   would be for the whole.
 //! - The footer: what it says about the object, and every way bytes are refused as one.
 //! - The block index: every sequence number is found in the blocks fetched for it, and fetch limits are
 //!   rounded to whole blocks.
@@ -13,7 +16,9 @@
 //!
 //! `large_frames` is a segment of 60 batches of about 10 KiB each, so that it spans several blocks of
 //! 64 KiB; `large_object` is its tiered object. `open` reads an object the way a reader does: the footer
-//! first, then the index it points at.
+//! first, then the index it points at. `object_built_from` feeds chunks of frames to a
+//! [`TieredSegmentEncoder`] and lays out what an upload would store: the chunks, then the trailer.
+//! `frames_cut_after` cuts the large fixture between two frames, since a chunk is always whole frames.
 
 use bitacora_types::DeterministicRandom;
 
@@ -344,6 +349,169 @@ fn copy_with_a_damaged_frame_is_not_uploaded() {
     let encoded = encode_tiered_segment(header(), LARGE_SEALED_END, &Bytes::from(damaged_frames));
 
     assert!(matches!(encoded, Err(TieredError::InvalidFrames(_))));
+}
+
+// Encoding piece by piece.
+
+/// The object an upload stores when it hands `chunks` to an encoder one after the other: the chunks as
+/// they are, then the trailer the encoder ends with.
+fn object_built_from(chunks: &[Bytes]) -> Result<Bytes, TieredError> {
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+    let mut object = BytesMut::new();
+    for chunk in chunks {
+        encoder.add_frames(chunk)?;
+        object.put_slice(chunk);
+    }
+    object.put_slice(&encoder.finish()?);
+    Ok(object.freeze())
+}
+
+/// The large fixture's frames cut into chunks: a new chunk begins after each of the batch counts given,
+/// which must increase.
+fn frames_cut_after(batch_counts: &[usize]) -> Vec<Bytes> {
+    let frames = large_frames();
+    let batches = decode_frames(SEGMENT, &frames).expect("the fixture's frames are valid");
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0;
+    let mut offset_bytes = 0;
+    for (batch_number, batch) in batches.iter().enumerate() {
+        offset_bytes += batch.frame().len();
+        if batch_counts.contains(&(batch_number + 1)) {
+            chunks.push(frames.slice(chunk_start..offset_bytes));
+            chunk_start = offset_bytes;
+        }
+    }
+    chunks.push(frames.slice(chunk_start..));
+    chunks
+}
+
+/// How many batches the large fixture holds, as a count of things in memory.
+fn large_batch_count() -> usize {
+    usize::try_from(LARGE_BATCH_COUNT).expect("a small count")
+}
+
+#[test]
+fn frames_added_in_one_chunk_build_the_object_of_the_whole() {
+    let built = object_built_from(&[large_frames()]);
+
+    assert_eq!(built, Ok(large_object()));
+}
+
+#[test]
+fn frames_added_batch_by_batch_build_the_object_of_the_whole() {
+    let after_every_batch: Vec<usize> = (1..large_batch_count()).collect();
+
+    let built = object_built_from(&frames_cut_after(&after_every_batch));
+
+    assert_eq!(built, Ok(large_object()));
+}
+
+/// A block of the index starts wherever the frames reach 64 KiB, whatever the chunks: cutting the frames
+/// in other places must not move a block.
+#[test]
+fn frames_cut_at_random_between_batches_build_the_object_of_the_whole() {
+    let mut random = DeterministicRandom::from_seed(7);
+
+    for _attempt in 0..50 {
+        let mut cuts = Vec::new();
+        for batch_number in 1..large_batch_count() {
+            if random.chance(1, 4) {
+                cuts.push(batch_number);
+            }
+        }
+
+        let built = object_built_from(&frames_cut_after(&cuts));
+
+        assert_eq!(built, Ok(large_object()), "cut after batches {cuts:?}");
+    }
+}
+
+#[test]
+fn chunk_without_frames_changes_nothing() {
+    let mut chunks = frames_cut_after(&[20]);
+    chunks.insert(1, Bytes::new());
+
+    let built = object_built_from(&chunks);
+
+    assert_eq!(built, Ok(large_object()));
+}
+
+#[test]
+fn encoder_given_no_frames_ends_a_segment_sealed_empty() {
+    let sealed_empty = SequenceNumber::new(FIRST_SEQUENCE - 1);
+
+    let trailer = TieredSegmentEncoder::new(header(), sealed_empty).finish();
+
+    assert_eq!(trailer, Ok(empty_object()));
+}
+
+/// A chunk is whole frames. One that ends inside a frame is refused, and the offset in the refusal counts
+/// from the first frame of the segment, as it would if the frames had been given in one piece.
+#[test]
+fn chunk_that_ends_inside_a_frame_is_refused_at_its_place_in_the_segment() {
+    let chunks = frames_cut_after(&[20]);
+    let cut_inside_the_last_frame = chunks[1].slice(..chunks[1].len() - 1);
+    let batches = decode_frames(SEGMENT, &large_frames()).expect("the fixture's frames are valid");
+    let last_frame_bytes = batches.last().expect("the fixture has batches").frame().len();
+    let offset_of_the_last_frame = large_frames().len() - last_frame_bytes;
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+    encoder.add_frames(&chunks[0]).expect("whole frames are taken");
+
+    let refused = encoder.add_frames(&cut_inside_the_last_frame);
+
+    assert!(
+        matches!(
+            refused,
+            Err(TieredError::InvalidFrames(FramesError::InvalidFrame { offset_bytes, .. }))
+                if offset_bytes == offset_of_the_last_frame
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn chunk_that_skips_records_is_refused_like_a_gap_between_two_frames() {
+    let chunks = frames_cut_after(&[20, 21]);
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+    encoder.add_frames(&chunks[0]).expect("whole frames are taken");
+
+    // The twenty-first batch is left out.
+    let refused = encoder.add_frames(&chunks[2]);
+
+    assert_eq!(
+        refused,
+        Err(TieredError::InvalidFrames(FramesError::SequenceGap {
+            expected: SequenceNumber::new(FIRST_SEQUENCE + 20 * LARGE_RECORDS_PER_BATCH),
+            found: SequenceNumber::new(FIRST_SEQUENCE + 21 * LARGE_RECORDS_PER_BATCH),
+        }))
+    );
+}
+
+#[test]
+fn damaged_frame_in_a_later_chunk_is_refused() {
+    let mut chunks = frames_cut_after(&[20]);
+    let mut damaged_chunk = chunks[1].to_vec();
+    damaged_chunk[1_000] ^= 0x01;
+    chunks[1] = Bytes::from(damaged_chunk);
+
+    let built = object_built_from(&chunks);
+
+    assert!(matches!(built, Err(TieredError::InvalidFrames(_))), "{built:?}");
+}
+
+/// The frames are judged as a whole only when there are no more: an upload learns that its copy is short
+/// from the encoder's last step, which comes before it completes anything.
+#[test]
+fn frames_that_stop_short_of_the_sealed_end_are_refused_when_the_object_is_ended() {
+    let short_frames = frames_of(LARGE_BATCH_COUNT - 1, LARGE_RECORDS_PER_BATCH, LARGE_PAYLOAD_BYTES);
+    let refusal_of_the_whole = encode_tiered_segment(header(), LARGE_SEALED_END, &short_frames);
+    let mut encoder = TieredSegmentEncoder::new(header(), LARGE_SEALED_END);
+    encoder.add_frames(&short_frames).expect("whole frames are taken");
+
+    let refused = encoder.finish();
+
+    assert!(matches!(refused, Err(TieredError::WrongExtent { .. })), "{refused:?}");
+    assert_eq!(refused, refusal_of_the_whole);
 }
 
 // The block index.

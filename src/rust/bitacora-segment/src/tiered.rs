@@ -10,7 +10,9 @@
 //!
 //! # What it contains
 //!
-//! - [`encode_tiered_segment`]: builds the object from the batch frames of a sealed copy.
+//! - [`TieredSegmentEncoder`]: builds the end of the object while the frames of a sealed copy go by in
+//!   chunks, so that an upload never holds a segment.
+//! - [`encode_tiered_segment`]: builds the whole object from all the frames at once, for tests and tools.
 //! - [`TieredFooter`]: the fixed-size trailer that identifies the segment and locates the block index.
 //! - [`TieredIndex`]: the block index, which maps a sequence number to the bytes to fetch.
 //! - [`TieredError`]: why bytes are not a valid tiered object, or cannot become one.
@@ -35,13 +37,22 @@
 //!
 //! A reader that knows the object's size, which the metadata store records, fetches the footer, then the
 //! index, then whole blocks. The footer is at the end, not the start, because the index can only be
-//! written after the frames have been walked, and an object is written in one piece.
+//! written after the frames have been walked, and an object is written front to back.
+//!
+//! That order is also what lets an upload run in a little memory. The frames of the object are the frames
+//! of the copy, so the uploader passes each chunk it reads straight on, and the encoder only looks at it:
+//! it checks the frames, checks that the chunk continues the one before, and notes where a block begins.
+//! The block index is a function of the frames and not of how they were cut into chunks, so the object is
+//! the same bytes whatever the chunk size.
 //!
 //! # Invariants
 //!
 //! - Everything here is a pure function over bytes: no I/O, no clock.
 //! - An object is built only from frames that are exactly the sealed segment, first record to sealed end.
-//!   A short or damaged copy never reaches the object store.
+//!   A short or damaged copy never reaches the object store: every frame is verified as it goes by, and
+//!   the extent when the frames end, which is before the encoder gives out the footer that completes the
+//!   object.
+//! - The encoder keeps 16 bytes for every 64 KiB of frames and nothing else of them.
 //! - A block range returned by [`TieredIndex::blocks_from`] starts and ends between two frames, so the
 //!   fetched bytes always decode on their own.
 //! - Looking up a block allocates nothing: it is a binary search and a walk over the entries.
@@ -546,10 +557,282 @@ fn blocks_describe_the_frames(blocks: &[IndexEntry], footer: &TieredFooter) -> b
     true
 }
 
+/// Builds the end of a tiered object while the frames of a sealed copy go by, chunk after chunk.
+///
+/// A segment is a gigabyte by default, so whoever uploads one must not hold it. The frames of the object
+/// are the frames of the copy, unchanged: the uploader sends each chunk on as it reads it, and shows it
+/// to the encoder, which verifies it and notes where the blocks begin. When the copy has been read to its
+/// end, [`TieredSegmentEncoder::finish`] returns what follows the frames in the object: the block index
+/// and the footer. What the encoder holds is one index entry of 16 bytes for every 64 KiB of frames.
+///
+/// A chunk is whole frames, which is what a read of a copy returns. [`encode_tiered_segment`] is this
+/// encoder given all the frames as one chunk, so there is one implementation of the format.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_segment::format::{Batch, SegmentHeader};
+/// use bitacora_segment::tiered::{TieredSegmentEncoder, encode_tiered_segment};
+/// use bitacora_types::{Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId};
+/// use bytes::Bytes;
+///
+/// let address = SegmentAddress::new(StreamId::new(7), SegmentId::new(3));
+/// let segment = SegmentHeader {
+///     address,
+///     epoch: Epoch::new(5),
+///     first_sequence: SequenceNumber::new(100),
+/// };
+/// let first_batch = Batch::encode(address, SequenceNumber::new(100), &[Bytes::from_static(b"a")])?;
+/// let second_batch = Batch::encode(address, SequenceNumber::new(101), &[Bytes::from_static(b"b")])?;
+///
+/// // What an upload does: each chunk goes to the store as it is, and past the encoder.
+/// let mut encoder = TieredSegmentEncoder::new(segment, SequenceNumber::new(101));
+/// let mut stored = Vec::new();
+/// for chunk in [first_batch.frame(), second_batch.frame()] {
+///     encoder.add_frames(chunk)?;
+///     stored.extend_from_slice(chunk);
+/// }
+/// stored.extend_from_slice(&encoder.finish()?);
+///
+/// let both_frames = Bytes::from([first_batch.frame().as_ref(), second_batch.frame().as_ref()].concat());
+/// let built_in_one_go = encode_tiered_segment(segment, SequenceNumber::new(101), &both_frames)?;
+/// assert_eq!(stored, built_in_one_go);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct TieredSegmentEncoder {
+    /// The identity of the sealed segment, which goes into the footer and which every frame must carry.
+    segment: SegmentHeader,
+    /// The segment's final sequence number, which the frames must end at.
+    sealed_end: SequenceNumber,
+    /// Where the blocks begin among the frames seen so far.
+    block_index: SparseIndex,
+    /// How many bytes of frames were seen so far: the offset of the next frame in the object.
+    frames_bytes: u64,
+    /// The first record of the frames seen so far, if there is one.
+    found_first: Option<SequenceNumber>,
+    /// The last record of the frames seen so far, if there is one.
+    found_end: Option<SequenceNumber>,
+}
+
+impl TieredSegmentEncoder {
+    /// Starts the object of a sealed segment, before any of its frames.
+    ///
+    /// # Arguments
+    ///
+    /// * `segment` - The identity of the sealed segment.
+    /// * `sealed_end` - The segment's final sequence number. One below its first sequence number if it was
+    ///   sealed empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_segment::format::SegmentHeader;
+    /// use bitacora_segment::tiered::{TIERED_FOOTER_BYTES, TieredSegmentEncoder};
+    /// use bitacora_types::{Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId};
+    ///
+    /// let segment = SegmentHeader {
+    ///     address: SegmentAddress::new(StreamId::new(7), SegmentId::new(3)),
+    ///     epoch: Epoch::new(5),
+    ///     first_sequence: SequenceNumber::new(100),
+    /// };
+    ///
+    /// // A segment that was sealed empty has no frames: its object is the footer alone.
+    /// let trailer = TieredSegmentEncoder::new(segment, SequenceNumber::new(99)).finish()?;
+    ///
+    /// assert_eq!(trailer.len(), TIERED_FOOTER_BYTES);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn new(segment: SegmentHeader, sealed_end: SequenceNumber) -> Self {
+        Self {
+            segment,
+            sealed_end,
+            block_index: SparseIndex::new(),
+            frames_bytes: 0,
+            found_first: None,
+            found_end: None,
+        }
+    }
+
+    /// Takes the next frames of the copy: the bytes the object goes on with.
+    ///
+    /// Verifies every frame of the chunk and that the chunk continues where the frames before it ended,
+    /// then notes where its blocks begin. Nothing is copied. A chunk that is refused leaves the encoder as
+    /// it was, but an upload that was refused a chunk has nothing left to build.
+    ///
+    /// # Arguments
+    ///
+    /// * `frames` - Whole batch frames, with nothing before, between or after them. May be empty.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`TieredError::InvalidFrames`] if a frame is invalid, which includes a chunk that ends
+    /// inside a frame, or if a frame does not start right after the one before it, in this chunk or the
+    /// previous one. The offset of an invalid frame counts from the first frame of the segment, not of the
+    /// chunk, so the error is the one all the frames in one piece would give.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_segment::format::{Batch, SegmentHeader};
+    /// use bitacora_segment::tiered::{TieredError, TieredSegmentEncoder};
+    /// use bitacora_types::{Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId};
+    /// use bytes::Bytes;
+    ///
+    /// let address = SegmentAddress::new(StreamId::new(7), SegmentId::new(3));
+    /// let segment = SegmentHeader {
+    ///     address,
+    ///     epoch: Epoch::new(5),
+    ///     first_sequence: SequenceNumber::new(100),
+    /// };
+    /// let batch = Batch::encode(address, SequenceNumber::new(100), &[Bytes::from_static(b"sealed")])?;
+    /// let cut_inside_the_frame = batch.frame().slice(..batch.frame().len() - 1);
+    /// let mut encoder = TieredSegmentEncoder::new(segment, SequenceNumber::new(100));
+    ///
+    /// let refused = encoder.add_frames(&cut_inside_the_frame);
+    ///
+    /// assert!(matches!(refused, Err(TieredError::InvalidFrames(_))));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn add_frames(&mut self, frames: &Bytes) -> Result<(), TieredError> {
+        let batches = match decode_frames(self.segment.address, frames) {
+            Ok(batches) => batches,
+            Err(frames_error) => return Err(TieredError::InvalidFrames(self.placed_in_the_segment(frames_error))),
+        };
+        self.require_the_next_record(&batches)?;
+        for batch in &batches {
+            self.block_index
+                .observe_batch(batch.first_sequence(), self.frames_bytes);
+            self.frames_bytes += to_u64(batch.frame().len());
+            if self.found_first.is_none() {
+                self.found_first = Some(batch.first_sequence());
+            }
+            self.found_end = Some(batch.last_sequence());
+        }
+        Ok(())
+    }
+
+    /// Ends the object: checks that the frames were the whole segment and builds what follows them.
+    ///
+    /// # Returns
+    ///
+    /// The block index and the footer, in that order: the bytes of the object after its frames. For a
+    /// segment that was sealed empty, the footer alone.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`TieredError::WrongExtent`] if the frames were not exactly the records from the
+    /// segment's first sequence number to its sealed end.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frames held 2^32 blocks or more, which would take a segment of 256 TiB.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitacora_segment::format::{Batch, SegmentHeader};
+    /// use bitacora_segment::tiered::{TieredError, TieredSegmentEncoder};
+    /// use bitacora_types::{Epoch, SegmentAddress, SegmentId, SequenceNumber, StreamId};
+    /// use bytes::Bytes;
+    ///
+    /// let address = SegmentAddress::new(StreamId::new(7), SegmentId::new(3));
+    /// let segment = SegmentHeader {
+    ///     address,
+    ///     epoch: Epoch::new(5),
+    ///     first_sequence: SequenceNumber::new(100),
+    /// };
+    /// let batch = Batch::encode(address, SequenceNumber::new(100), &[Bytes::from_static(b"sealed")])?;
+    /// // The segment is sealed at 105, and this copy ends at 100.
+    /// let mut encoder = TieredSegmentEncoder::new(segment, SequenceNumber::new(105));
+    /// encoder.add_frames(batch.frame())?;
+    ///
+    /// let short_copy = encoder.finish();
+    ///
+    /// assert!(matches!(short_copy, Err(TieredError::WrongExtent { .. })));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn finish(self) -> Result<Bytes, TieredError> {
+        self.require_the_sealed_extent()?;
+        let blocks = self.block_index.entries();
+        let mut encoded_index = BytesMut::with_capacity(blocks.len() * INDEX_ENTRY_BYTES);
+        for block in blocks {
+            encoded_index.put_u64_le(block.first_sequence.get());
+            encoded_index.put_u64_le(block.offset_bytes);
+        }
+        let footer = TieredFooter {
+            segment: self.segment,
+            sealed_end: self.sealed_end,
+            frames_bytes: self.frames_bytes,
+            index_entry_count: u32::try_from(blocks.len()).expect("a segment has far fewer than 2^32 blocks of 64 KiB"),
+            index_checksum: crc32c::crc32c(&encoded_index),
+        };
+        encoded_index.put_slice(&footer.encode());
+        Ok(encoded_index.freeze())
+    }
+
+    /// Moves the offset of an invalid frame from its chunk to the segment, so that an error names the same
+    /// byte whether the frames came in one piece or in several.
+    fn placed_in_the_segment(&self, frames_error: FramesError) -> FramesError {
+        match frames_error {
+            FramesError::InvalidFrame { offset_bytes, reason } => {
+                let frames_before_the_chunk =
+                    usize::try_from(self.frames_bytes).expect("frames that were held in memory fit in memory");
+                FramesError::InvalidFrame {
+                    offset_bytes: frames_before_the_chunk + offset_bytes,
+                    reason,
+                }
+            }
+            FramesError::SequenceGap { .. } => frames_error,
+        }
+    }
+
+    /// Checks that the first of `batches` starts right after the last record of the chunks before it.
+    ///
+    /// Within a chunk, [`decode_frames`] has checked the same of every later batch. Fails with the error it
+    /// gives, a gap between two frames.
+    fn require_the_next_record(&self, batches: &[Batch]) -> Result<(), TieredError> {
+        let (Some(previous_end), Some(first_batch)) = (self.found_end, batches.first()) else {
+            return Ok(());
+        };
+        let expected = previous_end.next();
+        if first_batch.first_sequence() == expected {
+            return Ok(());
+        }
+        Err(TieredError::InvalidFrames(FramesError::SequenceGap {
+            expected,
+            found: first_batch.first_sequence(),
+        }))
+    }
+
+    /// Checks that the frames seen were exactly the sealed segment: its first record to its sealed end, or
+    /// nothing at all for a segment that was sealed empty.
+    ///
+    /// Fails with [`TieredError::WrongExtent`] otherwise.
+    fn require_the_sealed_extent(&self) -> Result<(), TieredError> {
+        let is_the_sealed_segment = match (self.found_first, self.found_end) {
+            (Some(first), Some(end)) => first == self.segment.first_sequence && end == self.sealed_end,
+            _no_records => self.sealed_end == self.segment.first_sequence.preceding(),
+        };
+        if is_the_sealed_segment {
+            return Ok(());
+        }
+        Err(TieredError::WrongExtent {
+            expected_first: self.segment.first_sequence,
+            expected_end: self.sealed_end,
+            found_first: self.found_first,
+            found_end: self.found_end,
+        })
+    }
+}
+
 /// Builds the tiered object of a sealed segment from the batch frames of one of its copies.
 ///
 /// Every frame is verified before anything is built, and the frames must be exactly the segment, so an
-/// upload never stores a short or damaged copy. The frames are copied into the object unchanged.
+/// upload never stores a short or damaged copy. The frames are copied into the object unchanged. This
+/// holds the frames and the object at once: it is for tests and tools. An upload of a real segment uses
+/// [`TieredSegmentEncoder`], which this is built on.
 ///
 /// # Arguments
 ///
@@ -600,70 +883,14 @@ pub fn encode_tiered_segment(
     sealed_end: SequenceNumber,
     frames: &Bytes,
 ) -> Result<Bytes, TieredError> {
-    let batches = decode_frames(segment.address, frames)?;
-    require_the_sealed_extent(segment, sealed_end, &batches)?;
+    let mut encoder = TieredSegmentEncoder::new(segment, sealed_end);
+    encoder.add_frames(frames)?;
+    let index_and_footer = encoder.finish()?;
 
-    let encoded_index = encode_block_index(&batches);
-    let index_entry_count = encoded_index.len() / INDEX_ENTRY_BYTES;
-    let footer = TieredFooter {
-        segment,
-        sealed_end,
-        frames_bytes: to_u64(frames.len()),
-        index_entry_count: u32::try_from(index_entry_count)
-            .expect("a segment has far fewer than 2^32 blocks of 64 KiB"),
-        index_checksum: crc32c::crc32c(&encoded_index),
-    };
-
-    let mut object = BytesMut::with_capacity(frames.len() + encoded_index.len() + TIERED_FOOTER_BYTES);
+    let mut object = BytesMut::with_capacity(frames.len() + index_and_footer.len());
     object.put_slice(frames);
-    object.put_slice(&encoded_index);
-    object.put_slice(&footer.encode());
+    object.put_slice(&index_and_footer);
     Ok(object.freeze())
-}
-
-/// Checks that `batches` are exactly the sealed segment: its first record to its sealed end, or nothing
-/// at all for a segment that was sealed empty.
-///
-/// Fails with [`TieredError::WrongExtent`] otherwise.
-fn require_the_sealed_extent(
-    segment: SegmentHeader,
-    sealed_end: SequenceNumber,
-    batches: &[Batch],
-) -> Result<(), TieredError> {
-    let found_first = batches.first().map(Batch::first_sequence);
-    let found_end = batches.last().map(Batch::last_sequence);
-    let is_the_sealed_segment = match (found_first, found_end) {
-        (Some(first), Some(end)) => first == segment.first_sequence && end == sealed_end,
-        _no_records => sealed_end == segment.first_sequence.preceding(),
-    };
-    if is_the_sealed_segment {
-        return Ok(());
-    }
-    Err(TieredError::WrongExtent {
-        expected_first: segment.first_sequence,
-        expected_end: sealed_end,
-        found_first,
-        found_end,
-    })
-}
-
-/// Builds the block index of `batches` laid end to end, and serializes it.
-///
-/// The blocks start where the sparse index of a segment file would put its entries, with offsets counted
-/// from the first frame.
-fn encode_block_index(batches: &[Batch]) -> BytesMut {
-    let mut index = SparseIndex::new();
-    let mut offset_bytes = 0;
-    for batch in batches {
-        index.observe_batch(batch.first_sequence(), offset_bytes);
-        offset_bytes += to_u64(batch.frame().len());
-    }
-    let mut encoded_index = BytesMut::with_capacity(index.entries().len() * INDEX_ENTRY_BYTES);
-    for block in index.entries() {
-        encoded_index.put_u64_le(block.first_sequence.get());
-        encoded_index.put_u64_le(block.offset_bytes);
-    }
-    encoded_index
 }
 
 #[cfg(test)]
