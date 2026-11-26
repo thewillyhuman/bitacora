@@ -1008,6 +1008,129 @@ async fn upload_holds_back_less_than_a_part_between_pieces() {
     );
 }
 
+/// Pieces of every kind: shorter than what is left of a part, exactly filling it, several parts long.
+const PIECES_OF_MANY_SIZES: [&[u8]; 6] = [
+    b"123",
+    b"4567890",
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHI",
+    b"J",
+    b"KLMNOPQRSTUVWXYZ0123",
+    b"45678",
+];
+
+/// What a buffer of parts of [`SMALL_PART_BYTES`] did with [`PIECES_OF_MANY_SIZES`].
+struct FilledParts {
+    /// The parts the buffer gave out, in order.
+    parts: Vec<Bytes>,
+    /// What the buffer held at the end.
+    rest: Bytes,
+    /// The largest capacity the buffer had after any step.
+    largest_buffer_bytes: usize,
+}
+
+/// Hands [`PIECES_OF_MANY_SIZES`] to a buffer of parts of [`SMALL_PART_BYTES`], the way an upload does.
+///
+/// # Arguments
+///
+/// * `parts_are_sent_at_once` - Whether each part is dropped before the buffer is filled again, as when
+///   the service has taken it. Otherwise every part is still alive while the next ones are filled.
+fn fill_parts_with_pieces_of_many_sizes(parts_are_sent_at_once: bool) -> FilledParts {
+    let mut part_buffer = PartBuffer::of_parts_of(SMALL_PART_BYTES);
+    let mut parts = Vec::new();
+    let mut parts_still_alive = Vec::new();
+    let mut largest_buffer_bytes = 0;
+    for piece in PIECES_OF_MANY_SIZES {
+        let mut rest_of_the_piece = Bytes::from_static(piece);
+        while !rest_of_the_piece.is_empty() {
+            let full_part = part_buffer.fill_from(&mut rest_of_the_piece);
+            largest_buffer_bytes = largest_buffer_bytes.max(part_buffer.unsent.capacity());
+            if let Some(part) = full_part {
+                parts.push(Bytes::copy_from_slice(&part));
+                if !parts_are_sent_at_once {
+                    parts_still_alive.push(part);
+                }
+            }
+        }
+    }
+    FilledParts {
+        parts,
+        rest: part_buffer.take_rest(),
+        largest_buffer_bytes,
+    }
+}
+
+#[test]
+fn part_buffer_cuts_the_pieces_into_parts_of_one_size() {
+    let filled = fill_parts_with_pieces_of_many_sizes(true);
+
+    assert_eq!(
+        filled.parts,
+        [
+            Bytes::from_static(b"1234567890"),
+            Bytes::from_static(b"abcdefghij"),
+            Bytes::from_static(b"klmnopqrst"),
+            Bytes::from_static(b"uvwxyzABCD"),
+            Bytes::from_static(b"EFGHIJKLMN"),
+            Bytes::from_static(b"OPQRSTUVWX"),
+            Bytes::from_static(b"YZ01234567"),
+        ]
+    );
+}
+
+#[test]
+fn part_buffer_keeps_what_does_not_fill_a_part() {
+    let filled = fill_parts_with_pieces_of_many_sizes(true);
+
+    assert_eq!(filled.rest, Bytes::from_static(b"8"));
+}
+
+/// The bound in bytes: the memory of an upload is one buffer of one part, which is filled, sent and filled
+/// again. A buffer that took a whole piece before it cut parts from it would pass every test of the
+/// requests, and hold twice as much or more.
+#[test]
+fn part_buffer_is_never_larger_than_one_part() {
+    let filled = fill_parts_with_pieces_of_many_sizes(true);
+
+    assert_eq!(filled.largest_buffer_bytes, SMALL_PART_BYTES);
+}
+
+/// A service may still hold a part when the next one is filled; the in-memory service of these tests
+/// holds every part until the upload is completed. The buffer must then start a new part, not grow.
+#[test]
+fn part_buffer_is_never_larger_than_one_part_while_earlier_parts_are_still_alive() {
+    let filled = fill_parts_with_pieces_of_many_sizes(false);
+
+    assert_eq!(filled.largest_buffer_bytes, SMALL_PART_BYTES);
+}
+
+#[test]
+fn part_buffer_that_was_handed_nothing_holds_nothing() {
+    let mut part_buffer = PartBuffer::of_parts_of(SMALL_PART_BYTES);
+
+    assert_eq!(part_buffer.unsent.capacity(), 0);
+    assert_eq!(part_buffer.take_rest(), Bytes::new());
+}
+
+#[test]
+fn part_buffer_is_empty_after_its_rest_was_taken() {
+    let mut part_buffer = PartBuffer::of_parts_of(SMALL_PART_BYTES);
+    let _no_part = part_buffer.fill_from(&mut Bytes::from_static(b"123"));
+    let _rest = part_buffer.take_rest();
+
+    assert_eq!(part_buffer.take_rest(), Bytes::new());
+}
+
+/// A part of no bytes would never be full of anything else, and an upload would never end.
+#[test]
+fn part_buffer_has_parts_of_at_least_one_byte() {
+    let mut part_buffer = PartBuffer::of_parts_of(0);
+    let mut piece = Bytes::from_static(b"12");
+
+    let first_part = part_buffer.fill_from(&mut piece);
+
+    assert_eq!(first_part, Some(Bytes::from_static(b"1")));
+}
+
 #[tokio::test]
 async fn piece_of_several_parts_is_sent_as_whole_parts_at_once() {
     let recorded = recorded_store();
@@ -1263,11 +1386,4 @@ async fn upload_to_a_key_with_a_control_character_is_refused() {
     let outcome = store().start_upload("reports/a\u{7}b").await;
 
     assert!(matches!(outcome, Err(ArtifactError::InvalidKey { .. })));
-}
-
-#[tokio::test]
-async fn store_never_sends_a_part_of_no_bytes() {
-    let store = S3ArtifactStore::over(Arc::new(InMemory::new()), "", REQUEST_TIMEOUT, 0);
-
-    assert_eq!(store.upload_part_bytes, 1);
 }

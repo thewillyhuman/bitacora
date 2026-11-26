@@ -29,10 +29,11 @@ thinking is, because they disagree where it matters to callers:
 | A missing bucket | `404`, like a missing object | An outage | Reads the error code in the answer and reports `Unavailable` |
 | An object handed over in pieces | A multipart upload: parts of at least 5 MiB except the last, at most 10,000 of them | Pieces of any size | Gathers the pieces into parts of 8 MiB and sends each when it is full; an object below one part is one plain `PUT` |
 
-An upload keeps what it was handed since the last full part, which is less
-than 8 MiB once a piece has been taken, and sends one part at a time. That
-is the whole of its memory, whatever the size of the object: a segment of
-1 GiB is 128 parts. The object is in the bucket when the service has
+An upload copies what it is handed into a buffer of one part, sends the
+part when the buffer is full, one part at a time, and fills the same buffer
+again. Those 8 MiB are the whole of its memory, whatever the size of the
+object and of the pieces: a segment of 1 GiB is 128 parts through one
+buffer. The object is in the bucket when the service has
 completed the multipart upload and not before. An upload that lost a part
 refuses to go on, so that an object with a hole in it is never completed.
 
@@ -72,8 +73,8 @@ of it for nothing. See `docs/decisions/0005-s3-backend.md`.
   a real S3 server.
 - No operation outlives `S3Settings::request_timeout`. For an upload, each
   part and the completion are one operation each.
-- An upload holds less than one part of 8 MiB between two pieces, and every
-  part but the last has exactly that size.
+- An upload holds one buffer of one part, 8 MiB, and never a larger one.
+  Every part but the last has exactly that size.
 - An upload that could not send a part is never completed.
 - An upload that sent a part and does not end in a completion asks the
   service to drop its parts, once.

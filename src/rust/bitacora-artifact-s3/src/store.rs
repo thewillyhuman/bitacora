@@ -14,6 +14,7 @@
 //! - [`S3ArtifactStore`]: the store. It implements `ArtifactStore` over any
 //!   `object_store::ObjectStore`; `s3.rs` builds it for an S3 service.
 //! - `S3Upload`: an object on its way in piece by piece, as the parts of a multipart upload.
+//! - `PartBuffer`: the one buffer of an upload, which turns pieces of any size into parts of one size.
 //!
 //! # How it works
 //!
@@ -36,10 +37,11 @@
 //!   therefore exact, and one that ends inside a name costs a listing of that name's directory.
 //! - **Uploads.** The interface takes a large object in pieces of any size and makes it appear at the end.
 //!   The service has multipart uploads for that, with rules of its own: every part but the last must be
-//!   at least 5 MiB, and the stricter services want them all of one size. The store gathers the pieces
-//!   into parts of 8 MiB and sends each when it is full, one after the other, so an upload keeps less
-//!   than a part and the piece it was just handed. An object that never fills a part is stored with one
-//!   plain `PUT`. The service keeps the parts of a multipart upload until it is completed or aborted, so
+//!   at least 5 MiB, and the stricter services want them all of one size. The store copies the pieces
+//!   into a buffer of one part of 8 MiB, sends the part each time the buffer is full, one part after the
+//!   other, and fills the same buffer again. That buffer is all an upload holds, whatever the size of
+//!   the object and of the pieces. An object that never fills a part is stored with one plain `PUT`. The
+//!   service keeps the parts of a multipart upload until it is completed or aborted, so
 //!   the store aborts every upload that ends any other way than by a completion: one that is aborted,
 //!   one whose completion fails, and one that is dropped, whose abort runs in a task of its own because
 //!   a drop cannot wait. The parts of an upload whose process died, or whose abort did not reach the
@@ -88,9 +90,9 @@ const MISSING_BUCKET_CODE: &str = "<Code>NoSuchBucket</Code>";
 /// How many bytes of an upload go to the service as one part: 8 MiB.
 ///
 /// S3 refuses a part smaller than 5 MiB unless it is the last one, and takes at most 10,000 parts, so this
-/// size stores objects of up to 78 GiB; a segment is 1 GiB. It is also the most an upload keeps in memory,
-/// next to the piece it was just handed. Every part but the last has exactly this size, which the stricter
-/// S3-compatible services insist on.
+/// size stores objects of up to 78 GiB; a segment is 1 GiB. It is also what an upload holds in memory: one
+/// buffer of this size. Every part but the last has exactly this size, which the stricter S3-compatible
+/// services insist on.
 pub(crate) const UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 
 /// An artifact store that keeps its objects in an object store service.
@@ -144,8 +146,8 @@ impl S3ArtifactStore {
     /// * `key_prefix` - The path inside the service that every key is put under: empty, or a plain
     ///   relative path without a leading or trailing `/`.
     /// * `request_timeout` - The longest one operation may take.
-    /// * `upload_part_bytes` - The size of the parts an upload is sent in. At least one byte; an S3
-    ///   service wants at least 5 MiB.
+    /// * `upload_part_bytes` - The size of the parts an upload is sent in. An S3 service wants at least
+    ///   5 MiB.
     pub(crate) fn over(
         object_store: Arc<dyn ObjectStore>,
         key_prefix: &str,
@@ -161,8 +163,7 @@ impl S3ArtifactStore {
             object_store,
             key_namespace,
             request_timeout,
-            // A part of no bytes would never be full of anything else, and sending would never end.
-            upload_part_bytes: upload_part_bytes.max(1),
+            upload_part_bytes,
         }
     }
 
@@ -397,13 +398,75 @@ fn unavailable(operation: &str, subject: &str, error: &object_store::Error) -> A
     }
 }
 
+/// The one buffer of an upload: pieces of any size go in, parts of one size come out.
+///
+/// The buffer is as large as one part and no larger. A piece is copied into it only as far as the part
+/// that is being filled has room, and the part is given out, to be sent, before the rest of the piece is
+/// looked at. Appending the whole piece first and cutting parts from it afterwards would be less code,
+/// and would let the buffer grow to a part and a piece, doubled by how a buffer grows. This way the
+/// memory of an upload is a number that can be written down: one part.
+///
+/// Once a part has been sent and dropped, its bytes are the buffer of the next part: nothing is
+/// allocated after the first part of an upload.
+#[derive(Debug)]
+struct PartBuffer {
+    /// How many bytes a part holds: at least one.
+    part_bytes: usize,
+    /// The part that is being filled. Never longer than a part, and never with room for more than one.
+    unsent: BytesMut,
+}
+
+impl PartBuffer {
+    /// An empty buffer that gives out parts of `part_bytes`. It holds no memory until it is handed
+    /// something.
+    ///
+    /// # Arguments
+    ///
+    /// * `part_bytes` - The size of a part. Zero is taken as one: a part of no bytes would never be full
+    ///   of anything else, and an upload would never end.
+    fn of_parts_of(part_bytes: usize) -> Self {
+        Self {
+            part_bytes: part_bytes.max(1),
+            unsent: BytesMut::new(),
+        }
+    }
+
+    /// Moves bytes from the front of `piece` into the part that is being filled, as many as fit.
+    ///
+    /// # Arguments
+    ///
+    /// * `piece` - The bytes that follow those already taken. What was taken is removed from its front;
+    ///   what did not fit stays, for the next call.
+    ///
+    /// # Returns
+    ///
+    /// The part, if it is full now; the buffer then starts the next one. `None` if the piece ended first.
+    fn fill_from(&mut self, piece: &mut Bytes) -> Option<Bytes> {
+        let room_bytes = self.part_bytes - self.unsent.len();
+        // Room for the rest of this part and never more. Where the part before was sent and dropped,
+        // this takes its bytes back; where it is still alive, this starts a buffer of one part.
+        self.unsent.reserve(room_bytes);
+        let fitting = piece.split_to(room_bytes.min(piece.len()));
+        self.unsent.extend_from_slice(&fitting);
+        if self.unsent.len() < self.part_bytes {
+            return None;
+        }
+        Some(self.unsent.split().freeze())
+    }
+
+    /// Takes what the buffer holds: the last part of an object, shorter than the others, or empty.
+    fn take_rest(&mut self) -> Bytes {
+        self.unsent.split().freeze()
+    }
+}
+
 /// An object on its way into the service piece by piece.
 ///
 /// The pieces are gathered into parts of the store's part size, and each part is sent as soon as it is
-/// full, as one part of a multipart upload of the service. What the upload keeps is what was handed over
-/// since the last full part: less than a part once [`ObjectUpload::write`] has returned. The multipart
-/// upload is opened when the first part is full, so an object smaller than a part costs one `PUT` and
-/// leaves nothing to clean up.
+/// full, as one part of a multipart upload of the service. What the upload keeps is the part that is being
+/// filled, in a buffer of one part that it uses again and again, whatever the size of the object and of
+/// the pieces. The multipart upload is opened when the first part is full, so an object smaller than a
+/// part costs one `PUT` and leaves nothing to clean up.
 ///
 /// A multipart upload exists at the service until it is completed or aborted, and its parts are billed
 /// meanwhile although no listing shows them. The upload aborts it when it is told to, when its completion
@@ -416,8 +479,8 @@ struct S3Upload {
     location: Path,
     /// The key the object will be stored under, for error messages.
     object_key: String,
-    /// What was handed over and not sent yet.
-    unsent: BytesMut,
+    /// What was handed over and not sent yet: the part that is being filled.
+    unsent: PartBuffer,
     /// The multipart upload of the service, from the moment the first part is sent.
     multipart: Option<Box<dyn MultipartUpload>>,
     /// Whether a part could not be sent. The service then holds a part less than it was handed, so the
@@ -466,7 +529,7 @@ impl S3Upload {
         if self.has_lost_a_part {
             return Err(self.lost_a_part());
         }
-        let rest = self.unsent.split().freeze();
+        let rest = self.unsent.take_rest();
         if self.multipart.is_none() {
             let request = self.store.store_at(&self.location, &self.object_key, rest);
             return self.store.within_deadline("store", &self.object_key, request).await;
@@ -553,15 +616,16 @@ async fn abort_multipart(multipart: &mut dyn MultipartUpload, object_key: &str) 
 
 #[async_trait]
 impl ObjectUpload for S3Upload {
-    /// Adds the piece to what is not sent yet, and sends every full part there is then.
+    /// Moves the piece into the part that is being filled, and sends the part each time it is full.
     async fn write(&mut self, piece: Bytes) -> Result<(), ArtifactError> {
         if self.has_lost_a_part {
             return Err(self.lost_a_part());
         }
-        self.unsent.extend_from_slice(&piece);
-        while self.unsent.len() >= self.store.upload_part_bytes {
-            let part = self.unsent.split_to(self.store.upload_part_bytes).freeze();
-            self.send_part(part).await?;
+        let mut rest_of_the_piece = piece;
+        while !rest_of_the_piece.is_empty() {
+            if let Some(full_part) = self.unsent.fill_from(&mut rest_of_the_piece) {
+                self.send_part(full_part).await?;
+            }
         }
         Ok(())
     }
@@ -627,7 +691,7 @@ impl ArtifactStore for S3ArtifactStore {
             store: self.clone(),
             location,
             object_key: object_key.to_owned(),
-            unsent: BytesMut::new(),
+            unsent: PartBuffer::of_parts_of(self.upload_part_bytes),
             multipart: None,
             has_lost_a_part: false,
         }))
