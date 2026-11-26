@@ -81,7 +81,7 @@ pub enum TakeoverPolicy {
 ///     ..WriterSettings::default()
 /// };
 ///
-/// assert_eq!(settings.max_request_bytes, 256 * 1024);
+/// assert_eq!(settings.max_request_bytes, 4 * 1024 * 1024);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriterSettings {
@@ -93,7 +93,9 @@ pub struct WriterSettings {
     /// How far a replica may fall behind the durable sequence, in bytes of committed records, before the writer rolls
     /// away from it.
     pub max_replica_lag_bytes: usize,
-    /// The target size of one append request. A request always carries at least one batch, however large.
+    /// The target size of one append request. A request always carries at least one batch, however large. A replica
+    /// makes a request durable with one flush and a writer has one request in flight per replica, so this is what a
+    /// stream moves per flush: where a flush is slow, it bounds the stream's throughput (decision record 0017).
     pub max_request_bytes: usize,
     /// How often an idle stream tells its replicas the durable sequence.
     pub heartbeat_interval: Duration,
@@ -120,14 +122,16 @@ pub struct WriterSettings {
 }
 
 impl Default for WriterSettings {
-    /// The values of the design: 64 MiB of flow control and lag, requests of 256 KiB, a heartbeat every 50 ms, a
-    /// replica given up after 10 s, a lease of 10 s renewed every 3 s, and segments of 1 GiB or one hour.
+    /// The values of the design, except for the size of a request: 64 MiB of flow control and lag, a heartbeat every
+    /// 50 ms, a replica given up after 10 s, a lease of 10 s renewed every 3 s, and segments of 1 GiB or one hour. A
+    /// request carries up to 4 MiB where the design's batch has 256 KiB, because of what was measured on a real
+    /// cluster (decision record 0017).
     fn default() -> Self {
         Self {
             writer_identity: "bitacora-writer".to_owned(),
             max_unacknowledged_bytes: 64 * MEBIBYTE,
             max_replica_lag_bytes: 64 * MEBIBYTE,
-            max_request_bytes: 256 * KIBIBYTE,
+            max_request_bytes: 4 * MEBIBYTE,
             heartbeat_interval: Duration::from_millis(50),
             request_timeout: Duration::from_secs(5),
             replica_failure_timeout: Duration::from_secs(10),

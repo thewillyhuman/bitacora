@@ -43,7 +43,7 @@ pub(crate) const DEFAULT_SECONDS: u64 = 10;
 
 /// The most bytes of records a writer sends a replica in one request if the command line does not say: what an
 /// application with default settings sends. A test holds it to the client's own default.
-pub(crate) const DEFAULT_REQUEST_BYTES: usize = 256 * 1024;
+pub(crate) const DEFAULT_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
 /// Everything written after `bita-bench` on a command line.
 #[derive(Clone, Debug, PartialEq, Eq, Parser)]

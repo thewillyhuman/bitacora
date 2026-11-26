@@ -31,7 +31,7 @@ fn append_workload_has_its_defaults() {
             record_bytes: 1024,
             records_per_append: 1,
             appends_in_flight: 16,
-            request_bytes: 262_144,
+            request_bytes: 4_194_304,
             seconds: None,
             records: None,
             rate: None,

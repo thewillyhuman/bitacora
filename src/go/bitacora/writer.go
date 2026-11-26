@@ -15,8 +15,10 @@ import (
 
 const (
 	// writerMaxRequestBytes is about how many bytes of batch frames one
-	// request to a replica carries.
-	writerMaxRequestBytes = 256 * 1024
+	// request to a replica carries. A replica makes a request durable with
+	// one flush, so this is what a stream moves per flush; decision record
+	// 0017 has the measurements behind the value.
+	writerMaxRequestBytes = 4 * 1024 * 1024
 	// writerHeartbeatInterval is how often an idle writer tells each
 	// replica its durable sequence, which is also how it notices a fence
 	// and a replica that stopped answering.

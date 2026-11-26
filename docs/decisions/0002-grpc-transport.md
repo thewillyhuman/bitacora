@@ -146,8 +146,8 @@ the `tonic` features until they are used.
   older client reads the new kind as unavailable and keeps retrying, so a
   new variant must reach the clients before the servers send it.
 - A request larger than 16 MiB fails as unavailable and would be retried
-  for ever. The writer's request size, 256 KiB plus one batch by default,
-  must stay under the limit.
+  for ever. The writer's request size, 4 MiB plus one batch by default
+  (record 0017), must stay under the limit.
 - `ListSegments` answers in one message, which holds a few hundred thousand
   segment copies. A replica that holds more needs the call to be paged.
 - The clean build grows by the gRPC stack, about 110 crates. Building them

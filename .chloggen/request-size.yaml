@@ -1,0 +1,4 @@
+change_type: enhancement
+component: client
+note: "A writer sends a replica up to 4 MiB in one request by default, where it sent 256 KiB. On storage with a slow flush that size bounds the throughput of a stream: on the first real cluster it rose from 24 to 104 MiB/s. The Go client sends the same. WriterSettings::max_request_bytes still sets it."
+issues: [5]

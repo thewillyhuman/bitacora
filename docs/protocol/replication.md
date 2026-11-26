@@ -181,7 +181,7 @@ others. They are what the client libraries use unless told otherwise.
 | A replica is given up on after it was silent for | 10 s |
 | A replica is given up on when it is behind the durable sequence by | 64 MiB |
 | Appending waits when the uncommitted records exceed | 64 MiB |
-| Batch frames in one append request | About 256 KiB |
+| Batch frames in one append request | About 4 MiB |
 | Timeout of a request to a replica | 5 s |
 | Pause before a request is sent again | 100 ms |
 | A segment is rolled at | 1 GiB, or one hour |

@@ -50,3 +50,4 @@ and what follows from it.
 | [0014](decisions/0014-c-abi.md) | The C interface of the client |
 | [0015](decisions/0015-metrics-materializer.md) | The second materializer and what it found in the interface |
 | [0016](decisions/0016-go-client.md) | A native Go client, written from the protocol documents |
+| [0017](decisions/0017-request-size.md) | An append request carries up to 4 MiB |

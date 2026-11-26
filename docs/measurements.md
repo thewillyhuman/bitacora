@@ -54,8 +54,9 @@ moved 107 MiB/s through the same five disks. The replicas' counters say why. Dur
 stream's three replicas made about 80 flushes a second of 250 KiB each, 10 to 11 ms per flush, and spent
 86% of its time flushing.
 
-A writer sends each replica one request at a time, a request carries at most 256 KiB of records
-(`max_request_bytes`, the batch size of the design), and a replica makes a request durable with one flush.
+A writer sends each replica one request at a time, a request carried at most 256 KiB of records in these
+versions (`max_request_bytes`, the batch size of the design), and a replica makes a request durable with
+one flush.
 So a stream moves 256 KiB per flush, and on this storage a flush of that size takes about 10 ms.
 
 The same workload with other request sizes, on `0.1.0-rc.2`: one stream, records of 64 KiB, 128 appends in
@@ -63,7 +64,7 @@ flight.
 
 | Request size | MiB/s | p50 | p99 | Flushes/s on the busiest replica | Per flush |
 | --- | --- | --- | --- | --- | --- |
-| 256 KiB, the default | 23.8 | 344 ms | 442 ms | 102 | 242 KiB in 8.3 ms |
+| 256 KiB, the default of these versions | 23.8 | 344 ms | 442 ms | 102 | 242 KiB in 8.3 ms |
 | 1 MiB | 71.5 | 111 ms | 168 ms | 72 | 1,015 KiB in 9.9 ms |
 | 4 MiB | 104.3 | 74 ms | 160 ms | 28 | 3,763 KiB in 21.1 ms |
 | 8 MiB | 120.3 | 65 ms | 117 ms | 23 | 5,435 KiB in 19.8 ms |
@@ -77,10 +78,10 @@ in requests of 10 KiB.
 With a limit of 4 MiB, 256 appends in flight of 16 records of 1 KiB reached 98,052 records a second
 (95.7 MiB/s, p50 41 ms), and four streams together 118.4 MiB/s (p50 33 ms).
 
-The default was left as the design has it. Where a flush takes a millisecond, 256 KiB per flush would be
-some 250 MiB/s, so the limit is not expected to bind on the disks the design assumes; that was not
-measured. On storage like this one it does bind, and an application can raise
-`WriterSettings::max_request_bytes`.
+Because of these runs, a request carries up to 4 MiB by default in the versions after `0.1.0-rc.3`
+([decision record 0017](decisions/0017-request-size.md)). Where a flush takes a millisecond, 256 KiB per
+flush would be some 250 MiB/s, so the old limit was not expected to bind on the disks the design assumes;
+that was not measured.
 
 ## Against the targets of the design
 
@@ -90,7 +91,7 @@ Section 16 of the design proposes targets for three replicas on NVMe disks with 
 | --- | --- | --- | --- |
 | Append latency, p50 | 2 ms | 7.7 ms | Missed: the flush alone takes 4.5 ms on this storage |
 | Append latency, p99 | 10 ms | 18.4 ms | Missed, for the same reason |
-| Sustained throughput per stream | 50 MiB/s | 23.8 MiB/s | Missed with the default request size; 104 MiB/s with 4 MiB |
+| Sustained throughput per stream | 50 MiB/s | 23.8 MiB/s | Missed with requests of 256 KiB; 104 MiB/s with 4 MiB, the default since |
 | Tail reader delay behind commit | 5 ms | | Not measured: the tool has no such workload |
 | Write unavailability on writer failover | 5 s | | Not measured: a forced takeover was over within the five seconds its pod took to start, run and stop |
 | Write pause on a replica-failure roll | 200 ms | 157 ms | Met in the one run made: the worst append while a replica was killed |

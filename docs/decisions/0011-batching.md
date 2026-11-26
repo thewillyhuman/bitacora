@@ -13,7 +13,8 @@ an idle stream waits a millisecond it does not need to.
 There is no timer. The records of one `append` or `append_batch` call form
 one batch frame, and each replica has at most one request in flight. When a
 request returns, the next one carries every frame that was enqueued in the
-meantime, up to the request size limit of 256 KiB.
+meantime, up to the request size limit of 256 KiB. (The limit has been
+4 MiB since record 0017.)
 
 The effect is the batching the design wants, clocked by the replicas
 themselves. An idle stream sends a record at once. A busy stream fills each
