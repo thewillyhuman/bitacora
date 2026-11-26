@@ -57,6 +57,7 @@ crate.from_cargo(
         "//src/rust/bitacora-segment:Cargo.toml",
         "//src/rust/bitacora-sim:Cargo.toml",
         "//src/rust/bitacora-testkit:Cargo.toml",
+        "//src/rust/bitacora-testports:Cargo.toml",
         "//src/rust/bitacora-types:Cargo.toml",
     ],
 )

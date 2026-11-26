@@ -24,6 +24,7 @@ members = [
     "bitacora-segment",
     "bitacora-sim",
     "bitacora-testkit",
+    "bitacora-testports",
     "bitacora-types",
 ]
 
@@ -55,6 +56,7 @@ bitacora-replica = { path = "bitacora-replica", version = "0.0.0" }
 bitacora-segment = { path = "bitacora-segment", version = "0.0.0" }
 bitacora-sim = { path = "bitacora-sim", version = "0.0.0" }
 bitacora-testkit = { path = "bitacora-testkit", version = "0.0.0" }
+bitacora-testports = { path = "bitacora-testports", version = "0.0.0" }
 bitacora-types = { path = "bitacora-types", version = "0.0.0" }
 
 # Third-party crates. One version for the whole workspace.

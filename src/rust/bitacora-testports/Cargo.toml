@@ -1,0 +1,14 @@
+[package]
+name = "bitacora-testports"
+description = "Loopback ports for tests that start real servers: blocks of ports that one test owns, so that tests running in parallel never give two servers the same port."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

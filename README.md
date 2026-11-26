@@ -97,6 +97,7 @@ from the rows above its own, except in its tests.
 | Components | `bitacora-replica`, `bitacora-client`, `bitacora-controller`, `bitacora-meta-etcd`, `bitacora-process` | One storage node; writer, reader and administration; placement, repair, tiering and retention; the etcd backend; what every daemon shares |
 | What applications use | `bitacora`, `bitacora-materializer` | The client that connects to a cluster; the materializer framework |
 | Programs and stores | `bita-replica`, `bita-controller`, `bita`, `bita-bench`, `bitacora-kv`, `bitacora-metrics`, `bitacora-c` | The daemons and tools; the two materializers; the C interface |
+| Test support | `bitacora-testports` | Loopback ports for tests that start real servers, in blocks that one test owns |
 | Test clusters | `bitacora-testkit`, `bitacora-clusterkit` | A cluster inside one process with switchable faults; a cluster of real processes |
 | Simulation | `bitacora-sim` | The deterministic simulation: a workload, a fault schedule and a checker of the history, all from one seed |
 

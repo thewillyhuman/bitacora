@@ -532,6 +532,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitacora-testports"
+version = "0.0.0"
+
+[[package]]
 name = "bitacora-types"
 version = "0.0.0"
 dependencies = [
