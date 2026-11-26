@@ -308,8 +308,8 @@ impl<P: BlockPolicy> MetricsStore<P> {
         let runner =
             MaterializerRunner::<MetricsMaterializer<P>>::start(runner_dependencies, stream_name, runner_settings)
                 .await?;
-        let head = runner.materializer().head();
-        let catalog = runner.materializer().catalog();
+        let head = runner.materializer().builder().head();
+        let catalog = runner.materializer().view();
         let progress = runner.progress();
         let (stop_reason_sender, stop_reason) = watch::channel(None);
         let runner_task = tokio::spawn(async move {

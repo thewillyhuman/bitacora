@@ -78,10 +78,12 @@ There is no linearizable read as in bitacora-kv. A metrics stream has many
 producers and no single latest value a reader could be wrong about.
 
 A query reads the head first and the catalog second. A block can be cut in
-between. The head says which records it holds and the catalog says where it
-ends, and that is enough: if the head reaches beyond the catalog, the answer
-is the blocks with the head on top; otherwise the blocks alone. A block
-that was merged away under a query makes the query read the catalog again.
+between. The head says which records it holds and up to which record it
+has given samples up to a block, and the catalog says where it ends. That
+is enough: if the catalog does not reach what the head gave up, the query
+looks again; if the head reaches beyond the catalog, the answer is the
+blocks with the head on top; otherwise the blocks alone. A block that was
+merged away under a query makes the query read the catalog again.
 
 `BlockReader` answers the same queries from the committed blocks alone, for
 a process that is not the store. It does not see the head.
@@ -94,7 +96,7 @@ confirmed.
 
 | # | What was needed | What the interface offered | What was done | Status |
 | --- | --- | --- | --- | --- |
-| 1 | Queries must read the samples that are not in a block yet. | `ArtifactCatalog` owns the builder and shows only the catalog (`view()`). The unsealed samples are inside the builder, out of reach. | `MetricsMaterializer` wraps the catalog and keeps a second head for queries: every record is decoded twice and every unsealed sample is held twice (`materializer.rs`). | Open |
+| 1 | Queries must read the samples that are not in a block yet. | `ArtifactCatalog` owns the builder and shows only the catalog (`view()`). The unsealed samples are inside the builder, out of reach. | `MetricsMaterializer` wraps the catalog and keeps a second head for queries: every record is decoded twice and every unsealed sample is held twice. | Fixed by `materializer: show the builder of a catalog`. The builder owns the head and gives the store a handle on it; the wrapper is gone. |
 | 2 | A block is cut when it is full, by the samples' own count and time span, so that the same records give the same blocks (I6). | A checkpoint always seals everything the builder holds. `should_seal` can ask for a checkpoint earlier; it cannot keep the runner's timer from cutting a block. Block boundaries therefore follow the wall clock of the instance that happened to run. | Accepted in the first version: answers are the same whenever checkpoints happen, block contents are not. A store that checkpoints every minute cuts a block every minute. | Open |
 | 3 | A query skips the blocks that hold no sample in its time range without fetching anything. | A catalog entry holds a range of sequence numbers, a key and a size. Nothing of the builder's. | The time range of a block is read from its footer: two range reads per block the first time a store or reader sees it, also for blocks the query does not need. The index is then cached (`query.rs`). | Open |
 | 4 | The limits of a block come from configuration. | The framework creates the builder with `Default` and restores a materializer with a function that takes no settings. | The limits are constants of a type parameter, `BlockPolicy`, which runs through `BlockBuilder<P>`, `MetricsMaterializer<P>` and `MetricsStore<P>`. They cannot be chosen at run time. | Open |

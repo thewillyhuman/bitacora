@@ -12,7 +12,7 @@
 //!
 //! # How the fixtures work
 //!
-//! [`View`] is the store's materializer driven by hand: a test says which record is applied and when a
+//! [`View`] is the store's materializer, the framework's catalog over the block builder, driven by hand: a test says which record is applied and when a
 //! checkpoint cuts a block, with no cluster and no timing involved. The blocks go to the in-memory
 //! artifact store of `test_support.rs`. `UnmergedBlocks` keeps every block as it was cut.
 
@@ -77,7 +77,7 @@ impl View {
 
     /// Answers a query against the view's own head and catalog.
     async fn query(&self, selector: &Selector, time_range: TimeRange) -> Result<QueryResult, QueryFailure> {
-        self.query_with_head(&self.materializer.head(), selector, time_range)
+        self.query_with_head(&self.materializer.builder().head(), selector, time_range)
             .await
     }
 
@@ -90,7 +90,7 @@ impl View {
     ) -> Result<QueryResult, QueryFailure> {
         query_head_and_blocks(
             head,
-            &self.materializer.catalog(),
+            &self.materializer.view(),
             &self.artifacts.namespace,
             &self.cache,
             selector,
@@ -107,7 +107,7 @@ impl View {
     /// The keys of the view's blocks in the store, in log order.
     fn block_object_keys(&self) -> Vec<String> {
         let mut object_keys = Vec::new();
-        for entry in self.materializer.catalog().entries() {
+        for entry in self.materializer.view().entries() {
             object_keys.push(TestArtifacts::object_key(&entry.artifact.artifact_key));
         }
         object_keys
@@ -121,45 +121,72 @@ fn head_holding(decoded_records: &[(SequenceNumber, Vec<SeriesSamples>)]) -> Sha
     head
 }
 
+/// No record: what a head that never sealed says it has given up.
+const NEVER_SEALED: SequenceNumber = SequenceNumber::ZERO;
+
 #[test]
 fn empty_head_adds_nothing_to_the_blocks() {
-    assert_eq!(how_the_head_fits(at(5), None), HeadFit::CoveredByBlocks);
+    assert_eq!(how_the_head_fits(at(5), None, NEVER_SEALED), HeadFit::CoveredByBlocks);
 }
 
 #[test]
 fn head_right_after_the_catalog_goes_on_top() {
-    let fit = how_the_head_fits(at(5), Some((at(6), at(9))));
+    let fit = how_the_head_fits(at(5), Some((at(6), at(9))), at(5));
 
     assert_eq!(fit, HeadFit::OnTopOfBlocks { last_held: at(9) });
 }
 
 #[test]
 fn head_without_any_block_goes_on_top() {
-    let fit = how_the_head_fits(SequenceNumber::ZERO, Some((at(1), at(3))));
+    let fit = how_the_head_fits(SequenceNumber::ZERO, Some((at(1), at(3))), NEVER_SEALED);
 
     assert_eq!(fit, HeadFit::OnTopOfBlocks { last_held: at(3) });
 }
 
 #[test]
 fn head_that_starts_inside_the_catalog_and_ends_beyond_it_goes_on_top() {
-    let fit = how_the_head_fits(at(5), Some((at(3), at(9))));
+    let fit = how_the_head_fits(at(5), Some((at(3), at(9))), at(2));
 
     assert_eq!(fit, HeadFit::OnTopOfBlocks { last_held: at(9) });
 }
 
 #[test]
 fn head_that_ends_where_the_catalog_ends_is_covered() {
-    assert_eq!(how_the_head_fits(at(5), Some((at(3), at(5)))), HeadFit::CoveredByBlocks);
+    let fit = how_the_head_fits(at(5), Some((at(3), at(5))), at(2));
+
+    assert_eq!(fit, HeadFit::CoveredByBlocks);
 }
 
 #[test]
 fn head_that_ends_before_the_catalog_ends_is_covered() {
-    assert_eq!(how_the_head_fits(at(5), Some((at(1), at(4)))), HeadFit::CoveredByBlocks);
+    let fit = how_the_head_fits(at(5), Some((at(1), at(4))), NEVER_SEALED);
+
+    assert_eq!(fit, HeadFit::CoveredByBlocks);
 }
 
 #[test]
 fn head_that_starts_later_than_right_after_the_catalog_leaves_a_gap() {
-    assert_eq!(how_the_head_fits(at(5), Some((at(7), at(9)))), HeadFit::Gap);
+    let fit = how_the_head_fits(at(5), Some((at(7), at(9))), NEVER_SEALED);
+
+    assert_eq!(fit, HeadFit::Gap);
+}
+
+#[test]
+fn empty_head_that_sealed_beyond_the_catalog_leaves_a_gap() {
+    // The head has just given records 6 to 9 up to a block that the catalog does not list yet.
+    assert_eq!(how_the_head_fits(at(5), None, at(9)), HeadFit::Gap);
+}
+
+#[test]
+fn empty_head_whose_last_seal_the_catalog_lists_is_covered() {
+    assert_eq!(how_the_head_fits(at(9), None, at(9)), HeadFit::CoveredByBlocks);
+}
+
+#[test]
+fn head_that_sealed_beyond_the_catalog_and_holds_later_records_leaves_a_gap() {
+    let fit = how_the_head_fits(at(5), Some((at(10), at(12))), at(9));
+
+    assert_eq!(fit, HeadFit::Gap);
 }
 
 #[test]
@@ -672,8 +699,8 @@ async fn query_that_finds_a_block_gone_reads_the_catalog_again_and_answers() {
     let artifacts = ArtifactNamespace::read_only(Arc::new(gone_once), TEST_STREAM_ID, METRICS_MATERIALIZER);
 
     let answer = query_head_and_blocks(
-        &view.materializer.head(),
-        &view.materializer.catalog(),
+        &view.materializer.builder().head(),
+        &view.materializer.view(),
         &artifacts,
         &view.cache,
         &Selector::all(),
@@ -692,7 +719,7 @@ async fn query_that_finds_a_block_gone_reads_the_catalog_again_and_answers() {
 async fn index_of_a_block_the_catalog_no_longer_names_is_forgotten() {
     let view = view_with_two_blocks().await;
     view.everything().await;
-    let entries = view.materializer.catalog().entries();
+    let entries = view.materializer.view().entries();
 
     let mut merged = BTreeMap::new();
     query_blocks(

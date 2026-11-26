@@ -5,8 +5,8 @@
 //! - Adding records: series are created, samples are ordered, a later sample replaces an earlier one, and
 //!   the counts, the time span and the held records follow.
 //! - Selecting: by labels and by time, and merging into what a query already has.
-//! - The shared head: what a snapshot holds and which records it says it covers, before and after the
-//!   head is cleared.
+//! - The shared head: what a snapshot holds and which records it says it covers, before and after a
+//!   seal; how full it is; what it encodes.
 //!
 //! # How the fixtures work
 //!
@@ -242,11 +242,21 @@ fn snapshot_holds_the_selected_samples() {
 }
 
 #[test]
-fn cleared_head_holds_no_sample() {
+fn head_that_never_sealed_says_so() {
     let head = SharedHead::default();
     head.add_records(&[(at(7), batch("api", &[10]))]);
 
-    head.clear();
+    let snapshot = head.snapshot(&Selector::all(), TimeRange::ALL);
+
+    assert_eq!(snapshot.sealed_through, SequenceNumber::ZERO);
+}
+
+#[test]
+fn head_holds_no_sample_after_its_samples_were_sealed() {
+    let head = SharedHead::default();
+    head.add_records(&[(at(7), batch("api", &[10]))]);
+
+    head.drop_sealed(at(7));
 
     assert_eq!(
         head.snapshot(&Selector::all(), TimeRange::ALL).samples_by_series.len(),
@@ -255,20 +265,55 @@ fn cleared_head_holds_no_sample() {
 }
 
 #[test]
-fn cleared_head_covers_no_record() {
+fn head_covers_no_record_after_its_samples_were_sealed() {
     let head = SharedHead::default();
     head.add_records(&[(at(7), batch("api", &[10]))]);
 
-    head.clear();
+    head.drop_sealed(at(7));
 
     assert_eq!(head.snapshot(&Selector::all(), TimeRange::ALL).held_records, None);
 }
 
 #[test]
-fn head_takes_records_again_after_it_was_cleared() {
+fn head_remembers_up_to_which_record_it_was_sealed() {
     let head = SharedHead::default();
     head.add_records(&[(at(7), batch("api", &[10]))]);
-    head.clear();
+
+    head.drop_sealed(at(7));
+
+    assert_eq!(head.snapshot(&Selector::all(), TimeRange::ALL).sealed_through, at(7));
+}
+
+#[test]
+fn fill_counts_the_samples_and_the_time_they_span() {
+    let head = SharedHead::default();
+
+    head.add_records(&[(at(7), batch("api", &[100, 250])), (at(8), batch("web", &[40]))]);
+
+    let expected = HeadFill {
+        sample_count: 3,
+        time_span_millis: 210,
+    };
+    assert_eq!(head.fill(), expected);
+}
+
+#[test]
+fn head_encodes_what_it_holds_as_a_block() {
+    let head = SharedHead::default();
+    head.add_records(&[(at(7), batch("api", &[10, 20]))]);
+
+    let encoded = head.encode_block();
+
+    let mut expected = BTreeMap::new();
+    expected.insert(job("api"), vec![sample(10, 10.0), sample(20, 20.0)]);
+    assert_eq!(crate::block::decode_whole_block(&encoded.bytes), Ok(expected));
+}
+
+#[test]
+fn head_takes_records_again_after_a_seal() {
+    let head = SharedHead::default();
+    head.add_records(&[(at(7), batch("api", &[10]))]);
+    head.drop_sealed(at(7));
 
     head.add_records(&[(at(8), batch("api", &[20]))]);
 

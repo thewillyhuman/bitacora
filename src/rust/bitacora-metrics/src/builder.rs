@@ -16,13 +16,16 @@
 //!
 //! # How it works
 //!
-//! - **Adding records.** A record's payload is decoded (`record.rs`) and its samples go into the samples
-//!   the builder holds (`head.rs`). A payload that is not a metrics record stops the materializer: the
-//!   record will never change, and skipping it would make the state depend on more than the log.
+//! - **Adding records.** A record's payload is decoded (`record.rs`) and its samples go into the head
+//!   (`head.rs`), which the builder owns and the store's queries read through a handle
+//!   ([`BlockBuilder::head`]). A payload that is not a metrics record stops the materializer: the record
+//!   will never change, and skipping it would make the state depend on more than the log.
 //! - **Asking for a seal.** The builder asks once it holds [`BlockPolicy::MAX_BLOCK_SAMPLES`] samples, or
 //!   samples that span [`BlockPolicy::MAX_BLOCK_SPAN_MILLIS`]. Both are counted from the samples
 //!   themselves, never from a clock, so the same records ask at the same point every time.
-//! - **Sealing.** Everything held becomes one block (`block.rs`), stored as one artifact.
+//! - **Sealing.** Everything in the head becomes one block (`block.rs`), stored as one artifact. Only
+//!   once the block is stored does the head drop its samples, and it remembers the last record it gave
+//!   up, so that a query can tell that the catalog it sees does not list the block yet.
 //! - **Merging.** The catalog hands over neighbouring blocks, oldest first. Each is read whole and
 //!   verified, their series are merged with the later block winning a shared timestamp, and the result is
 //!   written as one block. A merge reads blocks, never the log: the log below a checkpoint may be gone.
@@ -33,7 +36,7 @@
 //!
 //! # Invariants
 //!
-//! - The builder holds exactly the samples of the records added since the last successful seal.
+//! - The head holds exactly the samples of the records added since the last successful seal.
 //! - A failed seal or merge leaves the builder as it was.
 //! - Merging blocks gives the block that sealing all their records at once would have given.
 //!
@@ -42,9 +45,11 @@
 //! - `block.rs`: the file a seal writes.
 //! - `head.rs`: the samples the builder holds.
 //! - `materializer.rs`: the materializer this builder is part of.
+//! - `query.rs`: how the head and the catalog are read together.
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bitacora_materializer::{
@@ -52,8 +57,8 @@ use bitacora_materializer::{
 };
 use bitacora_types::{LogRecord, SequenceRange};
 
-use crate::block::{damaged_artifact, decode_whole_block, encode_block};
-use crate::head::HeadSamples;
+use crate::block::{EncodedBlock, damaged_artifact, decode_whole_block, encode_block};
+use crate::head::SharedHead;
 use crate::record::decode_record;
 use crate::sample::{Labels, Sample, merge_series_later_wins};
 
@@ -93,8 +98,8 @@ impl BlockPolicy for StandardBlocks {
 /// The framework owns the builder, inside an `ArtifactCatalog`. It is not used directly; see
 /// [`MetricsStore`](crate::MetricsStore).
 pub struct BlockBuilder<P: BlockPolicy = StandardBlocks> {
-    /// The samples of the records added since the last seal.
-    pending: HeadSamples,
+    /// The samples of the records added since the last seal, shared with the store's queries.
+    head: Arc<SharedHead>,
     /// The policy is a type; nothing of it is stored.
     policy: PhantomData<P>,
 }
@@ -103,45 +108,54 @@ impl<P: BlockPolicy> Default for BlockBuilder<P> {
     /// A builder that holds nothing.
     fn default() -> Self {
         Self {
-            pending: HeadSamples::default(),
+            head: Arc::new(SharedHead::default()),
             policy: PhantomData,
         }
     }
 }
 
+impl<P: BlockPolicy> BlockBuilder<P> {
+    /// A handle on the head, for queries.
+    pub(crate) fn head(&self) -> Arc<SharedHead> {
+        Arc::clone(&self.head)
+    }
+}
+
 #[async_trait]
 impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
-    /// Decodes each record and adds its samples to what the builder holds.
+    /// Decodes the records and adds their samples to the head. If one of them is not a metrics record,
+    /// none is added.
     fn add_records(&mut self, committed_records: &[LogRecord]) -> Result<(), MaterializerError> {
+        let mut decoded_records = Vec::with_capacity(committed_records.len());
         for record in committed_records {
-            let batch = match decode_record(&record.payload) {
-                Ok(batch) => batch,
+            match decode_record(&record.payload) {
+                Ok(batch) => decoded_records.push((record.sequence, batch)),
                 Err(record_error) => {
                     return Err(MaterializerError::InvalidRecord {
                         sequence: record.sequence,
                         reason: record_error.to_string(),
                     });
                 }
-            };
-            self.pending.add_record(record.sequence, &batch);
+            }
         }
+        self.head.add_records(&decoded_records);
         Ok(())
     }
 
     /// Asks for a seal once the samples held are as many, or span as much time, as the policy allows.
     fn should_seal(&self) -> bool {
-        self.pending.sample_count() >= P::MAX_BLOCK_SAMPLES
-            || self.pending.time_span_millis() >= P::MAX_BLOCK_SPAN_MILLIS
+        let fill = self.head.fill();
+        fill.sample_count >= P::MAX_BLOCK_SAMPLES || fill.time_span_millis >= P::MAX_BLOCK_SPAN_MILLIS
     }
 
-    /// Writes everything held as one block and empties the builder.
+    /// Writes everything in the head as one block and then empties the head.
     async fn seal_artifact(
         &mut self,
-        _covered_range: SequenceRange,
+        covered_range: SequenceRange,
         artifacts: &ArtifactNamespace,
     ) -> Result<ArtifactDescriptor, MaterializerError> {
-        let descriptor = store_block(self.pending.samples_by_series(), artifacts).await?;
-        self.pending = HeadSamples::default();
+        let descriptor = store_encoded_block(self.head.encode_block(), artifacts).await?;
+        self.head.drop_sealed(covered_range.last());
         Ok(descriptor)
     }
 
@@ -164,7 +178,7 @@ impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
                 merge_series_later_wins(&mut merged, labels, samples);
             }
         }
-        store_block(&merged, artifacts).await
+        store_encoded_block(encode_block(&merged), artifacts).await
     }
 
     /// The policy's compaction settings.
@@ -173,12 +187,11 @@ impl<P: BlockPolicy> ArtifactBuilder for BlockBuilder<P> {
     }
 }
 
-/// Encodes series as a block and stores it as a new artifact.
-async fn store_block(
-    samples_by_series: &BTreeMap<Labels, Vec<Sample>>,
+/// Stores an encoded block as a new artifact.
+async fn store_encoded_block(
+    encoded: EncodedBlock,
     artifacts: &ArtifactNamespace,
 ) -> Result<ArtifactDescriptor, MaterializerError> {
-    let encoded = encode_block(samples_by_series);
     let size_bytes = encoded.bytes.len() as u64;
     let artifact_key = artifacts.put_artifact(BLOCK_LABEL, encoded.bytes).await?;
     tracing::info!(

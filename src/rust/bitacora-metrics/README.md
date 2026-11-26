@@ -79,7 +79,9 @@ in increasing order of time, each timestamp once.
 The answer does not depend on where the samples are. A query reads the head
 first and the catalog second. If a block was cut in between, the catalog
 already covers what the head held, and the answer comes from the blocks
-alone. If a block the query wants was merged away, the query reads the
+alone. The head drops sealed samples a moment before their block is listed;
+a query that looks in that moment sees that the catalog is short and looks
+again. If a block the query wants was merged away, the query reads the
 catalog again.
 
 There is no linearizable read. A metrics store has many producers and no
@@ -123,8 +125,8 @@ block gone.
 | `block.rs` | The block: encoding, index, range reads |
 | `selector.rs` | `Selector` and `Matcher` |
 | `head.rs` | The samples in memory |
-| `builder.rs` | `BlockBuilder`: records to blocks, and merging |
-| `materializer.rs` | `MetricsMaterializer`: the catalog plus a head queries can read |
+| `builder.rs` | `BlockBuilder`: records to blocks, and merging; it owns the head |
+| `materializer.rs` | `MetricsMaterializer`: the framework's catalog over the builder, and its name |
 | `query.rs` | One answer from the head and the blocks |
 | `store.rs` | `MetricsStore`, its settings and errors |
 | `reader.rs` | `BlockReader` |

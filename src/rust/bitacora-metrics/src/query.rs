@@ -30,18 +30,21 @@
 //! fetched.
 //!
 //! **Head and catalog together.** The head is read first and the catalog second, and a block can be
-//! sealed in between. The head says which records its samples come from; the catalog says up to which
-//! record its blocks reach. Three cases follow, and `how_the_head_fits` tells them apart:
+//! sealed in between. The head says which records its samples come from and up to which record it has
+//! given samples up to a block; the catalog says up to which record its blocks reach. Three cases
+//! follow, and `how_the_head_fits` tells them apart:
 //!
-//! - The head holds records beyond the catalog and starts no later than right after it. The answer is
-//!   the blocks with the head on top. Records that both hold do no harm: the head's sample for a series
-//!   and timestamp comes from the latest record up to the head's end, which is the one that must win.
+//! - The catalog does not reach the last record the head gave up, or the head starts further than right
+//!   after the catalog. Records would be missing between the two. This happens for a moment at every
+//!   seal: the builder drops the sealed samples from the head when their block is stored, and the
+//!   framework lists the block in the catalog right after. The query looks again rather than give an
+//!   answer with a hole.
+//! - The head holds records beyond the catalog. The answer is the blocks with the head on top. Records
+//!   that both hold do no harm: the head's sample for a series and timestamp comes from the latest
+//!   record up to the head's end, which is the one that must win.
 //! - The catalog reaches at least as far as the head, or the head is empty. Everything the head held is
 //!   in a block by now, and the blocks may know later records than the head did. The answer is the
 //!   blocks alone.
-//! - The head starts further than right after the catalog. Records would be missing between the two.
-//!   The materializer publishes a block before it drops the block's records from the head, so this is
-//!   not expected; the query looks again rather than give an answer with a hole.
 //!
 //! **A block that disappears.** After blocks are merged, the ones they were merged from are deleted. A
 //! query that still holds the older catalog then fails to read one of them. That is not an error: the
@@ -231,7 +234,7 @@ enum HeadFit {
     },
     /// The catalog reaches at least as far as the head did: the answer is the blocks alone.
     CoveredByBlocks,
-    /// Records are missing between the end of the catalog and the start of the head.
+    /// Records are missing between the end of the catalog and what the head still holds.
     Gap,
 }
 
@@ -241,7 +244,16 @@ enum HeadFit {
 ///
 /// * `catalog_end` - The last record the catalog's blocks reach; [`SequenceNumber::ZERO`] without blocks.
 /// * `held_records` - The first and the last record the head held, if it held any.
-fn how_the_head_fits(catalog_end: SequenceNumber, held_records: Option<(SequenceNumber, SequenceNumber)>) -> HeadFit {
+/// * `sealed_through` - The last record the head had given up to a block; [`SequenceNumber::ZERO`] if
+///   none.
+fn how_the_head_fits(
+    catalog_end: SequenceNumber,
+    held_records: Option<(SequenceNumber, SequenceNumber)>,
+    sealed_through: SequenceNumber,
+) -> HeadFit {
+    if catalog_end < sealed_through {
+        return HeadFit::Gap;
+    }
     let Some((first_held, last_held)) = held_records else {
         return HeadFit::CoveredByBlocks;
     };
@@ -294,9 +306,9 @@ pub(crate) async fn query_head_and_blocks(
         let head_snapshot = head.snapshot(selector, time_range);
         let entries = catalog.entries();
         let catalog_end = end_of(&entries);
-        let head_fit = how_the_head_fits(catalog_end, head_snapshot.held_records);
+        let head_fit = how_the_head_fits(catalog_end, head_snapshot.held_records, head_snapshot.sealed_through);
         if head_fit == HeadFit::Gap {
-            // Let the materializer finish what it is publishing.
+            // Let the materializer list the block it has just sealed.
             tokio::task::yield_now().await;
             continue;
         }

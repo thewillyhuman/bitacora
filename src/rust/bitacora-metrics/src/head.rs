@@ -11,8 +11,9 @@
 //! # What it contains
 //!
 //! - `HeadSamples`: the samples of some consecutive records, by series: what one block is made from.
-//! - `SharedHead`: `HeadSamples` behind a lock, written by the materializer and read by queries.
+//! - `SharedHead`: `HeadSamples` behind a lock, written by the builder and read by queries.
 //! - `HeadSnapshot`: what one query took from the head, and which records that covers.
+//! - `HeadFill`: how full the head is.
 //!
 //! # How it works
 //!
@@ -21,10 +22,15 @@
 //! same timestamp (see `sample.rs`). It also remembers the first and the last record it holds and the
 //! span of time its samples cover, which is what decides when a block is cut.
 //!
-//! `SharedHead` makes that readable while it is written: the materializer takes the lock once per batch
-//! of records, a query once per query. A query reads the head and the catalog of blocks at two different
-//! moments. The head tells it which records its samples come from, and that is all the query needs to
-//! tell whether the head adds anything to the blocks it then finds (see `query.rs`).
+//! `SharedHead` makes that readable while it is written: the builder takes the lock once per batch of
+//! records, a query once per query. The builder owns the head and adds to it; the store takes a handle
+//! on it for its queries. There is one copy of every unsealed sample.
+//!
+//! A query reads the head and the catalog of blocks at two different moments, and the builder drops
+//! sealed samples from the head a moment before the framework lists their block in the catalog. The
+//! head therefore tells a query which records its samples come from and up to which record it has given
+//! samples up to a block. With those the query can tell whether the head and the catalog it then finds
+//! fit together (see `query.rs`).
 //!
 //! Adding samples is a hot path: every sample passes through `HeadSamples::add_series` once. A sample
 //! that arrives in time order costs one comparison and a push. Nothing is allocated per sample; a new
@@ -38,7 +44,7 @@
 //!
 //! # See also
 //!
-//! - `builder.rs`: the materializer side, which adds records and seals blocks.
+//! - `builder.rs`: the builder, which owns the head, adds records to it and seals blocks from it.
 //! - `query.rs`: the reading side.
 
 use std::collections::BTreeMap;
@@ -46,6 +52,7 @@ use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use bitacora_types::SequenceNumber;
 
+use crate::block::{EncodedBlock, encode_block};
 use crate::sample::{Labels, Sample, SeriesSamples, TimeRange, insert_sample, merge_series_later_wins};
 use crate::selector::Selector;
 
@@ -158,19 +165,52 @@ impl HeadSamples {
 }
 
 /// What one query took from the head.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct HeadSnapshot {
     /// The selected samples in the query's time range, by series.
     pub samples_by_series: BTreeMap<Labels, Vec<Sample>>,
     /// The first and the last record whose samples the head held at that moment, if any.
     pub held_records: Option<(SequenceNumber, SequenceNumber)>,
+    /// The last record whose samples the head has given up to a block; [`SequenceNumber::ZERO`] if it
+    /// has not given any up. The catalog must reach at least this far for nothing to be missing.
+    pub sealed_through: SequenceNumber,
 }
 
-/// A head that queries can read while the materializer adds to it.
-#[derive(Debug, Default)]
+/// How full the head is: what decides whether a block is cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HeadFill {
+    /// How many samples the head holds.
+    pub sample_count: u64,
+    /// How many milliseconds lie between the earliest and the latest sample the head holds.
+    pub time_span_millis: u64,
+}
+
+/// What the builder and the queries share of a head.
+#[derive(Debug)]
+struct HeadState {
+    /// The samples applied and not yet in a block.
+    unsealed: HeadSamples,
+    /// The last record whose samples were dropped from the head because a block holds them.
+    sealed_through: SequenceNumber,
+}
+
+/// A head that queries can read while the builder adds to it.
+#[derive(Debug)]
 pub(crate) struct SharedHead {
-    /// The samples applied and not yet in a block. Never held locked across an await.
-    unsealed: RwLock<HeadSamples>,
+    /// The head. Never held locked across an await.
+    state: RwLock<HeadState>,
+}
+
+impl Default for SharedHead {
+    /// A head that holds nothing and has given nothing up to a block.
+    fn default() -> Self {
+        Self {
+            state: RwLock::new(HeadState {
+                unsealed: HeadSamples::default(),
+                sealed_through: SequenceNumber::ZERO,
+            }),
+        }
+    }
 }
 
 impl SharedHead {
@@ -181,40 +221,60 @@ impl SharedHead {
     /// * `decoded_records` - Each record's position and its samples, in log order, following the last
     ///   record added.
     pub(crate) fn add_records(&self, decoded_records: &[(SequenceNumber, Vec<SeriesSamples>)]) {
-        let mut unsealed = self.write();
+        let mut state = self.write();
         for (sequence, batch) in decoded_records {
-            unsealed.add_record(*sequence, batch);
+            state.unsealed.add_record(*sequence, batch);
         }
     }
 
-    /// Drops every sample from the head, because blocks now hold them.
+    /// How full the head is.
+    pub(crate) fn fill(&self) -> HeadFill {
+        let state = self.read();
+        HeadFill {
+            sample_count: state.unsealed.sample_count(),
+            time_span_millis: state.unsealed.time_span_millis(),
+        }
+    }
+
+    /// Everything the head holds, as the bytes of a block. The head is left as it is.
+    pub(crate) fn encode_block(&self) -> EncodedBlock {
+        encode_block(self.read().unsealed.samples_by_series())
+    }
+
+    /// Drops every sample from the head, because a block now holds the records up to `sealed_through`.
     ///
-    /// Call it only once the catalog shows those blocks: a query that does not find a record in the head
-    /// looks for it in the catalog.
-    pub(crate) fn clear(&self) {
-        *self.write() = HeadSamples::default();
+    /// The block is not in the catalog yet when the builder calls this; the framework lists it a moment
+    /// later. A query that looks in between is told by [`HeadSnapshot::sealed_through`] that the catalog
+    /// it sees is too short.
+    pub(crate) fn drop_sealed(&self, sealed_through: SequenceNumber) {
+        let mut state = self.write();
+        state.unsealed = HeadSamples::default();
+        state.sealed_through = sealed_through;
     }
 
     /// Copies the selected samples in `time_range` out of the head, with the records they come from.
     pub(crate) fn snapshot(&self, selector: &Selector, time_range: TimeRange) -> HeadSnapshot {
-        let unsealed = self.read();
+        let state = self.read();
         let mut snapshot = HeadSnapshot {
             samples_by_series: BTreeMap::new(),
-            held_records: unsealed.held_records(),
+            held_records: state.unsealed.held_records(),
+            sealed_through: state.sealed_through,
         };
-        unsealed.select_into(selector, time_range, &mut snapshot.samples_by_series);
+        state
+            .unsealed
+            .select_into(selector, time_range, &mut snapshot.samples_by_series);
         snapshot
     }
 
     /// Locks the head for reading, whether or not another holder of the lock panicked: a head is only
     /// ever changed by whole records, so it is consistent at every moment the lock is free.
-    fn read(&self) -> RwLockReadGuard<'_, HeadSamples> {
-        self.unsealed.read().unwrap_or_else(PoisonError::into_inner)
+    fn read(&self) -> RwLockReadGuard<'_, HeadState> {
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Locks the head for writing; see [`SharedHead::read`] for why poisoning is ignored.
-    fn write(&self) -> RwLockWriteGuard<'_, HeadSamples> {
-        self.unsealed.write().unwrap_or_else(PoisonError::into_inner)
+    fn write(&self) -> RwLockWriteGuard<'_, HeadState> {
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
