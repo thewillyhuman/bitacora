@@ -70,7 +70,6 @@ async fn instrumented_real_replica() -> (Arc<Replica>, InstrumentedReplica, Metr
         ReplicaId::new("replica-a").expect("a valid identifier"),
         ReplicaSettings::default(),
         Arc::new(StaticReplicaConnector::new()),
-        Arc::new(|_segment, _reason| {}),
     )
     .await
     .expect("a replica opens on an empty disk");

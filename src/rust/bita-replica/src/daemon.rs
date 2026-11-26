@@ -67,13 +67,13 @@ use bitacora_process::{
     Readiness, ShutdownSignal, serve_observability,
 };
 use bitacora_proto::{ServeError, serve_replica};
-use bitacora_replica::{Replica, WriteFailureHandler};
+use bitacora_replica::{Replica, WriteFailure};
 use bitacora_segment::{Disk, LocalDisk};
 use bitacora_types::replica_api::{ReplicaApi, ReplicaConnector};
 use bitacora_types::{Clock, ReplicaId, SegmentAddress, SystemClock};
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 
@@ -171,21 +171,12 @@ pub(crate) struct Listeners {
     pub observability: TcpListener,
 }
 
-/// A write the disk refused, as the replica reports it.
-#[derive(Clone, Debug)]
-struct WriteFailure {
-    /// The segment whose write failed.
-    segment: SegmentAddress,
-    /// What the disk reported.
-    reason: String,
-}
-
 /// Why the daemon stopped waiting and began to shut down.
 #[derive(Debug)]
 enum StopReason {
     /// It was asked to.
     Signal(ShutdownSignal),
-    /// The disk refused a write.
+    /// The disk refused a write, as the replica reports it.
     WriteFailure(WriteFailure),
     /// The gRPC server ended by itself, with this description of how.
     ServerStopped(String),
@@ -327,7 +318,6 @@ pub(crate) async fn run(
         stop_within_the_grace_period(endpoint, "observability endpoint").await;
         return Err(daemon_error);
     }
-    let (write_failure_sender, mut write_failures) = mpsc::unbounded_channel::<WriteFailure>();
     let replica = open_replica(
         &settings,
         ReplicaParts {
@@ -335,7 +325,6 @@ pub(crate) async fn run(
             object_store: environment.object_store,
             connector: environment.connector,
         },
-        write_failure_sender,
         &metrics_registry,
     )
     .await?;
@@ -372,7 +361,7 @@ pub(crate) async fn run(
     tokio::pin!(shutdown);
     let stop_reason = tokio::select! {
         signal = &mut shutdown => StopReason::Signal(signal),
-        Some(write_failure) = write_failures.recv() => StopReason::WriteFailure(write_failure),
+        write_failure = replica.write_failed() => StopReason::WriteFailure(write_failure),
         server_outcome = &mut server.task => StopReason::ServerStopped(match server_outcome {
             Ok(Ok(())) => "it returned without being asked to".to_owned(),
             Ok(Err(serve_error)) => serve_error.to_string(),
@@ -433,7 +422,6 @@ struct ReplicaParts {
 ///
 /// * `settings` - The daemon's validated settings.
 /// * `parts` - What the replica is built on.
-/// * `write_failure_sender` - Where the replica reports a write or a flush the disk refused.
 /// * `metrics_registry` - The registry of the process, for the decorators.
 ///
 /// # Errors
@@ -443,23 +431,14 @@ struct ReplicaParts {
 async fn open_replica(
     settings: &ReplicaDaemonSettings,
     parts: ReplicaParts,
-    write_failure_sender: mpsc::UnboundedSender<WriteFailure>,
     metrics_registry: &MetricsRegistry,
 ) -> Result<Arc<Replica>, DaemonError> {
     let disk: Arc<dyn Disk> = Arc::new(InstrumentedDisk::new(parts.disk, metrics_registry));
-    let on_write_failure: WriteFailureHandler = Arc::new(move |segment, reason| {
-        // The receiver only goes away when the daemon is already stopping.
-        let _daemon_is_stopping = write_failure_sender.send(WriteFailure {
-            segment,
-            reason: reason.to_owned(),
-        });
-    });
     let opened = Replica::open(
         disk,
         settings.proposed_replica_id.clone(),
         settings.replica,
         parts.connector,
-        on_write_failure,
     )
     .await;
     let mut replica = match opened {

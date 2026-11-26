@@ -97,7 +97,6 @@ impl ServedReplica {
             replica_id(name),
             settings,
             Arc::new(connector.clone()),
-            Arc::new(|_segment, _reason| {}),
         )
         .await
         .expect("the replica opens on a working disk");
@@ -1012,7 +1011,6 @@ impl StoppableServer {
             replica_id("replica-a"),
             small_segments(),
             Arc::new(GrpcReplicaConnector::new(GrpcConnectorSettings::default())),
-            Arc::new(|_segment, _reason| {}),
         )
         .await
         .expect("the replica opens on a working disk");

@@ -166,7 +166,6 @@ async fn serve_a_replica(replica_id: &ReplicaId, connector: &GrpcReplicaConnecto
         replica_id.clone(),
         settings,
         Arc::new(connector.clone()),
-        Arc::new(|_segment, _reason| {}),
     )
     .await
     .expect("the replica opens on a working disk");

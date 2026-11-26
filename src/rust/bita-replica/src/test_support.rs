@@ -57,7 +57,6 @@ pub(crate) async fn open_replica(disk: &MemoryDisk, name: &str) -> Arc<Replica> 
         ReplicaId::new(name).expect("a valid identifier"),
         small_segments(),
         Arc::new(StaticReplicaConnector::new()),
-        Arc::new(|_segment, _reason| {}),
     )
     .await
     .expect("a replica opens on a working disk");

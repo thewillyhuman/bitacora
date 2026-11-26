@@ -31,18 +31,23 @@
 //! - The replica never reports success for an object it has not read back intact.
 //! - Nothing here changes the local copy: uploading is a read.
 //! - Uploading again replaces the object with the same bytes, so the operation is safe to repeat.
+//! - An upload happens once in the life of a segment. The code is written to be followed step by step,
+//!   not to be fast; what it must not do is hold up the segment's task, and it does not.
 //!
 //! # See also
 //!
 //! - `bitacora-segment/src/tiered.rs`: the layout of the object.
-//! - `replica.rs`: where the request arrives and the object store is configured.
+//! - `replica/api.rs`: where the request arrives, and `replica.rs`: where the object store is configured.
+//! - `actor.rs`: the handle the copy is read through.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use bitacora_artifact::{ArtifactError, ArtifactStore};
 use bitacora_segment::format::{SegmentHeader, decode_frames};
 use bitacora_segment::tiered::encode_tiered_segment;
-use bitacora_types::replica_api::{ReadLimit, ReadRequest, ReplicaError, UploadRequest, UploadResponse};
+use bitacora_types::SequenceNumber;
+use bitacora_types::replica_api::{ReadLimit, ReadRequest, ReplicaError, SegmentStatus, UploadRequest, UploadResponse};
 use bytes::{Bytes, BytesMut};
 use tokio::time::timeout;
 
@@ -87,33 +92,15 @@ pub(crate) async fn upload_sealed_copy(
     request: &UploadRequest,
     pace: UploadPace,
 ) -> Result<UploadResponse, ReplicaError> {
-    let address = request.segment.address;
     let Some(status) = handle.status().await? else {
-        return Err(ReplicaError::SegmentNotFound { segment: address });
-    };
-    if status.sealed_end != Some(request.sealed_end) {
-        return Err(ReplicaError::InvalidRequest {
-            reason: format!(
-                "copy is sealed at {:?}, not at the requested {}",
-                status.sealed_end, request.sealed_end
-            ),
+        return Err(ReplicaError::SegmentNotFound {
+            segment: request.segment.address,
         });
-    }
+    };
+    fail_if_not_sealed_as_requested(&status, request)?;
 
     let frames = read_sealed_frames(handle, request, pace.chunk_bytes).await?;
-    let segment_header = SegmentHeader {
-        address,
-        epoch: request.segment.epoch,
-        first_sequence: request.segment.first_sequence,
-    };
-    let object = match encode_tiered_segment(segment_header, request.sealed_end, &frames) {
-        Ok(object) => object,
-        Err(tiered_error) => {
-            return Err(ReplicaError::Storage {
-                reason: format!("copy cannot be uploaded: {tiered_error}"),
-            });
-        }
-    };
+    let object = build_object(request, &frames)?;
     // The frames were copied into the object; do not hold both while the object travels.
     drop(frames);
 
@@ -124,47 +111,87 @@ pub(crate) async fn upload_sealed_copy(
     })
 }
 
+/// Refuses the upload unless the copy that reported `status` is sealed exactly where `request` says.
+fn fail_if_not_sealed_as_requested(status: &SegmentStatus, request: &UploadRequest) -> Result<(), ReplicaError> {
+    if status.sealed_end == Some(request.sealed_end) {
+        return Ok(());
+    }
+    Err(ReplicaError::InvalidRequest {
+        reason: format!(
+            "copy is sealed at {:?}, not at the requested {}",
+            status.sealed_end, request.sealed_end
+        ),
+    })
+}
+
+/// Turns the batch frames of the sealed copy into the object to store. Frames that are not exactly the
+/// sealed segment `request` describes are refused, which is how a short or damaged copy is stopped.
+fn build_object(request: &UploadRequest, frames: &Bytes) -> Result<Bytes, ReplicaError> {
+    let segment_header = SegmentHeader {
+        address: request.segment.address,
+        epoch: request.segment.epoch,
+        first_sequence: request.segment.first_sequence,
+    };
+    match encode_tiered_segment(segment_header, request.sealed_end, frames) {
+        Ok(object) => Ok(object),
+        Err(tiered_error) => Err(ReplicaError::Storage {
+            reason: format!("copy cannot be uploaded: {tiered_error}"),
+        }),
+    }
+}
+
 /// Reads every batch frame of the sealed copy, from the segment's first sequence number to its sealed end.
-///
-/// Each chunk is decoded only to learn where it ends, so that the next read starts at the following batch.
 async fn read_sealed_frames(
     handle: &SegmentHandle,
     request: &UploadRequest,
     chunk_bytes: usize,
 ) -> Result<Bytes, ReplicaError> {
-    let address = request.segment.address;
     let mut frames = BytesMut::new();
     let mut next_sequence = request.segment.first_sequence;
     while next_sequence <= request.sealed_end {
         let chunk = handle
             .read(ReadRequest {
-                segment: address,
+                segment: request.segment.address,
                 from_sequence: next_sequence,
                 max_bytes: chunk_bytes,
                 wait_for_records: None,
                 limit: ReadLimit::DurableSequence,
             })
             .await?;
-        let batches = match decode_frames(address, &chunk.batch_frames) {
-            Ok(batches) => batches,
-            Err(frames_error) => {
-                return Err(ReplicaError::Storage {
-                    reason: format!("copy cannot be uploaded: {frames_error}"),
-                });
-            }
-        };
-        let Some(last_batch) = batches.last() else {
-            return Err(ReplicaError::Storage {
-                reason: format!(
-                    "copy cannot be uploaded: it ends before {next_sequence}, short of its sealed end {}",
-                    request.sealed_end
-                ),
-            });
-        };
+        let last_sequence = last_sequence_of_chunk(request, &chunk.batch_frames, next_sequence)?;
         frames.extend_from_slice(&chunk.batch_frames);
-        next_sequence = last_batch.last_sequence().next();
+        next_sequence = last_sequence.next();
     }
     Ok(frames.freeze())
+}
+
+/// Finds the last sequence number in `chunk_frames`, which were read from `next_sequence` on, so that
+/// the next read starts at the following batch. The chunk is decoded for nothing else.
+///
+/// A chunk that cannot be decoded, or holds nothing although the sealed end was not reached, means the
+/// copy is not the whole sealed segment.
+fn last_sequence_of_chunk(
+    request: &UploadRequest,
+    chunk_frames: &Bytes,
+    next_sequence: SequenceNumber,
+) -> Result<SequenceNumber, ReplicaError> {
+    let batches = match decode_frames(request.segment.address, chunk_frames) {
+        Ok(batches) => batches,
+        Err(frames_error) => {
+            return Err(ReplicaError::Storage {
+                reason: format!("copy cannot be uploaded: {frames_error}"),
+            });
+        }
+    };
+    match batches.last() {
+        Some(last_batch) => Ok(last_batch.last_sequence()),
+        None => Err(ReplicaError::Storage {
+            reason: format!(
+                "copy cannot be uploaded: it ends before {next_sequence}, short of its sealed end {}",
+                request.sealed_end
+            ),
+        }),
+    }
 }
 
 /// Stores the object under `object_key`, waiting no longer than the pace allows.
@@ -196,18 +223,7 @@ async fn verify_stored_object(
     let mut verified_bytes = 0;
     while verified_bytes < object.len() {
         let chunk_end = object.len().min(verified_bytes + chunk_bytes);
-        let fetched = timeout(
-            pace.object_store_timeout,
-            artifact_store.get_range(object_key, verified_bytes as u64..chunk_end as u64),
-        )
-        .await;
-        let stored_chunk = match fetched {
-            Ok(Ok(stored_chunk)) => stored_chunk,
-            Ok(Err(artifact_error)) => {
-                return Err(object_store_failed("verify", object_key, &artifact_error));
-            }
-            Err(_elapsed) => return Err(object_store_timed_out("verify", object_key)),
-        };
+        let stored_chunk = fetch_stored_chunk(artifact_store, object_key, verified_bytes..chunk_end, pace).await?;
         if stored_chunk != object.slice(verified_bytes..chunk_end) {
             return Err(ReplicaError::Unavailable {
                 reason: format!(
@@ -221,15 +237,35 @@ async fn verify_stored_object(
     Ok(())
 }
 
-/// The error for an object store request that failed. The upload did not complete and can be repeated,
-/// which is what `Unavailable` tells the controller.
+/// Reads the bytes of `byte_range` of the stored object, waiting no longer than the pace allows.
+async fn fetch_stored_chunk(
+    artifact_store: &dyn ArtifactStore,
+    object_key: &str,
+    byte_range: Range<usize>,
+    pace: UploadPace,
+) -> Result<Bytes, ReplicaError> {
+    let stored_range = byte_range.start as u64..byte_range.end as u64;
+    let fetched = timeout(
+        pace.object_store_timeout,
+        artifact_store.get_range(object_key, stored_range),
+    )
+    .await;
+    match fetched {
+        Ok(Ok(stored_chunk)) => Ok(stored_chunk),
+        Ok(Err(artifact_error)) => Err(object_store_failed("verify", object_key, &artifact_error)),
+        Err(_elapsed) => Err(object_store_timed_out("verify", object_key)),
+    }
+}
+
+/// Builds the error for an object store request that failed. The upload did not complete and can be
+/// repeated, which is what `Unavailable` tells the controller.
 fn object_store_failed(operation: &str, object_key: &str, artifact_error: &ArtifactError) -> ReplicaError {
     ReplicaError::Unavailable {
         reason: format!("cannot {operation} object {object_key:?}: {artifact_error}"),
     }
 }
 
-/// The error for an object store request that did not answer in time.
+/// Builds the error for an object store request that did not answer in time.
 fn object_store_timed_out(operation: &str, object_key: &str) -> ReplicaError {
     ReplicaError::Unavailable {
         reason: format!("cannot {operation} object {object_key:?}: the object store did not answer in time"),

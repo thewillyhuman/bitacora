@@ -1,7 +1,6 @@
 //! Storage nodes and the cluster they form.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bitacora_artifact::MemoryArtifactStore;
@@ -72,7 +71,6 @@ pub struct Node {
     /// The cluster's object store, which the node's replica uploads
     /// sealed segments to.
     artifact_store: MemoryArtifactStore,
-    has_failed_write: Arc<AtomicBool>,
 }
 
 impl Node {
@@ -85,16 +83,7 @@ impl Node {
     ) -> Self {
         let replica_id = ReplicaId::new(format!("replica-{node_number}")).expect("valid identifier");
         let disk = MemoryDisk::new();
-        let has_failed_write = Arc::new(AtomicBool::new(false));
-        let replica = open_replica(
-            &disk,
-            &replica_id,
-            settings,
-            &connector,
-            &artifact_store,
-            &has_failed_write,
-        )
-        .await;
+        let replica = open_replica(&disk, &replica_id, settings, &connector, &artifact_store).await;
         let node = Self {
             node_number,
             address: format!("{replica_id}:7000"),
@@ -108,7 +97,6 @@ impl Node {
             settings,
             connector,
             artifact_store,
-            has_failed_write,
         };
         node.connector.register(node.address.clone(), Arc::clone(&node.link));
         node
@@ -167,12 +155,16 @@ impl Node {
         });
     }
 
-    /// Whether the disk refused a write or a flush since the node started.
-    /// A real replica exits when that happens; whoever drives the cluster
-    /// is expected to crash the node.
+    /// Whether the disk refused a write or a flush to the replica process
+    /// that is running now. `false` while the node is down. A real replica
+    /// exits when that happens; whoever drives the cluster is expected to
+    /// crash the node.
     #[must_use]
     pub fn has_failed_write(&self) -> bool {
-        self.has_failed_write.load(Ordering::Relaxed)
+        match self.replica() {
+            Some(replica) => replica.write_failure().is_some(),
+            None => false,
+        }
     }
 
     /// Kills the replica process and loses everything that was not flushed.
@@ -213,18 +205,9 @@ impl Node {
         if self.is_running() {
             return;
         }
-        self.has_failed_write.store(false, Ordering::Relaxed);
         let (disk, replica_id) = (self.disk(), self.replica_id());
         disk.fail_flushes(false);
-        let replica = open_replica(
-            &disk,
-            &replica_id,
-            self.settings,
-            &self.connector,
-            &self.artifact_store,
-            &self.has_failed_write,
-        )
-        .await;
+        let replica = open_replica(&disk, &replica_id, self.settings, &self.connector, &self.artifact_store).await;
         self.link.set_replica(Some(replica));
     }
 
@@ -289,15 +272,12 @@ async fn open_replica(
     settings: ReplicaSettings,
     connector: &ClusterConnector,
     artifact_store: &MemoryArtifactStore,
-    has_failed_write: &Arc<AtomicBool>,
 ) -> Arc<Replica> {
-    let has_failed_write = Arc::clone(has_failed_write);
     let replica = Replica::open(
         Arc::new(disk.clone()),
         replica_id.clone(),
         settings,
         Arc::new(connector.clone()),
-        Arc::new(move |_segment, _reason| has_failed_write.store(true, Ordering::Relaxed)),
     )
     .await
     .expect("a replica opens on a memory disk")

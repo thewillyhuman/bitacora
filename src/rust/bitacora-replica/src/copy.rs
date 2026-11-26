@@ -1,161 +1,143 @@
-//! One replica's copy of one segment, and the rules it enforces.
+//! One replica's copy of one segment: what it holds, and whether it can be trusted.
 //!
-//! [`SegmentCopy`] is where the replica side of the protocol lives: which
-//! appends are accepted, what fencing and sealing do, and how far a read may
-//! go. It owns its files exclusively and is driven by one task
-//! (see `actor`), so every method runs to completion before the next starts.
+//! # Why this file exists
+//!
+//! A replica makes no decisions about ordering, membership or leadership, but it does enforce the handful
+//! of local rules that make those decisions safe: accept only batches that continue the copy, refuse
+//! writers that were fenced, never serve a record before the writer says it is durable, never forget a
+//! fence or a seal (design, sections 5, 7 and 9; `docs/protocol/replication.md`, "A replica"). Those rules
+//! are about one copy of one segment, and they need one place that owns the copy's files and everything
+//! the copy remembers. [`SegmentCopy`] is that place.
+//!
+//! # What it contains
+//!
+//! - [`SegmentCopy`]: the copy, with how it is created, loaded after a restart, described, verified and
+//!   deleted.
+//! - `Health`: whether the copy is sound, damaged, or was refused a write by its disk.
+//! - The operations themselves, one file each in `copy/`: `append.rs` (appends and heartbeats, with
+//!   [`Admission`]), `fence_seal.rs`, `read.rs` and `repair.rs` (with [`RepairPace`]).
+//!
+//! # How it works
+//!
+//! A copy is up to two files: the records (`SegmentFile`, from the segment crate) and a small state file
+//! with the fenced epoch and the sealed end. Either can exist without the other: a replica that is fenced
+//! or told of a seal before it ever received a record remembers that, and a copy that was never fenced or
+//! sealed has no state file.
+//!
+//! Besides the files, the copy remembers two things in memory only. The durable sequence it last heard
+//! from the writer limits what readers are served; it is safe to lose, because a restarted copy serves
+//! nothing until the writer speaks again. Its health says whether the copy may still answer: once a
+//! checksum fails or the disk refuses a write, the copy refuses every request and waits to be replaced or
+//! for the process to restart.
+//!
+//! After a restart [`SegmentCopy::load`] reads both files back. A file that cannot be read or verified
+//! makes the copy damaged, not absent: it is reported and repaired instead of silently forgotten.
+//!
+//! # Invariants
+//!
+//! - A copy has one owner, the task in `actor.rs`, and every operation takes `&mut self` and runs to
+//!   completion before the next starts. Nothing here locks, and a request that is dropped by its caller
+//!   can never leave a half-applied change.
+//! - The fence is never forgotten: every path that rewrites the state keeps or raises the fenced epoch,
+//!   also when the records are replaced by a repair.
+//! - A copy that is not sound answers nothing but its status. In particular a damaged copy never reports
+//!   a local end to a recovering writer, which would count on it to hold everything committed.
+//! - Once the disk refused a write, the copy stays refused until the process restarts: what the process
+//!   sees of the file may be pages that never reached the disk.
+//! - The records file is never deleted or rewritten to repair it. A replacement is built beside it and
+//!   moved over it only when complete (`copy/repair.rs`).
+//! - The append, heartbeat and read paths run for every request. The helpers in this file that they use
+//!   (`fenced_epoch`, `local_end_or`, `fail_if_unsound`) allocate nothing and await nothing.
+//!
+//! # See also
+//!
+//! - `copy/append.rs`, `copy/fence_seal.rs`, `copy/read.rs`, `copy/repair.rs`: the operations.
+//! - `actor.rs`: the task that owns a copy and runs its operations in arrival order.
+//! - `paths.rs`: where the copy's files are.
+//! - `bitacora-segment`: the records file, the state file and the disk they are on.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use bitacora_segment::format::{Batch, SegmentHeader, decode_frames};
 use bitacora_segment::{Disk, SegmentError, SegmentFile, SegmentState};
-use bitacora_types::replica_api::SegmentDescriptor;
-use bitacora_types::replica_api::{
-    AppendRequest, AppendResponse, FenceResponse, ReadLimit, ReadRequest, ReadResponse, RepairRequest, RepairResponse,
-    ReplicaApi, ReplicaError, SealResponse, SegmentStatus,
-};
+use bitacora_types::replica_api::{ReplicaError, SegmentDescriptor, SegmentStatus};
 use bitacora_types::{Epoch, SegmentAddress, SequenceNumber};
 use bytes::Bytes;
 
-/// The path of a segment's data file on the replica's disk.
-pub(crate) fn segment_file_path(address: SegmentAddress) -> String {
-    format!("{}/{}.seg", address.stream_id, address.segment_id)
-}
+use crate::paths::{segment_file_path, segment_repair_path, segment_state_path};
 
-/// Where a replacement for a segment copy is built before it takes the
-/// copy's place. A file left here by an interrupted repair holds nothing
-/// that is not elsewhere and is removed when the replica starts.
-pub(crate) fn segment_repair_path(address: SegmentAddress) -> String {
-    format!("{}{REPAIR_SUFFIX}", segment_file_path(address))
-}
+mod append;
+mod fence_seal;
+mod read;
+mod repair;
 
-/// The suffix of the scratch file a repair builds a new copy in.
-pub(crate) const REPAIR_SUFFIX: &str = ".repair";
+pub(crate) use append::Admission;
+pub(crate) use repair::RepairPace;
 
-/// The path of a segment's fencing and sealing state on the replica's disk.
-pub(crate) fn segment_state_path(address: SegmentAddress) -> String {
-    format!("{}/{}.state", address.stream_id, address.segment_id)
-}
-
-/// Whether the replica's disk has room for what an append needs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Admission {
-    /// Whether a new segment file may be created.
-    pub may_create_segments: bool,
-    /// How full the disk is, to report when creation is refused.
-    pub used_percent: u8,
-}
-
-/// How fast a repair may pull a segment from its source.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RepairPace {
-    /// The target size of one read from the source.
-    pub chunk_bytes: usize,
-    /// How many bytes per second the repair may copy. Zero means no limit.
-    pub bytes_per_second: u64,
-    /// How long one read from the source may take.
-    pub request_timeout: Duration,
-}
-
-impl RepairPace {
-    /// How long to pause after copying `copied_bytes` to stay within the
-    /// rate limit.
-    fn pause_after(self, copied_bytes: usize) -> Duration {
-        if self.bytes_per_second == 0 {
-            return Duration::ZERO;
-        }
-        let copied_bytes = u64::try_from(copied_bytes).unwrap_or(u64::MAX);
-        Duration::from_micros(copied_bytes.saturating_mul(1_000_000) / self.bytes_per_second)
-    }
-}
-
-/// Batches fetched from the source of a repair.
-struct FetchedBatches {
-    /// The batches that continue the copy, in order.
-    batches: Vec<Batch>,
-    /// How many bytes of frames the source sent, for pacing.
-    frame_bytes: usize,
-}
-
-/// Reads from `source` the batches of the sealed segment that follow
-/// `local_end`, and checks that they are what a repair can store: valid,
-/// starting right after `local_end`, and within the sealed end.
-async fn fetch_batches_after(
-    source: &dyn ReplicaApi,
-    request: &RepairRequest,
-    local_end: SequenceNumber,
-    pace: RepairPace,
-) -> Result<FetchedBatches, ReplicaError> {
-    let address = request.segment.address;
-    let read_chunk = source.read(ReadRequest {
-        segment: address,
-        from_sequence: local_end.next(),
-        max_bytes: pace.chunk_bytes,
-        wait_for_records: None,
-        limit: ReadLimit::DurableSequence,
-    });
-    let read = match tokio::time::timeout(pace.request_timeout, read_chunk).await {
-        Ok(answer) => answer?,
-        Err(_elapsed) => {
-            return Err(ReplicaError::Unavailable {
-                reason: "the source did not answer in time".to_owned(),
-            });
-        }
-    };
-    let decoded = match decode_frames(address, &read.batch_frames) {
-        Ok(decoded) => decoded,
-        Err(invalid) => {
-            return Err(ReplicaError::Unavailable {
-                reason: format!("the source sent invalid frames: {invalid}"),
-            });
-        }
-    };
-    let batches = SegmentCopy::batches_after(&decoded, local_end)?.to_vec();
-    let continues_the_copy = batches
-        .first()
-        .is_some_and(|batch| batch.first_sequence() == local_end.next());
-    let stays_within_the_seal = batches
-        .last()
-        .is_some_and(|batch| batch.last_sequence() <= request.sealed_end);
-    if !continues_the_copy || !stays_within_the_seal {
-        return Err(ReplicaError::Unavailable {
-            reason: format!(
-                "the source has no usable records after {local_end} for a segment sealed at {}",
-                request.sealed_end
-            ),
-        });
-    }
-    Ok(FetchedBatches {
-        batches,
-        frame_bytes: read.batch_frames.len(),
-    })
+/// Whether a copy can still be trusted, and if not, why.
+///
+/// One value instead of a damage reason and a separate flag: a copy that was refused a write is always
+/// also unfit to answer, so the two could never disagree, and now cannot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Health {
+    /// Nothing is known to be wrong with the copy.
+    Sound,
+    /// A checksum failed or a file could not be read. The copy refuses every request and waits to be
+    /// replaced by a repair, which makes it sound again.
+    Damaged {
+        /// What was found wrong, as reported to callers and in the copy's status.
+        reason: String,
+    },
+    /// The disk refused a write or a flush. The copy refuses every request, a repair included, and the
+    /// process must stop: after a refused flush the kernel may have dropped the unwritten pages, so the
+    /// process can no longer trust what it sees of the file (design, section 7, "Flush policy").
+    WriteRefused {
+        /// What the disk reported, or what was already wrong with the copy when the disk refused.
+        reason: String,
+    },
 }
 
 /// One replica's copy of one segment.
+///
+/// Created with [`SegmentCopy::absent`] for a segment the replica has nothing stored for, or with
+/// [`SegmentCopy::load`] for what a restarted replica finds on its disk. Its operations are spread over
+/// this file and the files in `copy/`.
 pub(crate) struct SegmentCopy {
+    /// The segment this is a copy of.
     address: SegmentAddress,
+    /// The disk the copy's files are on. Shared with the replica's other copies.
     disk: Arc<dyn Disk>,
+    /// How much disk the records file reserves when it is created, and grows by when full.
     preallocated_bytes: u64,
-    /// The data file. Absent while the replica only holds fencing or sealing
-    /// state for a segment it never received records for.
+    /// The records file. Absent while the replica only holds fencing or sealing state for a segment it
+    /// never received records for.
     file: Option<SegmentFile>,
+    /// The fenced epoch and the sealed end. In memory this always has a value; whether it is also on the
+    /// disk is what `is_state_stored` says.
     state: SegmentState,
-    /// Whether `state` has ever been written to the sidecar file.
-    has_stored_state: bool,
-    /// The latest durable sequence heard from the writer. In memory only:
-    /// after a restart the copy serves nothing until it hears again.
+    /// Whether `state` has ever been written to the state file. Independent of `file`: all four
+    /// combinations of the two happen.
+    is_state_stored: bool,
+    /// The latest durable sequence heard from the writer. In memory only: after a restart the copy serves
+    /// nothing until it hears again.
     known_durable: SequenceNumber,
-    /// Set when a checksum or a disk operation failed. A damaged copy
-    /// refuses everything and waits to be replaced.
-    damage: Option<String>,
-    /// Set when the disk refused a write or a flush. Unlike corruption found
-    /// later, this means the process can no longer trust its page cache.
-    has_failed_write: bool,
+    /// Whether the copy may still answer requests.
+    health: Health,
 }
 
 impl SegmentCopy {
-    /// A copy the replica has nothing on disk for yet.
+    /// Creates the copy of a segment the replica has nothing on disk for yet.
+    ///
+    /// Touches no disk. The copy's files are created by the first operation that needs them.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - The segment this is a copy of.
+    /// * `disk` - The disk the copy's files will be on.
+    /// * `preallocated_bytes` - How much disk the records file reserves, and grows by when full.
+    ///
+    /// # Returns
+    ///
+    /// A sound copy without records, not fenced and not sealed.
     pub(crate) fn absent(address: SegmentAddress, disk: Arc<dyn Disk>, preallocated_bytes: u64) -> Self {
         Self {
             address,
@@ -163,431 +145,109 @@ impl SegmentCopy {
             preallocated_bytes,
             file: None,
             state: SegmentState::default(),
-            has_stored_state: false,
+            is_state_stored: false,
             known_durable: SequenceNumber::ZERO,
-            damage: None,
-            has_failed_write: false,
+            health: Health::Sound,
         }
     }
 
-    /// Loads a copy from disk, as after a restart. A copy whose files cannot
-    /// be read or verified is loaded as damaged, so that it is reported and
-    /// replaced instead of silently forgotten.
+    /// Loads a copy from the disk, as a restarted replica does.
+    ///
+    /// Reads the state file, then opens the records file, which scans and verifies it. A copy whose files
+    /// cannot be read or verified is loaded as damaged, so that it is reported and replaced instead of
+    /// silently forgotten.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - The segment to load the copy of.
+    /// * `disk` - The disk the copy's files are on.
+    /// * `preallocated_bytes` - How much disk the records file grows by when full.
+    ///
+    /// # Returns
+    ///
+    /// The copy as found: with or without records, with or without stored state, sound or damaged. It
+    /// knows no durable sequence, so it serves no reader until the writer speaks again.
     pub(crate) async fn load(address: SegmentAddress, disk: Arc<dyn Disk>, preallocated_bytes: u64) -> Self {
-        let mut copy = Self::absent(address, Arc::clone(&disk), preallocated_bytes);
-
-        match disk.read_file(&segment_state_path(address)).await {
-            Ok(Some(stored_state)) => match SegmentState::decode(&stored_state) {
-                Ok(state) => {
-                    copy.state = state;
-                    copy.has_stored_state = true;
-                }
-                Err(state_error) => copy.damage = Some(state_error.to_string()),
-            },
-            Ok(None) => {}
-            Err(io_error) => copy.damage = Some(io_error.to_string()),
-        }
-
-        match SegmentFile::open(disk.as_ref(), &segment_file_path(address), address, preallocated_bytes).await {
-            Ok((file, _scan_stop)) => {
-                // Without a sidecar the copy was never fenced or sealed, so
-                // the lowest epoch it accepts is the one that created it.
-                copy.state.fenced_epoch = copy.state.fenced_epoch.max(file.header().epoch);
-                copy.file = Some(file);
-            }
-            Err(SegmentError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(segment_error) => copy.damage = Some(segment_error.to_string()),
-        }
+        let mut copy = Self::absent(address, disk, preallocated_bytes);
+        copy.load_state().await;
+        copy.load_records().await;
         copy
     }
 
-    /// Whether anything about this segment is stored on the replica's disk.
+    /// Reads the state file into the copy. An unreadable or invalid state file makes the copy damaged; an
+    /// absent one leaves it never fenced and never sealed.
+    async fn load_state(&mut self) {
+        let stored_state = match self.disk.read_file(&segment_state_path(self.address)).await {
+            Ok(Some(stored_state)) => stored_state,
+            Ok(None) => return,
+            Err(io_error) => {
+                self.mark_damaged(io_error.to_string());
+                return;
+            }
+        };
+        match SegmentState::decode(&stored_state) {
+            Ok(state) => {
+                self.state = state;
+                self.is_state_stored = true;
+            }
+            Err(state_error) => self.mark_damaged(state_error.to_string()),
+        }
+    }
+
+    /// Opens the records file into the copy. A file that cannot be opened or verified makes the copy
+    /// damaged; an absent one leaves it without records.
+    async fn load_records(&mut self) {
+        let path = segment_file_path(self.address);
+        let opened = SegmentFile::open(self.disk.as_ref(), &path, self.address, self.preallocated_bytes).await;
+        match opened {
+            Ok((file, _why_the_scan_stopped)) => {
+                // Without a state file the copy was never fenced or sealed, so the lowest epoch it accepts
+                // is the one that created it.
+                self.state.fenced_epoch = self.state.fenced_epoch.max(file.header().epoch);
+                self.file = Some(file);
+            }
+            Err(SegmentError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(segment_error) => self.mark_damaged(segment_error.to_string()),
+        }
+    }
+
+    /// Tells whether anything about this segment is stored on the replica's disk.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the copy has a records file or a state file that this process read or wrote. A copy for
+    /// which this is `false` is not listed among the replica's segments.
     pub(crate) const fn is_stored(&self) -> bool {
-        self.file.is_some() || self.has_stored_state
+        self.file.is_some() || self.is_state_stored
     }
 
-    /// The last sequence number readers may be served, if the copy has data.
+    /// Reports the last sequence number readers may be served.
+    ///
+    /// For a sealed copy that is the sealed end; for an open one, the durable sequence last heard from
+    /// the writer. Either is capped at what the copy actually holds.
+    ///
+    /// # Returns
+    ///
+    /// The sequence number, or `None` if the copy has no records file.
     pub(crate) fn readable_end(&self) -> Option<SequenceNumber> {
-        let local_end = self.file.as_ref()?.local_end();
-        Some(local_end.min(self.state.sealed_end.unwrap_or(self.known_durable)))
+        let local_end = self.local_end()?;
+        let limit = self.state.sealed_end.unwrap_or(self.known_durable);
+        Some(local_end.min(limit))
     }
 
-    /// The segment's final sequence number, if the copy knows it is sealed.
+    /// Reports the segment's final sequence number, if the copy knows the segment is sealed.
+    ///
+    /// # Returns
+    ///
+    /// The sealed end, or `None` while the copy has not been told of a seal.
     pub(crate) const fn sealed_end(&self) -> Option<SequenceNumber> {
         self.state.sealed_end
     }
 
-    /// Handles an append or a heartbeat (design, section 5, "Persist").
-    pub(crate) async fn append(
-        &mut self,
-        request: &AppendRequest,
-        admission: Admission,
-    ) -> Result<AppendResponse, ReplicaError> {
-        self.fail_if_damaged()?;
-        if request.writer_epoch < request.segment.epoch {
-            return Err(invalid_request("writer epoch is older than the segment's own epoch"));
-        }
-        let fenced_epoch = self.state.fenced_epoch.max(self.file_epoch());
-        if request.writer_epoch < fenced_epoch {
-            return Err(ReplicaError::Fenced {
-                request_epoch: request.writer_epoch,
-                fenced_epoch,
-            });
-        }
-        if let Some(sealed_end) = self.state.sealed_end {
-            return Err(ReplicaError::Sealed { sealed_end });
-        }
-        if let Some(file) = &self.file {
-            let header = file.header();
-            if header.epoch != request.segment.epoch || header.first_sequence != request.segment.first_sequence {
-                return Err(invalid_request("segment descriptor does not match the replica's copy"));
-            }
-        }
-        let batches = decode_frames(self.address, &request.batch_frames)
-            .map_err(|frames_error| invalid_request(&frames_error.to_string()))?;
-
-        let local_end = self.local_end_or(request.segment.first_sequence.preceding());
-        let new_batches = Self::batches_after(&batches, local_end)?;
-        if let Some(first_new_batch) = new_batches.first() {
-            if first_new_batch.first_sequence() != local_end.next() {
-                return Err(ReplicaError::OutOfOrder {
-                    first_sequence: first_new_batch.first_sequence(),
-                    local_end,
-                });
-            }
-            self.store_batches(request.segment, new_batches, admission).await?;
-        }
-
-        if new_batches.is_empty() {
-            self.flush_mark_on_heartbeat().await?;
-        }
-        self.known_durable = self.known_durable.max(request.durable_sequence);
-        Ok(AppendResponse {
-            local_end: self.local_end_or(local_end),
-        })
-    }
-
-    /// Raises the fenced epoch and reports the end of the copy (design,
-    /// section 9, step 3). The new epoch is durable before this returns.
-    pub(crate) async fn fence(&mut self, epoch: Epoch) -> Result<FenceResponse, ReplicaError> {
-        self.fail_if_damaged()?;
-        let fenced_epoch = self.state.fenced_epoch.max(self.file_epoch());
-        if epoch < fenced_epoch {
-            return Err(ReplicaError::Fenced {
-                request_epoch: epoch,
-                fenced_epoch,
-            });
-        }
-        if epoch > self.state.fenced_epoch || !self.has_stored_state {
-            self.store_state(SegmentState {
-                fenced_epoch: epoch,
-                sealed_end: self.state.sealed_end,
-            })
-            .await?;
-        }
-        Ok(FenceResponse {
-            local_end: self.file.as_ref().map(SegmentFile::local_end),
-            sealed_end: self.state.sealed_end,
-        })
-    }
-
-    /// Records the sealed end and discards every record above it.
-    pub(crate) async fn seal(&mut self, sealed_end: SequenceNumber) -> Result<SealResponse, ReplicaError> {
-        self.fail_if_damaged()?;
-        match self.state.sealed_end {
-            Some(existing_sealed_end) if existing_sealed_end != sealed_end => {
-                return Err(ReplicaError::ConflictingSeal {
-                    existing_sealed_end,
-                    requested_sealed_end: sealed_end,
-                });
-            }
-            Some(_) => {
-                return Ok(SealResponse {
-                    local_end: self.file.as_ref().map(SegmentFile::local_end),
-                });
-            }
-            None => {}
-        }
-
-        // Cut the tail before recording the seal. A crash in between leaves
-        // an open copy with a shorter tail, which the next seal completes.
-        if let Some(file) = &mut self.file
-            && file.local_end() > sealed_end
-        {
-            match file.truncate_to(sealed_end).await {
-                Ok(()) => {}
-                Err(SegmentError::NotABatchBoundary { .. }) => {
-                    return Err(invalid_request(
-                        "sealed end is not a batch boundary of the replica's copy",
-                    ));
-                }
-                Err(segment_error) => return Err(self.damaged_by(&segment_error)),
-            }
-        }
-        self.store_state(SegmentState {
-            fenced_epoch: self.state.fenced_epoch,
-            sealed_end: Some(sealed_end),
-        })
-        .await?;
-        if let Some(file) = &mut self.file
-            && let Err(segment_error) = file.release_unused_space().await
-        {
-            return Err(self.damaged_by(&segment_error));
-        }
-        Ok(SealResponse {
-            local_end: self.file.as_ref().map(SegmentFile::local_end),
-        })
-    }
-
-    /// Reads batches for a reader or a recovering writer.
-    pub(crate) async fn read(&mut self, request: &ReadRequest) -> Result<ReadResponse, ReplicaError> {
-        self.fail_if_damaged()?;
-        let Some(file) = &self.file else {
-            return Err(ReplicaError::SegmentNotFound { segment: self.address });
-        };
-        let readable_end = match (self.state.sealed_end, request.limit) {
-            (Some(sealed_end), _) => file.local_end().min(sealed_end),
-            (None, ReadLimit::DurableSequence) => file.local_end().min(self.known_durable),
-            (None, ReadLimit::LocalEnd { recovery_epoch }) => {
-                if recovery_epoch < self.state.fenced_epoch {
-                    return Err(ReplicaError::Fenced {
-                        request_epoch: recovery_epoch,
-                        fenced_epoch: self.state.fenced_epoch,
-                    });
-                }
-                if recovery_epoch > self.state.fenced_epoch {
-                    return Err(invalid_request(
-                        "the copy must be fenced at the recovery epoch before its tail is read",
-                    ));
-                }
-                file.local_end()
-            }
-        };
-        let batch_frames = match file
-            .read_frames(request.from_sequence, readable_end, request.max_bytes)
-            .await
-        {
-            Ok(batch_frames) => batch_frames,
-            Err(segment_error) => return Err(self.damaged_by(&segment_error)),
-        };
-        Ok(ReadResponse {
-            batch_frames,
-            readable_end,
-            sealed_end: self.state.sealed_end,
-        })
-    }
-
-    /// Makes the copy a complete, sealed copy of the segment by pulling what
-    /// it lacks from `source`, in chunks of about `chunk_bytes` (design,
-    /// section 10, "Repair"). Every batch is verified before it is stored.
+    /// Rereads the whole records file and marks the copy damaged if anything fails its checksum, as the
+    /// background scrubber does (design, section 7, "Integrity").
     ///
-    /// A copy that only lacks records is completed where it is. A copy that
-    /// is damaged, sealed elsewhere, longer than the sealed end or written
-    /// for another segment header cannot be completed; a whole new copy is
-    /// built beside it and takes its place only once it is complete. Until
-    /// that moment the old copy is not touched: it may be damaged in one
-    /// place and still be the only copy of every other record.
-    ///
-    /// A copy whose disk refused a write is not repaired at all. The
-    /// process is about to stop, and what it sees of the file may be pages
-    /// that never reached the disk. The copy is read back from the disk
-    /// when the replica starts again, and judged then.
-    pub(crate) async fn repair(
-        &mut self,
-        request: &RepairRequest,
-        source: &dyn ReplicaApi,
-        admission: Admission,
-        pace: RepairPace,
-    ) -> Result<RepairResponse, ReplicaError> {
-        if self.has_failed_write {
-            return Err(ReplicaError::Storage {
-                reason: "the disk refused a write to this copy; it is verified again when the \
-                         replica restarts"
-                    .to_owned(),
-            });
-        }
-        if self.can_be_completed_to(request) {
-            self.complete_in_place(request, source, admission, pace).await?;
-        } else {
-            self.replace_with_a_new_copy(request, source, admission, pace).await?;
-        }
-        self.store_state(SegmentState {
-            fenced_epoch: self.state.fenced_epoch.max(request.segment.epoch),
-            sealed_end: Some(request.sealed_end),
-        })
-        .await?;
-        if let Some(file) = &mut self.file
-            && let Err(segment_error) = file.release_unused_space().await
-        {
-            return Err(self.damaged_by(&segment_error));
-        }
-        let empty_end = request.segment.first_sequence.preceding();
-        Ok(RepairResponse {
-            local_end: self.local_end_or(empty_end),
-        })
-    }
-
-    /// Pulls the records the copy lacks from `source` and appends them to
-    /// the copy's own file, until it reaches the sealed end.
-    async fn complete_in_place(
-        &mut self,
-        request: &RepairRequest,
-        source: &dyn ReplicaApi,
-        admission: Admission,
-        pace: RepairPace,
-    ) -> Result<(), ReplicaError> {
-        let empty_end = request.segment.first_sequence.preceding();
-        while self.local_end_or(empty_end) < request.sealed_end {
-            let local_end = self.local_end_or(empty_end);
-            let fetched = fetch_batches_after(source, request, local_end, pace).await?;
-            self.store_batches(request.segment, &fetched.batches, admission).await?;
-            // Hold back so that repair cannot starve appends of the disk
-            // and the network (design, section 10).
-            tokio::time::sleep(pace.pause_after(fetched.frame_bytes)).await;
-        }
-        Ok(())
-    }
-
-    /// Builds a complete copy of the sealed segment in a scratch file next
-    /// to the copy, and moves it over the copy once it is complete.
-    ///
-    /// If anything fails before the move, the scratch file is removed and
-    /// the old copy is exactly as it was.
-    async fn replace_with_a_new_copy(
-        &mut self,
-        request: &RepairRequest,
-        source: &dyn ReplicaApi,
-        admission: Admission,
-        pace: RepairPace,
-    ) -> Result<(), ReplicaError> {
-        if !admission.may_create_segments {
-            return Err(ReplicaError::NoCapacity {
-                used_percent: admission.used_percent,
-            });
-        }
-        let scratch_path = segment_repair_path(self.address);
-        let built = self.build_new_copy(&scratch_path, request, source, pace).await;
-        if let Err(replica_error) = built {
-            // Best effort: a leftover is removed when the replica starts.
-            drop(self.disk.remove_file(&scratch_path).await);
-            return Err(replica_error);
-        }
-
-        // From here on the replica holds the new copy and nothing else.
-        self.file = None;
-        let final_path = segment_file_path(self.address);
-        if let Err(io_error) = self.disk.rename_file(&scratch_path, &final_path).await {
-            return Err(self.failed_write_of_the_new_copy("move it into place", &io_error));
-        }
-        let opened = SegmentFile::open(self.disk.as_ref(), &final_path, self.address, self.preallocated_bytes).await;
-        match opened {
-            Ok((file, _scan_stop)) => {
-                self.file = Some(file);
-                self.damage = None;
-                // What the old copy knew about a seal described the old
-                // copy. The fence is kept: a fence is never forgotten.
-                self.state.sealed_end = None;
-                Ok(())
-            }
-            Err(segment_error) => Err(self.damaged_by(&segment_error)),
-        }
-    }
-
-    /// Fetches the whole sealed segment from `source` into a new segment
-    /// file at `scratch_path`, flushing as it goes.
-    async fn build_new_copy(
-        &mut self,
-        scratch_path: &str,
-        request: &RepairRequest,
-        source: &dyn ReplicaApi,
-        pace: RepairPace,
-    ) -> Result<(), ReplicaError> {
-        // An interrupted repair may have left one behind.
-        if let Err(io_error) = self.disk.remove_file(scratch_path).await {
-            return Err(self.failed_write_of_the_new_copy("clear its place", &io_error));
-        }
-        let header = SegmentHeader {
-            address: self.address,
-            epoch: request.segment.epoch,
-            first_sequence: request.segment.first_sequence,
-        };
-        let created = SegmentFile::create(self.disk.as_ref(), scratch_path, header, self.preallocated_bytes).await;
-        let mut new_copy = match created {
-            Ok(new_copy) => new_copy,
-            Err(segment_error) => {
-                return Err(self.failed_write_of_the_new_copy("create it", &segment_error));
-            }
-        };
-        while new_copy.local_end() < request.sealed_end {
-            let fetched = fetch_batches_after(source, request, new_copy.local_end(), pace).await?;
-            let stored = match new_copy.append(&fetched.batches).await {
-                Ok(()) => new_copy.flush().await,
-                Err(segment_error) => Err(segment_error),
-            };
-            if let Err(segment_error) = stored {
-                return Err(self.failed_write_of_the_new_copy("write it", &segment_error));
-            }
-            tokio::time::sleep(pace.pause_after(fetched.frame_bytes)).await;
-        }
-        if let Err(segment_error) = new_copy.release_unused_space().await {
-            return Err(self.failed_write_of_the_new_copy("trim it", &segment_error));
-        }
-        Ok(())
-    }
-
-    /// Records that the disk refused a write while a new copy was being
-    /// built, and returns the error to answer with. The process must stop,
-    /// as after any refused write; the old copy was not written to.
-    fn failed_write_of_the_new_copy(&mut self, step: &str, cause: &dyn std::fmt::Display) -> ReplicaError {
-        let reason = format!("cannot rebuild the copy: failed to {step}: {cause}");
-        tracing::error!(segment = %self.address, %reason, "the disk refused a write");
-        self.has_failed_write = true;
-        if self.damage.is_none() {
-            self.damage = Some(reason.clone());
-        }
-        ReplicaError::Storage { reason }
-    }
-
-    /// Whether the copy, as it is, can be extended into a complete copy of
-    /// the sealed segment `request` describes.
-    fn can_be_completed_to(&self, request: &RepairRequest) -> bool {
-        let is_seal_compatible = self
-            .state
-            .sealed_end
-            .is_none_or(|sealed_end| sealed_end == request.sealed_end);
-        let is_file_compatible = self.file.as_ref().is_none_or(|file| {
-            file.header().epoch == request.segment.epoch
-                && file.header().first_sequence == request.segment.first_sequence
-                && file.local_end() <= request.sealed_end
-        });
-        self.damage.is_none() && is_seal_compatible && is_file_compatible
-    }
-
-    /// Throws away everything stored for the segment, leaving the copy as
-    /// if the replica had never seen it.
-    async fn discard(&mut self) -> Result<(), ReplicaError> {
-        self.file = None;
-        for path in [
-            segment_file_path(self.address),
-            segment_state_path(self.address),
-            segment_repair_path(self.address),
-        ] {
-            self.disk
-                .remove_file(&path)
-                .await
-                .map_err(|io_error| ReplicaError::Storage {
-                    reason: format!("cannot remove {path}: {io_error}"),
-                })?;
-        }
-        self.state = SegmentState::default();
-        self.has_stored_state = false;
-        self.known_durable = SequenceNumber::ZERO;
-        self.damage = None;
-        Ok(())
-    }
-
-    /// Rereads the whole copy and marks it damaged if anything fails its
-    /// checksum, as the background scrubber does.
+    /// Reads the file from the disk in chunks. A copy without a records file has nothing to verify.
     pub(crate) async fn verify(&mut self) {
         let Some(file) = &self.file else {
             return;
@@ -598,165 +258,168 @@ impl SegmentCopy {
     }
 
     /// Reports what the replica holds for this segment.
+    ///
+    /// Touches no disk: everything reported is kept in memory.
+    ///
+    /// # Returns
+    ///
+    /// The copy's end, fenced epoch, sealed end, size, whether it is damaged, and what the header of its
+    /// records file says. A copy without a records file reports no end, no header and a size of zero.
     pub(crate) fn status(&self) -> SegmentStatus {
-        let descriptor = self.file.as_ref().map(|file| {
+        let mut descriptor = None;
+        let mut size_bytes = 0;
+        if let Some(file) = &self.file {
             let header = file.header();
-            SegmentDescriptor {
+            descriptor = Some(SegmentDescriptor {
                 address: header.address,
                 epoch: header.epoch,
                 first_sequence: header.first_sequence,
-            }
-        });
+            });
+            size_bytes = file.content_bytes();
+        }
         SegmentStatus {
             address: self.address,
-            local_end: self.file.as_ref().map(SegmentFile::local_end),
-            fenced_epoch: self.state.fenced_epoch.max(self.file_epoch()),
+            local_end: self.local_end(),
+            fenced_epoch: self.fenced_epoch(),
             sealed_end: self.state.sealed_end,
-            size_bytes: self.file.as_ref().map_or(0, SegmentFile::content_bytes),
-            is_damaged: self.damage.is_some(),
+            size_bytes,
+            is_damaged: self.health != Health::Sound,
             descriptor,
         }
     }
 
-    /// Removes everything the replica stores for this segment.
-    pub(crate) async fn delete(mut self) -> Result<(), ReplicaError> {
-        self.discard().await
-    }
-
-    /// The reason the disk refused a write or a flush, if it ever did.
+    /// Removes everything the replica stores for this segment, leaving the copy as if the replica had
+    /// never seen the segment.
     ///
-    /// After a failed flush the kernel may have dropped the unwritten pages,
-    /// so a retry could falsely succeed. The process must stop (design,
-    /// section 7, "Flush policy").
-    pub(crate) fn failed_write(&self) -> Option<&str> {
-        if self.has_failed_write {
-            self.damage.as_deref()
-        } else {
-            None
-        }
-    }
-
-    /// Returns the batches that lie after `local_end`, dropping the ones the
-    /// copy already holds.
+    /// Removes the records file, the state file and the scratch file of an interrupted repair, each
+    /// durably. The caller stops using the copy afterwards.
     ///
-    /// A retried request may resend batches that were already stored. Within
-    /// one segment there is only one possible record at each sequence number
-    /// (design, section 4, rule 1), so they can be acknowledged again without
-    /// comparing content.
-    fn batches_after(batches: &[Batch], local_end: SequenceNumber) -> Result<&[Batch], ReplicaError> {
-        let already_stored = batches
-            .iter()
-            .take_while(|batch| batch.last_sequence() <= local_end)
-            .count();
-        let new_batches = &batches[already_stored..];
-        match new_batches.first() {
-            Some(straddling_batch) if straddling_batch.first_sequence() <= local_end => {
-                Err(invalid_request("batch boundaries do not match the replica's copy"))
-            }
-            _ => Ok(new_batches),
-        }
-    }
-
-    /// Writes and flushes `new_batches`, creating the data file if needed.
-    async fn store_batches(
-        &mut self,
-        segment: SegmentDescriptor,
-        new_batches: &[Batch],
-        admission: Admission,
-    ) -> Result<(), ReplicaError> {
-        if self.file.is_none() {
-            if !admission.may_create_segments {
-                return Err(ReplicaError::NoCapacity {
-                    used_percent: admission.used_percent,
+    /// # Errors
+    ///
+    /// Returns [`ReplicaError::Storage`] if the disk refuses to remove a file. The files removed before it
+    /// stay removed.
+    pub(crate) async fn delete(&mut self) -> Result<(), ReplicaError> {
+        self.file = None;
+        for path in [
+            segment_file_path(self.address),
+            segment_state_path(self.address),
+            segment_repair_path(self.address),
+        ] {
+            if let Err(io_error) = self.disk.remove_file(&path).await {
+                return Err(ReplicaError::Storage {
+                    reason: format!("cannot remove {path}: {io_error}"),
                 });
             }
-            let header = SegmentHeader {
-                address: self.address,
-                epoch: segment.epoch,
-                first_sequence: segment.first_sequence,
-            };
-            let created = SegmentFile::create(
-                self.disk.as_ref(),
-                &segment_file_path(self.address),
-                header,
-                self.preallocated_bytes,
-            )
-            .await;
-            match created {
-                Ok(file) => self.file = Some(file),
-                Err(segment_error) => return Err(self.damaged_by(&segment_error)),
+        }
+        self.state = SegmentState::default();
+        self.is_state_stored = false;
+        self.known_durable = SequenceNumber::ZERO;
+        self.health = Health::Sound;
+        Ok(())
+    }
+
+    /// Reports why the disk refused a write or a flush to this copy, if it ever did.
+    ///
+    /// The task that owns the copy asks after every command, and tells the replica's host, which must
+    /// stop the process.
+    ///
+    /// # Returns
+    ///
+    /// The reason, or `None` if the disk has refused nothing.
+    pub(crate) fn refused_write(&self) -> Option<&str> {
+        match &self.health {
+            Health::WriteRefused { reason } => Some(reason),
+            Health::Sound | Health::Damaged { .. } => None,
+        }
+    }
+
+    /// The lowest epoch the copy accepts a writer from: the highest of the fence it was given and the
+    /// epoch that created its records file, which nothing older may write.
+    fn fenced_epoch(&self) -> Epoch {
+        self.state.fenced_epoch.max(self.file_epoch())
+    }
+
+    /// The epoch that created the records file, or the lowest epoch there is if the copy has none.
+    fn file_epoch(&self) -> Epoch {
+        match &self.file {
+            Some(file) => file.header().epoch,
+            None => Epoch::ZERO,
+        }
+    }
+
+    /// The last sequence number the copy holds, or `None` if it has no records file.
+    fn local_end(&self) -> Option<SequenceNumber> {
+        self.file.as_ref().map(SegmentFile::local_end)
+    }
+
+    /// The last sequence number the copy holds, or `end_of_an_empty_copy` if it has no records file.
+    /// Callers pass the position before the segment's first record.
+    fn local_end_or(&self, end_of_an_empty_copy: SequenceNumber) -> SequenceNumber {
+        match &self.file {
+            Some(file) => file.local_end(),
+            None => end_of_an_empty_copy,
+        }
+    }
+
+    /// Refuses the request at hand if the copy is damaged or was refused a write, with the reason.
+    fn fail_if_unsound(&self) -> Result<(), ReplicaError> {
+        match &self.health {
+            Health::Sound => Ok(()),
+            Health::Damaged { reason } | Health::WriteRefused { reason } => {
+                Err(ReplicaError::Storage { reason: reason.clone() })
             }
         }
-        let file = self.file.as_mut().expect("the data file was just ensured");
-        let stored = match file.append(new_batches).await {
-            Ok(()) => file.flush().await,
-            Err(segment_error) => Err(segment_error),
+    }
+
+    /// Records that something is wrong with the copy. A copy whose disk refused a write stays one: only
+    /// its reason is replaced.
+    fn mark_damaged(&mut self, reason: String) {
+        self.health = match self.health {
+            Health::WriteRefused { .. } => Health::WriteRefused { reason },
+            Health::Sound | Health::Damaged { .. } => Health::Damaged { reason },
         };
-        stored.map_err(|segment_error| {
-            self.has_failed_write = true;
-            self.damaged_by(&segment_error)
-        })
     }
 
-    /// A heartbeat means the stream is idle. That is the moment to make the
-    /// file's flushed mark cover everything acknowledged: it costs one flush
-    /// when the stream goes idle and nothing after that.
-    async fn flush_mark_on_heartbeat(&mut self) -> Result<(), ReplicaError> {
-        let Some(file) = &mut self.file else {
-            return Ok(());
-        };
-        if let Err(segment_error) = file.flush_mark().await {
-            self.has_failed_write = true;
-            return Err(self.damaged_by(&segment_error));
-        }
-        Ok(())
-    }
-
-    /// Replaces the sidecar state durably, then adopts it in memory.
-    async fn store_state(&mut self, new_state: SegmentState) -> Result<(), ReplicaError> {
-        let stored = self
-            .disk
-            .write_file_atomically(
-                &segment_state_path(self.address),
-                Bytes::copy_from_slice(&new_state.encode()),
-            )
-            .await;
-        if let Err(io_error) = stored {
-            let reason = format!("cannot store segment state: {io_error}");
-            self.has_failed_write = true;
-            self.damage = Some(reason.clone());
-            return Err(ReplicaError::Storage { reason });
-        }
-        self.state = new_state;
-        self.has_stored_state = true;
-        Ok(())
-    }
-
-    fn local_end_or(&self, end_of_an_empty_copy: SequenceNumber) -> SequenceNumber {
-        self.file.as_ref().map_or(end_of_an_empty_copy, SegmentFile::local_end)
-    }
-
-    /// The epoch that created the data file, which nothing older may write.
-    fn file_epoch(&self) -> Epoch {
-        self.file.as_ref().map_or(Epoch::ZERO, |file| file.header().epoch)
-    }
-
-    fn fail_if_damaged(&self) -> Result<(), ReplicaError> {
-        match &self.damage {
-            Some(reason) => Err(ReplicaError::Storage { reason: reason.clone() }),
-            None => Ok(()),
-        }
-    }
-
-    /// Marks the copy damaged and returns the error to answer with.
+    /// Marks the copy damaged by an error of its records file, logs it, and returns the error to answer
+    /// the request with.
     fn damaged_by(&mut self, segment_error: &SegmentError) -> ReplicaError {
         let reason = segment_error.to_string();
         tracing::error!(segment = %self.address, %reason, "segment copy is damaged");
-        self.damage = Some(reason.clone());
+        self.mark_damaged(reason.clone());
         ReplicaError::Storage { reason }
+    }
+
+    /// Marks the copy as refused a write by an error of its records file, logs it, and returns the error
+    /// to answer the request with. The process must stop.
+    fn write_refused_by(&mut self, segment_error: &SegmentError) -> ReplicaError {
+        let reason = segment_error.to_string();
+        tracing::error!(segment = %self.address, %reason, "segment copy is damaged");
+        self.health = Health::WriteRefused { reason: reason.clone() };
+        ReplicaError::Storage { reason }
+    }
+
+    /// Replaces the state file durably, then adopts the new state in memory.
+    ///
+    /// The state file is written whole and renamed into place, so after a crash it holds the old state or
+    /// the new one. If the disk refuses, the copy is marked as refused a write and keeps its old state.
+    async fn store_state(&mut self, new_state: SegmentState) -> Result<(), ReplicaError> {
+        let encoded_state = Bytes::copy_from_slice(&new_state.encode());
+        let stored = self
+            .disk
+            .write_file_atomically(&segment_state_path(self.address), encoded_state)
+            .await;
+        if let Err(io_error) = stored {
+            let reason = format!("cannot store segment state: {io_error}");
+            self.health = Health::WriteRefused { reason: reason.clone() };
+            return Err(ReplicaError::Storage { reason });
+        }
+        self.state = new_state;
+        self.is_state_stored = true;
+        Ok(())
     }
 }
 
+/// Builds the answer to a request that is wrong in itself, whatever the copy holds.
 fn invalid_request(reason: &str) -> ReplicaError {
     ReplicaError::InvalidRequest {
         reason: reason.to_owned(),
@@ -764,730 +427,5 @@ fn invalid_request(reason: &str) -> ReplicaError {
 }
 
 #[cfg(test)]
-mod tests {
-    use bitacora_segment::MemoryDisk;
-    use bitacora_types::replica_api::SegmentDescriptor;
-    use bitacora_types::{SegmentId, StreamId};
-    use bytes::BytesMut;
-
-    use super::*;
-
-    const SEGMENT: SegmentAddress = SegmentAddress::new(StreamId::new(7), SegmentId::new(3));
-    const SEGMENT_EPOCH: Epoch = Epoch::new(5);
-    const NEXT_EPOCH: Epoch = Epoch::new(6);
-    const FIRST_SEQUENCE: u64 = 100;
-    const PREALLOCATED_BYTES: u64 = 4 * 1024;
-    const ROOMY: Admission = Admission {
-        may_create_segments: true,
-        used_percent: 10,
-    };
-    const NEARLY_FULL: Admission = Admission {
-        may_create_segments: false,
-        used_percent: 90,
-    };
-
-    fn descriptor() -> SegmentDescriptor {
-        SegmentDescriptor {
-            address: SEGMENT,
-            epoch: SEGMENT_EPOCH,
-            first_sequence: SequenceNumber::new(FIRST_SEQUENCE),
-        }
-    }
-
-    /// Frames for one batch per `(first_sequence, record_count)` pair.
-    fn frames(batches: &[(u64, u64)]) -> Bytes {
-        let mut batch_frames = BytesMut::new();
-        for (first_sequence, record_count) in batches {
-            let payloads: Vec<Bytes> = (*first_sequence..first_sequence + record_count)
-                .map(|sequence| Bytes::from(format!("record-{sequence}")))
-                .collect();
-            let batch = Batch::encode(SEGMENT, SequenceNumber::new(*first_sequence), &payloads).expect("valid batch");
-            batch_frames.extend_from_slice(batch.frame());
-        }
-        batch_frames.freeze()
-    }
-
-    fn append_request(batches: &[(u64, u64)], durable_sequence: u64) -> AppendRequest {
-        AppendRequest {
-            segment: descriptor(),
-            writer_epoch: SEGMENT_EPOCH,
-            batch_frames: frames(batches),
-            durable_sequence: SequenceNumber::new(durable_sequence),
-        }
-    }
-
-    fn read_request(from_sequence: u64, limit: ReadLimit) -> ReadRequest {
-        ReadRequest {
-            segment: SEGMENT,
-            from_sequence: SequenceNumber::new(from_sequence),
-            max_bytes: usize::MAX,
-            wait_for_records: None,
-            limit,
-        }
-    }
-
-    fn new_copy(disk: &MemoryDisk) -> SegmentCopy {
-        SegmentCopy::absent(SEGMENT, Arc::new(disk.clone()), PREALLOCATED_BYTES)
-    }
-
-    /// A copy holding records 100..=109 in two batches, with 104 durable.
-    async fn copy_with_records(disk: &MemoryDisk) -> SegmentCopy {
-        let mut copy = new_copy(disk);
-        copy.append(&append_request(&[(100, 5), (105, 5)], 104), ROOMY)
-            .await
-            .expect("append");
-        copy
-    }
-
-    async fn reload(disk: &MemoryDisk) -> SegmentCopy {
-        SegmentCopy::load(SEGMENT, Arc::new(disk.clone()), PREALLOCATED_BYTES).await
-    }
-
-    async fn readable_sequences(copy: &mut SegmentCopy, limit: ReadLimit) -> Vec<u64> {
-        let response = copy.read(&read_request(FIRST_SEQUENCE, limit)).await.expect("read");
-        decode_frames(SEGMENT, &response.batch_frames)
-            .expect("valid frames")
-            .iter()
-            .flat_map(Batch::records)
-            .map(|record| record.sequence.get())
-            .collect()
-    }
-
-    // ---- append ----
-
-    #[tokio::test]
-    async fn append_acknowledges_the_new_local_end() {
-        let disk = MemoryDisk::new();
-        let response = new_copy(&disk).append(&append_request(&[(100, 5)], 0), ROOMY).await;
-        assert_eq!(
-            response,
-            Ok(AppendResponse {
-                local_end: SequenceNumber::new(104)
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn acknowledged_records_survive_a_crash() {
-        let disk = MemoryDisk::new();
-        copy_with_records(&disk).await;
-        disk.crash();
-        assert_eq!(reload(&disk).await.status().local_end, Some(SequenceNumber::new(109)));
-    }
-
-    #[tokio::test]
-    async fn append_leaving_a_gap_reports_where_to_resend_from() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        let refused = copy.append(&append_request(&[(112, 1)], 0), ROOMY).await;
-        assert_eq!(
-            refused,
-            Err(ReplicaError::OutOfOrder {
-                first_sequence: SequenceNumber::new(112),
-                local_end: SequenceNumber::new(109),
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn first_append_not_starting_at_the_segment_start_is_refused() {
-        let disk = MemoryDisk::new();
-        let refused = new_copy(&disk).append(&append_request(&[(105, 5)], 0), ROOMY).await;
-        assert_eq!(
-            refused,
-            Err(ReplicaError::OutOfOrder {
-                first_sequence: SequenceNumber::new(105),
-                local_end: SequenceNumber::new(99),
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn refused_first_append_creates_no_file() {
-        let disk = MemoryDisk::new();
-        let mut copy = new_copy(&disk);
-        let _ = copy.append(&append_request(&[(105, 5)], 0), ROOMY).await;
-        assert!(!copy.is_stored());
-    }
-
-    #[tokio::test]
-    async fn resent_batches_are_acknowledged_again() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        let response = copy.append(&append_request(&[(100, 5), (105, 5)], 0), ROOMY).await;
-        assert_eq!(
-            response,
-            Ok(AppendResponse {
-                local_end: SequenceNumber::new(109)
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn resend_overlapping_the_end_stores_only_the_new_batches() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[(105, 5), (110, 2)], 111), ROOMY)
-            .await
-            .expect("append");
-        assert_eq!(
-            readable_sequences(&mut copy, ReadLimit::DurableSequence).await,
-            (100..=111).collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn resend_with_different_batch_boundaries_is_refused() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        let refused = copy.append(&append_request(&[(108, 4)], 0), ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::InvalidRequest { .. })));
-    }
-
-    #[tokio::test]
-    async fn frames_failing_their_checksum_are_refused() {
-        let disk = MemoryDisk::new();
-        let mut damaged_frames = frames(&[(100, 5)]).to_vec();
-        damaged_frames[30] ^= 0x01;
-        let request = AppendRequest {
-            batch_frames: Bytes::from(damaged_frames),
-            ..append_request(&[], 0)
-        };
-        let refused = new_copy(&disk).append(&request, ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::InvalidRequest { .. })));
-    }
-
-    #[tokio::test]
-    async fn heartbeat_to_a_replica_without_a_copy_reports_an_empty_copy() {
-        let disk = MemoryDisk::new();
-        let response = new_copy(&disk).append(&append_request(&[], 0), ROOMY).await;
-        assert_eq!(
-            response,
-            Ok(AppendResponse {
-                local_end: SequenceNumber::new(FIRST_SEQUENCE - 1)
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn nearly_full_disk_refuses_to_create_a_segment() {
-        let disk = MemoryDisk::new();
-        let refused = new_copy(&disk)
-            .append(&append_request(&[(100, 5)], 0), NEARLY_FULL)
-            .await;
-        assert_eq!(refused, Err(ReplicaError::NoCapacity { used_percent: 90 }));
-    }
-
-    #[tokio::test]
-    async fn nearly_full_disk_still_appends_to_an_existing_segment() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        let response = copy.append(&append_request(&[(110, 1)], 0), NEARLY_FULL).await;
-        assert!(response.is_ok());
-    }
-
-    #[tokio::test]
-    async fn append_with_a_descriptor_that_contradicts_the_copy_is_refused() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        let mut request = append_request(&[(110, 1)], 0);
-        request.segment.first_sequence = SequenceNumber::new(90);
-        let refused = copy.append(&request, ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::InvalidRequest { .. })));
-    }
-
-    #[tokio::test]
-    async fn writer_older_than_the_segment_is_refused() {
-        let disk = MemoryDisk::new();
-        let request = AppendRequest {
-            writer_epoch: Epoch::new(4),
-            ..append_request(&[(100, 5)], 0)
-        };
-        let refused = new_copy(&disk).append(&request, ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::InvalidRequest { .. })));
-    }
-
-    /// A failed flush stops the replica. What it leaves behind must be a
-    /// copy that the restarted replica can use, not one that looks damaged.
-    #[tokio::test]
-    async fn first_append_whose_flush_fails_leaves_a_valid_empty_copy() {
-        let disk = MemoryDisk::new();
-        disk.fail_flushes(true);
-        let failed = new_copy(&disk).append(&append_request(&[(100, 5)], 0), ROOMY).await;
-        disk.crash();
-        disk.fail_flushes(false);
-        let status = reload(&disk).await.status();
-        assert!(
-            matches!(failed, Err(ReplicaError::Storage { .. }))
-                && !status.is_damaged
-                && status.local_end == Some(SequenceNumber::new(FIRST_SEQUENCE - 1)),
-            "failed: {failed:?}, status: {status:?}"
-        );
-    }
-
-    #[test]
-    fn unlimited_repair_never_pauses() {
-        let unlimited = RepairPace {
-            chunk_bytes: 1024,
-            bytes_per_second: 0,
-            request_timeout: Duration::from_secs(1),
-        };
-        assert_eq!(unlimited.pause_after(1 << 30), Duration::ZERO);
-    }
-
-    #[test]
-    fn limited_repair_pauses_in_proportion_to_what_it_copied() {
-        let one_megabyte_per_second = RepairPace {
-            chunk_bytes: 1024,
-            bytes_per_second: 1_000_000,
-            request_timeout: Duration::from_secs(1),
-        };
-        assert_eq!(one_megabyte_per_second.pause_after(250_000), Duration::from_millis(250));
-    }
-
-    // ---- fencing ----
-
-    #[tokio::test]
-    async fn fence_reports_the_end_of_the_copy() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        assert_eq!(
-            copy.fence(NEXT_EPOCH).await,
-            Ok(FenceResponse {
-                local_end: Some(SequenceNumber::new(109)),
-                sealed_end: None,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn fenced_copy_refuses_the_old_writer() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.fence(NEXT_EPOCH).await.expect("fence");
-        let refused = copy.append(&append_request(&[(110, 1)], 0), ROOMY).await;
-        assert_eq!(
-            refused,
-            Err(ReplicaError::Fenced {
-                request_epoch: SEGMENT_EPOCH,
-                fenced_epoch: NEXT_EPOCH,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn fenced_copy_refuses_the_old_writers_heartbeat() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.fence(NEXT_EPOCH).await.expect("fence");
-        let refused = copy.append(&append_request(&[], 109), ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::Fenced { .. })));
-    }
-
-    #[tokio::test]
-    async fn fence_survives_a_crash() {
-        let disk = MemoryDisk::new();
-        copy_with_records(&disk).await.fence(NEXT_EPOCH).await.expect("fence");
-        disk.crash();
-        let refused = reload(&disk).await.append(&append_request(&[(110, 1)], 0), ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::Fenced { .. })));
-    }
-
-    #[tokio::test]
-    async fn fenced_copy_accepts_the_recovering_writer() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.fence(NEXT_EPOCH).await.expect("fence");
-        let request = AppendRequest {
-            writer_epoch: NEXT_EPOCH,
-            ..append_request(&[(110, 1)], 0)
-        };
-        assert!(copy.append(&request, ROOMY).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn fence_with_an_older_epoch_is_refused() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.fence(Epoch::new(8)).await.expect("fence");
-        assert_eq!(
-            copy.fence(Epoch::new(7)).await,
-            Err(ReplicaError::Fenced {
-                request_epoch: Epoch::new(7),
-                fenced_epoch: Epoch::new(8),
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn fence_can_be_repeated() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.fence(NEXT_EPOCH).await.expect("fence");
-        assert!(copy.fence(NEXT_EPOCH).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn fence_of_a_segment_the_replica_never_saw_reports_no_copy() {
-        let disk = MemoryDisk::new();
-        assert_eq!(
-            new_copy(&disk).fence(NEXT_EPOCH).await,
-            Ok(FenceResponse {
-                local_end: None,
-                sealed_end: None,
-            })
-        );
-    }
-
-    /// A replica that was partitioned while the segment was written must
-    /// still refuse the old writer once it has promised the new one.
-    #[tokio::test]
-    async fn fence_of_an_unseen_segment_still_blocks_the_old_writer_after_a_crash() {
-        let disk = MemoryDisk::new();
-        new_copy(&disk).fence(NEXT_EPOCH).await.expect("fence");
-        disk.crash();
-        let refused = reload(&disk).await.append(&append_request(&[(100, 5)], 0), ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::Fenced { .. })));
-    }
-
-    // ---- sealing ----
-
-    #[tokio::test]
-    async fn seal_discards_records_above_the_sealed_end() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(104)).await.expect("seal");
-        assert_eq!(
-            readable_sequences(&mut copy, ReadLimit::DurableSequence).await,
-            (100..=104).collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn seal_makes_the_whole_segment_readable() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(109)).await.expect("seal");
-        assert_eq!(
-            readable_sequences(&mut copy, ReadLimit::DurableSequence).await,
-            (100..=109).collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn sealed_copy_refuses_appends() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(109)).await.expect("seal");
-        let refused = copy.append(&append_request(&[(110, 1)], 0), ROOMY).await;
-        assert_eq!(
-            refused,
-            Err(ReplicaError::Sealed {
-                sealed_end: SequenceNumber::new(109)
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn seal_survives_a_crash() {
-        let disk = MemoryDisk::new();
-        copy_with_records(&disk)
-            .await
-            .seal(SequenceNumber::new(104))
-            .await
-            .expect("seal");
-        disk.crash();
-        let status = reload(&disk).await.status();
-        assert_eq!(
-            (status.sealed_end, status.local_end),
-            (Some(SequenceNumber::new(104)), Some(SequenceNumber::new(104)))
-        );
-    }
-
-    #[tokio::test]
-    async fn seal_can_be_repeated() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(104)).await.expect("seal");
-        assert_eq!(
-            copy.seal(SequenceNumber::new(104)).await,
-            Ok(SealResponse {
-                local_end: Some(SequenceNumber::new(104))
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn seal_at_a_different_end_is_a_conflict() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(104)).await.expect("seal");
-        assert_eq!(
-            copy.seal(SequenceNumber::new(109)).await,
-            Err(ReplicaError::ConflictingSeal {
-                existing_sealed_end: SequenceNumber::new(104),
-                requested_sealed_end: SequenceNumber::new(109),
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn seal_inside_a_batch_is_refused_and_changes_nothing() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        let refused = copy.seal(SequenceNumber::new(106)).await;
-        assert!(matches!(refused, Err(ReplicaError::InvalidRequest { .. })) && copy.status().sealed_end.is_none());
-    }
-
-    #[tokio::test]
-    async fn seal_beyond_a_short_copy_reports_how_short_it_is() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        assert_eq!(
-            copy.seal(SequenceNumber::new(120)).await,
-            Ok(SealResponse {
-                local_end: Some(SequenceNumber::new(109))
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn seal_of_a_segment_the_replica_never_saw_blocks_later_appends() {
-        let disk = MemoryDisk::new();
-        let mut copy = new_copy(&disk);
-        copy.seal(SequenceNumber::new(104)).await.expect("seal");
-        let refused = copy.append(&append_request(&[(100, 5)], 0), ROOMY).await;
-        assert!(matches!(refused, Err(ReplicaError::Sealed { .. })));
-    }
-
-    #[tokio::test]
-    async fn seal_releases_the_preallocated_space() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(109)).await.expect("seal");
-        let file_bytes = disk
-            .durable_content(&segment_file_path(SEGMENT))
-            .expect("file exists")
-            .len();
-        assert_eq!(u64::try_from(file_bytes).expect("small"), copy.status().size_bytes);
-    }
-
-    // ---- reads ----
-
-    #[tokio::test]
-    async fn readers_see_only_what_the_writer_declared_durable() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        assert_eq!(
-            readable_sequences(&mut copy, ReadLimit::DurableSequence).await,
-            (100..=104).collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn heartbeat_advances_what_readers_see() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 109), ROOMY).await.expect("heartbeat");
-        assert_eq!(copy.readable_end(), Some(SequenceNumber::new(109)));
-    }
-
-    #[tokio::test]
-    async fn durable_sequence_never_moves_backwards() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 100), ROOMY).await.expect("heartbeat");
-        assert_eq!(copy.readable_end(), Some(SequenceNumber::new(104)));
-    }
-
-    #[tokio::test]
-    async fn durable_sequence_beyond_the_copy_is_capped_at_its_end() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 500), ROOMY).await.expect("heartbeat");
-        assert_eq!(copy.readable_end(), Some(SequenceNumber::new(109)));
-    }
-
-    #[tokio::test]
-    async fn restarted_copy_serves_nothing_until_it_hears_from_the_writer() {
-        let disk = MemoryDisk::new();
-        copy_with_records(&disk).await;
-        disk.crash();
-        let mut reloaded = reload(&disk).await;
-        assert_eq!(
-            readable_sequences(&mut reloaded, ReadLimit::DurableSequence).await,
-            Vec::<u64>::new()
-        );
-    }
-
-    #[tokio::test]
-    async fn recovering_writer_reads_past_the_durable_sequence() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.fence(NEXT_EPOCH).await.expect("fence");
-        let recovery_read = ReadLimit::LocalEnd {
-            recovery_epoch: NEXT_EPOCH,
-        };
-        assert_eq!(
-            readable_sequences(&mut copy, recovery_read).await,
-            (100..=109).collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn uncommitted_tail_is_hidden_from_anyone_who_did_not_fence() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.fence(NEXT_EPOCH).await.expect("fence");
-        let stale_recovery_read = read_request(
-            FIRST_SEQUENCE,
-            ReadLimit::LocalEnd {
-                recovery_epoch: SEGMENT_EPOCH,
-            },
-        );
-        assert!(matches!(
-            copy.read(&stale_recovery_read).await,
-            Err(ReplicaError::Fenced { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn uncommitted_tail_is_hidden_until_the_copy_is_fenced() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        let premature_recovery_read = read_request(
-            FIRST_SEQUENCE,
-            ReadLimit::LocalEnd {
-                recovery_epoch: NEXT_EPOCH,
-            },
-        );
-        assert!(matches!(
-            copy.read(&premature_recovery_read).await,
-            Err(ReplicaError::InvalidRequest { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn read_reports_the_sealed_end() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(109)).await.expect("seal");
-        let response = copy
-            .read(&read_request(110, ReadLimit::DurableSequence))
-            .await
-            .expect("read");
-        assert_eq!(
-            (response.batch_frames.len(), response.sealed_end),
-            (0, Some(SequenceNumber::new(109)))
-        );
-    }
-
-    #[tokio::test]
-    async fn read_of_a_segment_without_data_finds_nothing() {
-        let disk = MemoryDisk::new();
-        let mut copy = new_copy(&disk);
-        copy.fence(NEXT_EPOCH).await.expect("fence");
-        assert_eq!(
-            copy.read(&read_request(100, ReadLimit::DurableSequence)).await,
-            Err(ReplicaError::SegmentNotFound { segment: SEGMENT })
-        );
-    }
-
-    // ---- damage ----
-
-    #[tokio::test]
-    async fn scrub_marks_a_corrupted_copy_as_damaged() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        disk.corrupt_byte(
-            &segment_file_path(SEGMENT),
-            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
-            0x10,
-        );
-        copy.verify().await;
-        assert!(copy.status().is_damaged);
-    }
-
-    #[tokio::test]
-    async fn scrub_leaves_an_intact_copy_alone() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.verify().await;
-        assert!(!copy.status().is_damaged);
-    }
-
-    #[tokio::test]
-    async fn damaged_copy_refuses_every_request() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        disk.corrupt_byte(
-            &segment_file_path(SEGMENT),
-            bitacora_segment::format::SEGMENT_HEADER_BYTES + 30,
-            0x10,
-        );
-        copy.verify().await;
-        let append = copy.append(&append_request(&[(110, 1)], 0), ROOMY).await;
-        let fence = copy.fence(NEXT_EPOCH).await;
-        let seal = copy.seal(SequenceNumber::new(109)).await;
-        assert!(
-            matches!(append, Err(ReplicaError::Storage { .. }))
-                && matches!(fence, Err(ReplicaError::Storage { .. }))
-                && matches!(seal, Err(ReplicaError::Storage { .. }))
-        );
-    }
-
-    #[tokio::test]
-    async fn copy_with_an_unreadable_header_loads_as_damaged() {
-        let disk = MemoryDisk::new();
-        copy_with_records(&disk).await;
-        disk.corrupt_byte(&segment_file_path(SEGMENT), 20, 0x01);
-        assert!(reload(&disk).await.status().is_damaged);
-    }
-
-    #[tokio::test]
-    async fn copy_with_an_unreadable_state_loads_as_damaged() {
-        let disk = MemoryDisk::new();
-        copy_with_records(&disk).await.fence(NEXT_EPOCH).await.expect("fence");
-        disk.corrupt_byte(&segment_state_path(SEGMENT), 15, 0x01);
-        assert!(reload(&disk).await.status().is_damaged);
-    }
-
-    /// Damage to records a replica flushed and acknowledged must not come
-    /// back as a healthy, shorter copy: a recovering writer would count on
-    /// it to hold everything committed.
-    #[tokio::test]
-    async fn copy_whose_flushed_records_were_damaged_loads_as_damaged() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 109), ROOMY).await.expect("heartbeat");
-        let inside_the_first_batch = bitacora_segment::format::SEGMENT_HEADER_BYTES + 30;
-        disk.corrupt_byte(&segment_file_path(SEGMENT), inside_the_first_batch, 0x01);
-        disk.crash();
-        let mut reloaded = reload(&disk).await;
-        assert!(
-            reloaded.status().is_damaged
-                && matches!(reloaded.fence(NEXT_EPOCH).await, Err(ReplicaError::Storage { .. }))
-        );
-    }
-
-    #[tokio::test]
-    async fn heartbeat_to_a_copy_whose_mark_is_current_flushes_nothing() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.append(&append_request(&[], 109), ROOMY).await.expect("heartbeat");
-        disk.fail_flushes(true);
-        let second_heartbeat = copy.append(&append_request(&[], 109), ROOMY).await;
-        assert!(second_heartbeat.is_ok());
-    }
-
-    // ---- deletion ----
-
-    #[tokio::test]
-    async fn deleted_copy_leaves_nothing_on_disk() {
-        let disk = MemoryDisk::new();
-        let mut copy = copy_with_records(&disk).await;
-        copy.seal(SequenceNumber::new(109)).await.expect("seal");
-        copy.delete().await.expect("delete");
-        assert_eq!(disk.list_files().await.expect("list"), Vec::<String>::new());
-    }
-}
+#[path = "copy_test.rs"]
+mod tests;
