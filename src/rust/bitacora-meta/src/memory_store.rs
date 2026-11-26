@@ -1,5 +1,36 @@
-//! An in-memory [`KeyValueStore`], for tests, simulation and single-process
-//! deployments that need no durability.
+//! A [`KeyValueStore`] that keeps everything in memory.
+//!
+//! # Why this file exists
+//!
+//! Almost every test in the workspace needs a metadata store: the unit tests of this crate, the tests of the client and
+//! the controller, and above all the deterministic simulator, which must be able to run thousands of clusters in one
+//! process and take the store away from them at will. A real etcd is too slow for that and cannot be made to fail on
+//! demand. This is the backend they all use.
+//!
+//! # What it contains
+//!
+//! - [`MemoryKeyValueStore`]: the store, with [`MemoryKeyValueStore::set_unavailable`] to simulate an outage.
+//!
+//! # How it works
+//!
+//! The keys live in one sorted map behind one lock. Every write of a transaction gets the same revision, taken from a
+//! counter that is shared by all keys and only grows. Sharing the counter is what keeps a key that was deleted and
+//! created again from ever repeating a revision.
+//!
+//! No operation waits while it holds the lock, so the store is linearizable by construction: operations happen one at a
+//! time, in the order they take the lock.
+//!
+//! # Invariants
+//!
+//! - It honours [`KeyValueStore`] exactly; the etcd backend is tested with the same cases, and a difference between the
+//!   two is a bug in one of them.
+//! - While it is unavailable, every operation fails and nothing changes.
+//! - Clones share the same data, like two clients of one cluster.
+//!
+//! # See also
+//!
+//! - `key_value.rs`: the interface this implements.
+//! - `bitacora-meta-etcd/tests/etcd/key_value_contract.rs`: the same cases against a real etcd.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -10,88 +41,170 @@ use crate::key_value::{
     Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome, VersionedValue,
 };
 
+/// The reason every operation gives while a test has switched the store off.
+const INJECTED_OUTAGE_REASON: &str = "injected outage";
+
+/// What the store holds, behind its lock.
 #[derive(Debug, Default)]
 struct MemoryStoreState {
+    /// The stored values with their revisions. Sorted by key, which is the order a listing must have.
     entries_by_key: BTreeMap<String, VersionedValue>,
-    /// The revision given to the most recent write. Shared by all keys, so a
-    /// key that is deleted and created again never repeats a revision.
+    /// The revision given to the most recent transaction. Shared by all keys, so a key that is deleted and created
+    /// again never repeats a revision.
     last_revision: u64,
+    /// While set, every operation of the interface fails with [`StoreUnavailable`].
     is_unavailable: bool,
 }
 
-/// An in-memory metadata store. Clones share the same data, like two
-/// clients of one cluster.
+/// A metadata store backend that keeps everything in memory.
+///
+/// Use it wherever a test or a simulation needs a metadata store. Nothing is durable: the data is gone when the last
+/// clone is dropped. Clones share the same data, like two clients of one cluster.
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), bitacora_meta::MetaError> {
+/// use std::sync::Arc;
+///
+/// use bitacora_meta::{MemoryKeyValueStore, MetadataStore};
+///
+/// let key_value_store = MemoryKeyValueStore::new();
+/// let metadata = MetadataStore::new(Arc::new(key_value_store.clone()));
+///
+/// key_value_store.set_unavailable(true);
+/// let during_the_outage = metadata.list_streams().await;
+/// key_value_store.set_unavailable(false);
+/// let after_the_outage = metadata.list_streams().await?;
+///
+/// assert!(during_the_outage.is_err());
+/// assert!(after_the_outage.is_empty());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct MemoryKeyValueStore {
+    /// The data, shared by every clone of the store.
     state: Arc<Mutex<MemoryStoreState>>,
 }
 
 impl MemoryKeyValueStore {
-    /// Creates an empty store.
+    /// Creates a store that holds no keys and is available.
+    ///
+    /// # Returns
+    ///
+    /// The empty store.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), bitacora_meta::StoreUnavailable> {
+    /// use bitacora_meta::{KeyValueStore, MemoryKeyValueStore};
+    ///
+    /// let key_value_store = MemoryKeyValueStore::new();
+    ///
+    /// assert!(key_value_store.list("").await?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Simulates an outage: while unavailable, every operation fails and
-    /// nothing changes.
+    /// Simulates an outage, or ends one.
+    ///
+    /// While the store is unavailable, every operation of [`KeyValueStore`] fails with [`StoreUnavailable`] and changes
+    /// nothing. The switch affects every clone.
+    ///
+    /// # Arguments
+    ///
+    /// * `is_unavailable` - `true` starts the outage, `false` ends it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// use bitacora_meta::{KeyValueStore, MemoryKeyValueStore};
+    ///
+    /// let key_value_store = MemoryKeyValueStore::new();
+    ///
+    /// key_value_store.set_unavailable(true);
+    ///
+    /// assert!(key_value_store.get("streams/orders").await.is_err());
+    /// # }
+    /// ```
     pub fn set_unavailable(&self, is_unavailable: bool) {
-        self.lock().is_unavailable = is_unavailable;
+        self.lock_state().is_unavailable = is_unavailable;
     }
 
-    fn lock(&self) -> MutexGuard<'_, MemoryStoreState> {
-        // Every critical section finishes its change before anything that
-        // can panic, so a poisoned lock still guards consistent data.
+    /// Locks the store's state, whether or not another holder of the lock panicked.
+    ///
+    /// Every critical section finishes its change before anything that can panic, so a poisoned lock still guards
+    /// consistent data.
+    fn lock_state(&self) -> MutexGuard<'_, MemoryStoreState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn available_state(&self) -> Result<MutexGuard<'_, MemoryStoreState>, StoreUnavailable> {
-        let state = self.lock();
+    /// Locks the store's state for one operation of the interface, unless a test has switched the store off.
+    fn lock_available_state(&self) -> Result<MutexGuard<'_, MemoryStoreState>, StoreUnavailable> {
+        let state = self.lock_state();
         if state.is_unavailable {
             return Err(StoreUnavailable {
-                reason: "injected outage".to_owned(),
+                reason: INJECTED_OUTAGE_REASON.to_owned(),
             });
         }
         Ok(state)
     }
 }
 
+/// Says whether `condition` holds for the stored entries.
 fn holds(condition: &Condition, entries_by_key: &BTreeMap<String, VersionedValue>) -> bool {
     match condition {
         Condition::IsAbsent { key } => !entries_by_key.contains_key(key),
-        Condition::HasRevision { key, revision } => entries_by_key
-            .get(key)
-            .is_some_and(|stored| stored.revision == *revision),
+        Condition::HasRevision { key, revision } => match entries_by_key.get(key) {
+            Some(stored) => stored.revision == *revision,
+            None => false,
+        },
     }
 }
 
 #[async_trait]
 impl KeyValueStore for MemoryKeyValueStore {
+    /// Looks the key up in the map.
     async fn get(&self, key: &str) -> Result<Option<VersionedValue>, StoreUnavailable> {
-        Ok(self.available_state()?.entries_by_key.get(key).cloned())
+        let state = self.lock_available_state()?;
+        Ok(state.entries_by_key.get(key).cloned())
     }
 
+    /// Walks the sorted map from the prefix on, until a key no longer starts with it.
     async fn list(&self, key_prefix: &str) -> Result<Vec<(String, VersionedValue)>, StoreUnavailable> {
-        Ok(self
-            .available_state()?
-            .entries_by_key
-            .range(key_prefix.to_owned()..)
-            .take_while(|(key, _stored)| key.starts_with(key_prefix))
-            .map(|(key, stored)| (key.clone(), stored.clone()))
-            .collect())
+        let state = self.lock_available_state()?;
+        let mut listed = Vec::new();
+        for (key, stored) in state.entries_by_key.range(key_prefix.to_owned()..) {
+            if !key.starts_with(key_prefix) {
+                break;
+            }
+            listed.push((key.clone(), stored.clone()));
+        }
+        Ok(listed)
     }
 
+    /// Checks every condition and applies every mutation while holding the lock, so nothing can happen in between. All
+    /// keys written get one new revision.
     async fn transact(
         &self,
         conditions: Vec<Condition>,
         mutations: Vec<Mutation>,
     ) -> Result<TransactionOutcome, StoreUnavailable> {
-        let mut state = self.available_state()?;
-        if !conditions
-            .iter()
-            .all(|condition| holds(condition, &state.entries_by_key))
-        {
-            return Ok(TransactionOutcome::ConditionFailed);
+        let mut state = self.lock_available_state()?;
+        for condition in &conditions {
+            if !holds(condition, &state.entries_by_key) {
+                return Ok(TransactionOutcome::ConditionFailed);
+            }
         }
         state.last_revision += 1;
         let revision = Revision::new(state.last_revision);
@@ -110,223 +223,5 @@ impl KeyValueStore for MemoryKeyValueStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-
-    use super::*;
-
-    /// Unconditionally writes one key.
-    async fn put(
-        store: &MemoryKeyValueStore,
-        key: &str,
-        value: &'static [u8],
-    ) -> Result<TransactionOutcome, StoreUnavailable> {
-        store.transact(Vec::new(), vec![put_mutation(key, value)]).await
-    }
-
-    async fn revision_of(store: &MemoryKeyValueStore, key: &str) -> Revision {
-        store
-            .get(key)
-            .await
-            .expect("store is available")
-            .expect("key exists")
-            .revision
-    }
-
-    fn put_mutation(key: &str, value: &'static [u8]) -> Mutation {
-        Mutation::Put {
-            key: key.to_owned(),
-            value: Bytes::from_static(value),
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_key_reads_as_absent() {
-        let store = MemoryKeyValueStore::new();
-        assert_eq!(store.get("streams/orders").await, Ok(None));
-    }
-
-    #[tokio::test]
-    async fn written_value_is_read_back() {
-        let store = MemoryKeyValueStore::new();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        let stored = store.get("streams/orders").await.expect("get");
-        assert_eq!(stored.map(|stored| stored.value), Some(Bytes::from_static(b"v1")));
-    }
-
-    #[tokio::test]
-    async fn every_write_changes_the_revision() {
-        let store = MemoryKeyValueStore::new();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        let first_revision = revision_of(&store, "streams/orders").await;
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        assert!(revision_of(&store, "streams/orders").await > first_revision);
-    }
-
-    #[tokio::test]
-    async fn recreated_key_never_repeats_a_revision() {
-        let store = MemoryKeyValueStore::new();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        let first_revision = revision_of(&store, "streams/orders").await;
-        store
-            .transact(
-                Vec::new(),
-                vec![Mutation::Delete {
-                    key: "streams/orders".to_owned(),
-                }],
-            )
-            .await
-            .expect("delete");
-        put(&store, "streams/orders", b"v2").await.expect("put");
-        assert!(revision_of(&store, "streams/orders").await > first_revision);
-    }
-
-    #[tokio::test]
-    async fn transaction_applies_when_the_key_is_unchanged() {
-        let store = MemoryKeyValueStore::new();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        let read_revision = revision_of(&store, "streams/orders").await;
-        let outcome = store
-            .transact(
-                vec![Condition::HasRevision {
-                    key: "streams/orders".to_owned(),
-                    revision: read_revision,
-                }],
-                vec![put_mutation("streams/orders", b"v2")],
-            )
-            .await;
-        assert_eq!(outcome, Ok(TransactionOutcome::Applied));
-    }
-
-    #[tokio::test]
-    async fn transaction_fails_when_someone_wrote_in_between() {
-        let store = MemoryKeyValueStore::new();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        let read_revision = revision_of(&store, "streams/orders").await;
-        put(&store, "streams/orders", b"other").await.expect("put");
-        let outcome = store
-            .transact(
-                vec![Condition::HasRevision {
-                    key: "streams/orders".to_owned(),
-                    revision: read_revision,
-                }],
-                vec![put_mutation("streams/orders", b"v2")],
-            )
-            .await;
-        assert_eq!(outcome, Ok(TransactionOutcome::ConditionFailed));
-    }
-
-    #[tokio::test]
-    async fn failed_transaction_changes_nothing() {
-        let store = MemoryKeyValueStore::new();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        store
-            .transact(
-                vec![Condition::IsAbsent {
-                    key: "streams/orders".to_owned(),
-                }],
-                vec![
-                    put_mutation("streams/orders", b"v2"),
-                    put_mutation("streams/other", b"v2"),
-                ],
-            )
-            .await
-            .expect("transact");
-        assert_eq!(
-            store.list("streams/").await.expect("list").len(),
-            1,
-            "the failed transaction must not create streams/other"
-        );
-    }
-
-    #[tokio::test]
-    async fn absence_condition_holds_for_a_missing_key() {
-        let store = MemoryKeyValueStore::new();
-        let outcome = store
-            .transact(
-                vec![Condition::IsAbsent {
-                    key: "streams/orders".to_owned(),
-                }],
-                vec![put_mutation("streams/orders", b"v1")],
-            )
-            .await;
-        assert_eq!(outcome, Ok(TransactionOutcome::Applied));
-    }
-
-    #[tokio::test]
-    async fn revision_condition_fails_for_a_missing_key() {
-        let store = MemoryKeyValueStore::new();
-        let outcome = store
-            .transact(
-                vec![Condition::HasRevision {
-                    key: "streams/orders".to_owned(),
-                    revision: Revision::new(1),
-                }],
-                vec![put_mutation("streams/orders", b"v1")],
-            )
-            .await;
-        assert_eq!(outcome, Ok(TransactionOutcome::ConditionFailed));
-    }
-
-    #[tokio::test]
-    async fn transaction_writes_all_its_keys_at_one_revision() {
-        let store = MemoryKeyValueStore::new();
-        store
-            .transact(Vec::new(), vec![put_mutation("a", b"1"), put_mutation("b", b"2")])
-            .await
-            .expect("transact");
-        assert_eq!(revision_of(&store, "a").await, revision_of(&store, "b").await);
-    }
-
-    #[tokio::test]
-    async fn list_returns_only_the_prefix_sorted_by_key() {
-        let store = MemoryKeyValueStore::new();
-        for key in ["streams/b", "replicas/x", "streams/a", "streamsX"] {
-            put(&store, key, b"v").await.expect("put");
-        }
-        let listed_keys: Vec<String> = store
-            .list("streams/")
-            .await
-            .expect("list")
-            .into_iter()
-            .map(|(key, _stored)| key)
-            .collect();
-        assert_eq!(listed_keys, ["streams/a", "streams/b"]);
-    }
-
-    #[tokio::test]
-    async fn deleting_a_missing_key_is_not_an_error() {
-        let store = MemoryKeyValueStore::new();
-        let outcome = store
-            .transact(
-                Vec::new(),
-                vec![Mutation::Delete {
-                    key: "streams/orders".to_owned(),
-                }],
-            )
-            .await;
-        assert_eq!(outcome, Ok(TransactionOutcome::Applied));
-    }
-
-    #[tokio::test]
-    async fn unavailable_store_fails_reads_and_writes_without_changing() {
-        let store = MemoryKeyValueStore::new();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        store.set_unavailable(true);
-        let read = store.get("streams/orders").await;
-        let write = put(&store, "streams/orders", b"v2").await;
-        store.set_unavailable(false);
-        let stored = store.get("streams/orders").await.expect("get");
-        assert!(
-            read.is_err() && write.is_err() && stored.map(|stored| stored.value) == Some(Bytes::from_static(b"v1"))
-        );
-    }
-
-    #[tokio::test]
-    async fn clones_share_the_same_data() {
-        let store = MemoryKeyValueStore::new();
-        let other_client = store.clone();
-        put(&store, "streams/orders", b"v1").await.expect("put");
-        assert!(other_client.get("streams/orders").await.expect("get").is_some());
-    }
-}
+#[path = "memory_store_test.rs"]
+mod tests;

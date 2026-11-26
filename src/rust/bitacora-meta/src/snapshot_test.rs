@@ -9,8 +9,8 @@
 //!
 //! # How the fixtures work
 //!
-//! `orders_snapshot` is a snapshot of two keys, one holding JSON and one holding bytes that are not
-//! UTF-8, taken at a fixed moment.
+//! `orders_snapshot` is a snapshot of two keys, one holding JSON and one holding bytes that are not UTF-8, taken at a
+//! fixed moment.
 
 use bitacora_types::DeterministicRandom;
 

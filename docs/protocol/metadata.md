@@ -19,11 +19,17 @@ A key-value store with:
 Version 1 uses etcd. Keys below are relative to the cluster's prefix, by
 default `/bitacora/`.
 
-**Every change to a record is a transaction conditional on the revision at
-which the record was read.** A program reads a record, computes the new one,
-and writes it only if nobody wrote in between; otherwise it reads again.
-There are no blind writes. This is what makes every rule in
+**Every change to a record that a decision was read from is a transaction
+conditional on the revision at which the record was read.** A program reads
+a record, computes the new one, and writes it only if nobody wrote in
+between; otherwise it reads again. This is what makes every rule in
 [replication.md](replication.md) that says "one conditional write" hold.
+
+Three writes carry no condition, because nothing is decided from what they
+replace: a replica writing its own record, the removal of a replica's
+record, and the removal of a deleted-stream record. Restoring a snapshot
+over a store that holds keys is the fourth. It is an operator's procedure,
+run while nothing else uses the store.
 
 ## Keys
 
@@ -33,7 +39,7 @@ There are no blind writes. This is what makes every rule in
 | `checkpoints/<stream id>/<materializer>` | Checkpoint record | Materializers |
 | `replicas/<replica id>` | Replica record | Replicas |
 | `controller/leader` | Leader record | Controllers |
-| `counters/stream-id` | Last stream identifier handed out, as a JSON number | Stream creation |
+| `counters/stream-id` | Last stream identifier handed out, as a JSON number | Stream creation, and the adoption of a rebuilt stream with a higher identifier |
 | `deleted-streams/<stream id>` | Deleted-stream record | Stream deletion, controller |
 
 Values are JSON objects in UTF-8. Identifiers, sequence numbers and epochs

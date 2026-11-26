@@ -1,10 +1,45 @@
-//! Choosing the replica set of a segment (design, sections 8 and 14).
+//! Choosing the replicas that hold a segment.
 //!
-//! Placement is a pure function of the replica registry, so that the
-//! controller, which keeps a standby segment ready for every stream, and the
-//! admin client, which places the first segment of a new stream, decide the
-//! same way.
+//! # Why this file exists
+//!
+//! Every segment lives on a fixed set of replicas, and that set decides what a failure can cost: three copies on one
+//! host are one copy (design, sections 8 and 14). Three parties choose replica sets: the controller, which keeps a
+//! standby set ready for every stream; the administration client, which places the first segment of a new stream; and
+//! repair, which replaces a lost copy. They must all decide the same way, or the spread of a segment would depend on
+//! who happened to place it. So the decision is one pure function of the replica registry, and it lives here.
+//!
+//! # What it contains
+//!
+//! - [`choose_replica_set`]: the replicas for a new segment.
+//! - [`choose_additional_replica`]: one more replica for a segment that keeps some of its copies.
+//! - [`PlacementPolicy`]: which replicas may receive new segments at all.
+//! - [`PlacementError`]: why no choice could be made.
+//!
+//! # How it works
+//!
+//! A replica is eligible if it renewed its registration recently, is not being drained, has room, and is not excluded
+//! by the caller. Copies are then placed one at a time. Each time, the eligible replica that shares the fewest failure
+//! domains with the copies already placed wins, comparing the widest domain first: a replica in an unused zone beats
+//! one in an unused rack of a used zone. Among equally spread replicas the one with the most free space wins, then the
+//! lowest identifier, so that the same registry always gives the same answer.
+//!
+//! A replica's failure domains are its labels from widest to narrowest, for example zone, rack, host. The whole list
+//! names its narrowest domain. Spreading over the wider levels is best effort; not sharing the narrowest is a rule: a
+//! set in which two copies have the same full list of labels is refused. A replica without labels counts as a domain of
+//! its own, which is what a test cluster wants and what a deployment must not rely on.
+//!
+//! # Invariants
+//!
+//! - Pure: no I/O, no clock (the caller passes the time), no randomness.
+//! - Two copies of one segment never share their narrowest failure domain.
+//! - The same registry, time, policy and exclusions always give the same replicas, in the same order.
+//!
+//! # See also
+//!
+//! - `records.rs`: [`ReplicaRecord`], what a replica registers about itself.
+//! - `bitacora-controller/src/controller.rs`: the standby and repair passes that call this.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -13,58 +48,149 @@ use thiserror::Error;
 
 use crate::records::ReplicaRecord;
 
+/// How old a replica's last heartbeat may be, by default, before placement presumes it dead. Long enough for a replica
+/// to miss a renewal or two without losing its place.
+const DEFAULT_LIVENESS_WINDOW: Duration = Duration::from_secs(15);
+
+/// How full a replica's disk may be, by default, before it receives no new segments, in percent. The same threshold at
+/// which a replica itself starts refusing new segments (design, section 7).
+const DEFAULT_REFUSE_AT_USED_PERCENT: u8 = 85;
+
 /// Which replicas may receive new segments.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use bitacora_meta::PlacementPolicy;
+///
+/// let patient_policy = PlacementPolicy {
+///     liveness_window: Duration::from_secs(60),
+///     ..PlacementPolicy::default()
+/// };
+///
+/// assert_eq!(patient_policy.refuse_at_used_percent, 85);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlacementPolicy {
     /// A replica whose last heartbeat is older than this is presumed dead.
     pub liveness_window: Duration,
-    /// A replica whose disk is at least this full receives no new segments.
+    /// A replica whose disk is at least this full, in percent, receives no new segments.
     pub refuse_at_used_percent: u8,
 }
 
 impl Default for PlacementPolicy {
+    /// The policy of the design: dead after fifteen seconds of silence, full at 85 percent.
     fn default() -> Self {
         Self {
-            liveness_window: Duration::from_secs(15),
-            refuse_at_used_percent: 85,
+            liveness_window: DEFAULT_LIVENESS_WINDOW,
+            refuse_at_used_percent: DEFAULT_REFUSE_AT_USED_PERCENT,
         }
     }
 }
 
 /// Why no replica set could be chosen.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::BTreeSet;
+///
+/// use bitacora_meta::{PlacementError, PlacementPolicy, choose_replica_set};
+/// use bitacora_types::Timestamp;
+///
+/// let empty_registry = [];
+/// let now = Timestamp::from_unix_millis(100_000);
+///
+/// let chosen = choose_replica_set(&empty_registry, 3, now, PlacementPolicy::default(), &BTreeSet::new());
+///
+/// assert_eq!(
+///     chosen,
+///     Err(PlacementError::NotEnoughReplicas {
+///         needed: 3,
+///         eligible: 0
+///     })
+/// );
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum PlacementError {
     /// Fewer replicas are alive, undrained and roomy than a segment needs.
     #[error("a segment needs {needed} replicas, only {eligible} are eligible")]
     NotEnoughReplicas {
-        /// How many replicas a segment needs.
+        /// How many replicas were asked for.
         needed: usize,
         /// How many replicas may receive new segments right now.
         eligible: usize,
     },
-    /// Enough replicas are eligible, but only by putting two copies of the
-    /// segment in the same narrowest failure domain, such as one host.
+    /// Enough replicas are eligible, but only by putting two copies of the segment in the same narrowest failure
+    /// domain, such as one host.
     #[error("a segment needs {needed} separate failure domains, only {available} are available")]
     NotEnoughFailureDomains {
-        /// How many separate domains a segment needs.
+        /// How many separate domains the segment needs: one per copy, kept copies included.
         needed: usize,
-        /// How many separate domains the eligible replicas span.
+        /// How many separate domains the chosen and kept replicas span.
         available: usize,
     },
 }
 
-/// Chooses `replica_count` replicas for a new segment.
+/// Chooses the replicas for a new segment.
 ///
-/// Copies are spread as widely as the registry allows: across zones first,
-/// then racks, then hosts, following each replica's `failure_domains` from
-/// widest to narrowest. Two copies never share the narrowest domain. Among
-/// equally spread candidates the one with the most free space wins, then the
-/// lowest identifier, so the result is deterministic.
+/// Copies are spread as widely as the registry allows: across zones first, then racks, then hosts, following each
+/// replica's `failure_domains` from widest to narrowest. Two copies never share the narrowest domain. Among equally
+/// spread candidates the one with the most free space wins, then the lowest identifier, so the result is deterministic.
+///
+/// # Arguments
+///
+/// * `replicas` - The replica registry, as read from the metadata store.
+/// * `replica_count` - How many copies the segment has.
+/// * `now` - The current time, to judge which replicas are alive.
+/// * `policy` - Which replicas may receive new segments.
+/// * `excluded` - Replicas that must not be chosen whatever their state, for example the ones a writer is rolling away
+///   from.
+///
+/// # Returns
+///
+/// The chosen replicas, in the order they were chosen.
 ///
 /// # Errors
 ///
-/// Returns [`PlacementError`] if too few replicas are alive, undrained,
-/// roomy and not in `excluded`, or if they do not span enough domains.
+/// * [`PlacementError::NotEnoughReplicas`] if fewer than `replica_count` replicas are alive, undrained, roomy and not
+///   excluded.
+/// * [`PlacementError::NotEnoughFailureDomains`] if they are enough but two of the chosen ones would share their
+///   narrowest failure domain.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::BTreeSet;
+///
+/// use bitacora_meta::{PlacementPolicy, RECORD_SCHEMA_VERSION, ReplicaRecord, choose_replica_set};
+/// use bitacora_types::{ReplicaId, Timestamp};
+///
+/// let now = Timestamp::from_unix_millis(100_000);
+/// let replica_on = |name: &str, zone: &str| ReplicaRecord {
+///     schema_version: RECORD_SCHEMA_VERSION,
+///     replica_id: ReplicaId::new(name).expect("a valid identifier"),
+///     address: format!("{name}:7000"),
+///     failure_domains: vec![zone.to_owned(), format!("host-{name}")],
+///     capacity_bytes: 1_000,
+///     free_bytes: 900,
+///     is_draining: false,
+///     heartbeat_at: now,
+/// };
+/// let registry = [
+///     replica_on("a1", "zone-a"),
+///     replica_on("a2", "zone-a"),
+///     replica_on("b1", "zone-b"),
+/// ];
+///
+/// let chosen = choose_replica_set(&registry, 2, now, PlacementPolicy::default(), &BTreeSet::new())?;
+///
+/// let chosen_names: Vec<String> = chosen.iter().map(ToString::to_string).collect();
+/// assert_eq!(chosen_names, ["a1", "b1"]);
+/// # Ok::<(), bitacora_meta::PlacementError>(())
+/// ```
 pub fn choose_replica_set(
     replicas: &[ReplicaRecord],
     replica_count: usize,
@@ -75,16 +201,61 @@ pub fn choose_replica_set(
     place(replicas, &[], replica_count, now, policy, excluded)
 }
 
-/// Chooses one more replica for a segment that keeps its copies on
-/// `kept_replicas`, as when repair replaces a lost copy.
+/// Chooses one more replica for a segment that keeps its copies on `kept_replicas`, as when repair replaces a lost
+/// copy.
 ///
-/// The new replica is the one that spreads the segment widest together
-/// with the copies it keeps, and never shares their narrowest domain.
+/// The new replica is the one that spreads the segment widest together with the copies it keeps, and never shares their
+/// narrowest failure domain. A kept replica that is no longer in the registry cannot be taken into account and is
+/// ignored.
+///
+/// # Arguments
+///
+/// * `replicas` - The replica registry, as read from the metadata store.
+/// * `kept_replicas` - The replicas that keep their copy of the segment. None of them is chosen.
+/// * `now` - The current time, to judge which replicas are alive.
+/// * `policy` - Which replicas may receive new segments.
+///
+/// # Returns
+///
+/// The replica that should hold the new copy.
 ///
 /// # Errors
 ///
-/// Returns [`PlacementError`] if no replica outside `kept_replicas` is
-/// alive, undrained and roomy, or none is in a domain of its own.
+/// * [`PlacementError::NotEnoughReplicas`] if no replica outside `kept_replicas` is alive, undrained and roomy.
+/// * [`PlacementError::NotEnoughFailureDomains`] if the best one shares its narrowest failure domain with a kept copy.
+///
+/// # Panics
+///
+/// Never in practice: placing one copy successfully yields one replica.
+///
+/// # Examples
+///
+/// ```
+/// use bitacora_meta::{PlacementPolicy, RECORD_SCHEMA_VERSION, ReplicaRecord, choose_additional_replica};
+/// use bitacora_types::{ReplicaId, Timestamp};
+///
+/// let now = Timestamp::from_unix_millis(100_000);
+/// let replica_named = |name: &str| ReplicaRecord {
+///     schema_version: RECORD_SCHEMA_VERSION,
+///     replica_id: ReplicaId::new(name).expect("a valid identifier"),
+///     address: format!("{name}:7000"),
+///     failure_domains: vec![format!("host-{name}")],
+///     capacity_bytes: 1_000,
+///     free_bytes: 900,
+///     is_draining: false,
+///     heartbeat_at: now,
+/// };
+/// let registry = [replica_named("r1"), replica_named("r2"), replica_named("r3")];
+/// let kept_replicas = [
+///     ReplicaId::new("r1").expect("a valid identifier"),
+///     ReplicaId::new("r2").expect("a valid identifier"),
+/// ];
+///
+/// let replacement = choose_additional_replica(&registry, &kept_replicas, now, PlacementPolicy::default())?;
+///
+/// assert_eq!(replacement.to_string(), "r3");
+/// # Ok::<(), bitacora_meta::PlacementError>(())
+/// ```
 pub fn choose_additional_replica(
     replicas: &[ReplicaRecord],
     kept_replicas: &[ReplicaId],
@@ -92,18 +263,25 @@ pub fn choose_additional_replica(
     policy: PlacementPolicy,
 ) -> Result<ReplicaId, PlacementError> {
     let excluded: BTreeSet<ReplicaId> = kept_replicas.iter().cloned().collect();
-    let already_placed: Vec<&ReplicaRecord> = replicas
-        .iter()
-        .filter(|replica| excluded.contains(&replica.replica_id))
-        .collect();
-    let chosen = place(replicas, &already_placed, 1, now, policy, &excluded)?;
-    Ok(chosen
-        .into_iter()
-        .next()
-        .expect("placing one replica yields one replica"))
+    let mut already_placed = Vec::new();
+    for replica in replicas {
+        if excluded.contains(&replica.replica_id) {
+            already_placed.push(replica);
+        }
+    }
+    let mut chosen = place(replicas, &already_placed, 1, now, policy, &excluded)?;
+    Ok(chosen.pop().expect("placing one replica yields one replica"))
 }
 
 /// Places `replica_count` copies next to the ones `already_placed`.
+///
+/// # Returns
+///
+/// The newly placed replicas only, in the order they were chosen.
+///
+/// # Errors
+///
+/// As [`choose_replica_set`]. The domain check counts the already placed copies too.
 fn place(
     replicas: &[ReplicaRecord],
     already_placed: &[&ReplicaRecord],
@@ -112,15 +290,7 @@ fn place(
     policy: PlacementPolicy,
     excluded: &BTreeSet<ReplicaId>,
 ) -> Result<Vec<ReplicaId>, PlacementError> {
-    let mut candidates: Vec<&ReplicaRecord> = replicas
-        .iter()
-        .filter(|replica| {
-            replica.is_alive(now, policy.liveness_window)
-                && !replica.is_draining
-                && replica.used_percent() < policy.refuse_at_used_percent
-                && !excluded.contains(&replica.replica_id)
-        })
-        .collect();
+    let mut candidates = eligible_replicas(replicas, now, policy, excluded);
     if candidates.len() < replica_count {
         return Err(PlacementError::NotEnoughReplicas {
             needed: replica_count,
@@ -129,289 +299,118 @@ fn place(
     }
 
     let mut placed: Vec<&ReplicaRecord> = already_placed.to_vec();
-    while placed.len() < already_placed.len() + replica_count {
-        let best_position = candidates
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| {
-                shared_domains(left, &placed)
-                    .cmp(&shared_domains(right, &placed))
-                    .then(right.free_bytes.cmp(&left.free_bytes))
-                    .then(left.replica_id.cmp(&right.replica_id))
-            })
-            .map(|(position, _candidate)| position)
-            .expect("there are at least as many candidates as copies left to place");
+    for _copy in 0..replica_count {
+        let best_position = position_of_the_best_candidate(&candidates, &placed);
         placed.push(candidates.swap_remove(best_position));
     }
+    require_separate_narrowest_domains(&placed)?;
 
-    let separate_domains: BTreeSet<&[String]> = placed
-        .iter()
-        .filter(|replica| !replica.failure_domains.is_empty())
-        .map(|replica| replica.failure_domains.as_slice())
-        .collect();
-    let unlabelled_count = placed
-        .iter()
-        .filter(|replica| replica.failure_domains.is_empty())
-        .count();
-    let available = separate_domains.len() + unlabelled_count;
+    let mut newly_placed = Vec::with_capacity(replica_count);
+    for replica in &placed[already_placed.len()..] {
+        newly_placed.push(replica.replica_id.clone());
+    }
+    Ok(newly_placed)
+}
+
+/// Returns the replicas that may receive a new segment: alive, not draining, with room, and not excluded.
+fn eligible_replicas<'registry>(
+    replicas: &'registry [ReplicaRecord],
+    now: Timestamp,
+    policy: PlacementPolicy,
+    excluded: &BTreeSet<ReplicaId>,
+) -> Vec<&'registry ReplicaRecord> {
+    let mut eligible = Vec::new();
+    for replica in replicas {
+        let is_alive = replica.is_alive(now, policy.liveness_window);
+        let has_room = replica.used_percent() < policy.refuse_at_used_percent;
+        let is_excluded = excluded.contains(&replica.replica_id);
+        if is_alive && !replica.is_draining && has_room && !is_excluded {
+            eligible.push(replica);
+        }
+    }
+    eligible
+}
+
+/// Returns the position, in `candidates`, of the replica that should hold the next copy.
+///
+/// # Panics
+///
+/// Panics if there is no candidate. The caller checked that there are at least as many candidates as copies left to
+/// place.
+fn position_of_the_best_candidate(candidates: &[&ReplicaRecord], placed: &[&ReplicaRecord]) -> usize {
+    let mut best_position = None;
+    for (position, candidate) in candidates.iter().enumerate() {
+        let is_better = match best_position {
+            None => true,
+            Some(best) => compare_candidates(candidate, candidates[best], placed) == Ordering::Less,
+        };
+        if is_better {
+            best_position = Some(position);
+        }
+    }
+    best_position.expect("there are at least as many candidates as copies left to place")
+}
+
+/// Orders two candidates for the next copy: `Less` means `left` is the better choice.
+///
+/// The one that shares fewer failure domains with the placed copies wins, widest domain first; then the one with more
+/// free space; then the lower identifier.
+fn compare_candidates(left: &ReplicaRecord, right: &ReplicaRecord, placed: &[&ReplicaRecord]) -> Ordering {
+    let by_spread = shared_domains(left, placed).cmp(&shared_domains(right, placed));
+    if by_spread != Ordering::Equal {
+        return by_spread;
+    }
+    let by_room = right.free_bytes.cmp(&left.free_bytes);
+    if by_room != Ordering::Equal {
+        return by_room;
+    }
+    left.replica_id.cmp(&right.replica_id)
+}
+
+/// Counts, for each level from widest to narrowest, how many already chosen replicas share `candidate`'s failure domain
+/// at that level. Comparing two such lists prefers the candidate that shares the fewest wide domains.
+fn shared_domains(candidate: &ReplicaRecord, chosen: &[&ReplicaRecord]) -> Vec<usize> {
+    let mut shared_per_level = Vec::with_capacity(candidate.failure_domains.len());
+    for depth in 1..=candidate.failure_domains.len() {
+        let candidate_domain = &candidate.failure_domains[..depth];
+        let mut sharing_replicas = 0;
+        for replica in chosen {
+            if replica.failure_domains.get(..depth) == Some(candidate_domain) {
+                sharing_replicas += 1;
+            }
+        }
+        shared_per_level.push(sharing_replicas);
+    }
+    shared_per_level
+}
+
+/// Checks that no two of the placed replicas share their narrowest failure domain.
+///
+/// A replica's full list of labels names its narrowest domain. A replica without labels is a domain of its own.
+///
+/// # Errors
+///
+/// Returns [`PlacementError::NotEnoughFailureDomains`] if two placed replicas have the same full list of labels.
+fn require_separate_narrowest_domains(placed: &[&ReplicaRecord]) -> Result<(), PlacementError> {
+    let mut separate_domains: BTreeSet<&[String]> = BTreeSet::new();
+    let mut unlabelled_replicas = 0;
+    for replica in placed {
+        if replica.failure_domains.is_empty() {
+            unlabelled_replicas += 1;
+        } else {
+            separate_domains.insert(replica.failure_domains.as_slice());
+        }
+    }
+    let available = separate_domains.len() + unlabelled_replicas;
     if available < placed.len() {
         return Err(PlacementError::NotEnoughFailureDomains {
             needed: placed.len(),
             available,
         });
     }
-    Ok(placed[already_placed.len()..]
-        .iter()
-        .map(|replica| replica.replica_id.clone())
-        .collect())
-}
-
-/// Counts, for each level from widest to narrowest, how many already chosen
-/// replicas share `candidate`'s failure domain at that level. Comparing two
-/// such lists prefers the candidate that shares the fewest wide domains.
-fn shared_domains(candidate: &ReplicaRecord, chosen: &[&ReplicaRecord]) -> Vec<usize> {
-    (1..=candidate.failure_domains.len())
-        .map(|depth| {
-            let candidate_domain = &candidate.failure_domains[..depth];
-            chosen
-                .iter()
-                .filter(|replica| replica.failure_domains.get(..depth) == Some(candidate_domain))
-                .count()
-        })
-        .collect()
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::records::RECORD_SCHEMA_VERSION;
-
-    use super::*;
-
-    const NOW: Timestamp = Timestamp::from_unix_millis(100_000);
-
-    fn replica(name: &str, failure_domains: &[&str]) -> ReplicaRecord {
-        ReplicaRecord {
-            schema_version: RECORD_SCHEMA_VERSION,
-            replica_id: ReplicaId::new(name).expect("valid identifier"),
-            address: format!("{name}:7000"),
-            failure_domains: failure_domains.iter().map(|domain| (*domain).to_owned()).collect(),
-            capacity_bytes: 1_000,
-            free_bytes: 900,
-            is_draining: false,
-            heartbeat_at: NOW,
-        }
-    }
-
-    fn choose(replicas: &[ReplicaRecord], replica_count: usize) -> Result<Vec<String>, PlacementError> {
-        choose_replica_set(
-            replicas,
-            replica_count,
-            NOW,
-            PlacementPolicy::default(),
-            &BTreeSet::new(),
-        )
-        .map(|chosen| {
-            let mut names: Vec<String> = chosen.iter().map(ToString::to_string).collect();
-            names.sort();
-            names
-        })
-    }
-
-    #[test]
-    fn three_copies_land_in_three_zones() {
-        let replicas = [
-            replica("a1", &["zone-a", "host-a1"]),
-            replica("a2", &["zone-a", "host-a2"]),
-            replica("b1", &["zone-b", "host-b1"]),
-            replica("c1", &["zone-c", "host-c1"]),
-        ];
-        assert_eq!(choose(&replicas, 3), Ok(vec!["a1".into(), "b1".into(), "c1".into()]));
-    }
-
-    #[test]
-    fn six_copies_spread_evenly_over_three_zones() {
-        let mut replicas = Vec::new();
-        for zone in ["a", "b", "c"] {
-            for host in 1..=3 {
-                replicas.push(replica(
-                    &format!("{zone}{host}"),
-                    &[&format!("zone-{zone}"), &format!("host-{zone}{host}")],
-                ));
-            }
-        }
-        let chosen = choose(&replicas, 6).expect("placement succeeds");
-        let copies_per_zone: Vec<usize> = ["a", "b", "c"]
-            .iter()
-            .map(|zone| chosen.iter().filter(|name| name.starts_with(zone)).count())
-            .collect();
-        assert_eq!(copies_per_zone, [2, 2, 2]);
-    }
-
-    #[test]
-    fn one_zone_falls_back_to_separate_racks() {
-        let replicas = [
-            replica("r1", &["zone-a", "rack-1", "host-1"]),
-            replica("r2", &["zone-a", "rack-1", "host-2"]),
-            replica("r3", &["zone-a", "rack-2", "host-3"]),
-            replica("r4", &["zone-a", "rack-3", "host-4"]),
-        ];
-        let chosen = choose(&replicas, 3).expect("placement succeeds");
-        assert!(
-            chosen.contains(&"r3".to_owned()) && chosen.contains(&"r4".to_owned()),
-            "{chosen:?}"
-        );
-    }
-
-    #[test]
-    fn two_copies_never_share_a_host() {
-        let replicas = [
-            replica("disk-1", &["zone-a", "host-1"]),
-            replica("disk-2", &["zone-a", "host-1"]),
-            replica("disk-3", &["zone-a", "host-2"]),
-        ];
-        assert_eq!(
-            choose(&replicas, 3),
-            Err(PlacementError::NotEnoughFailureDomains {
-                needed: 3,
-                available: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn copies_avoid_a_shared_host_when_another_host_exists() {
-        let replicas = [
-            replica("disk-1", &["zone-a", "host-1"]),
-            replica("disk-2", &["zone-a", "host-1"]),
-            replica("disk-3", &["zone-a", "host-2"]),
-        ];
-        let chosen = choose(&replicas, 2).expect("placement succeeds");
-        assert!(chosen.contains(&"disk-3".to_owned()), "{chosen:?}");
-    }
-
-    #[test]
-    fn unlabelled_replicas_each_count_as_their_own_domain() {
-        let replicas = [replica("r1", &[]), replica("r2", &[]), replica("r3", &[])];
-        assert_eq!(choose(&replicas, 3), Ok(vec!["r1".into(), "r2".into(), "r3".into()]));
-    }
-
-    #[test]
-    fn roomier_replica_wins_among_equally_spread_ones() {
-        let mut roomy = replica("r2", &["zone-a", "host-2"]);
-        roomy.free_bytes = 950;
-        let replicas = [replica("r1", &["zone-a", "host-1"]), roomy];
-        assert_eq!(choose(&replicas, 1), Ok(vec!["r2".into()]));
-    }
-
-    #[test]
-    fn lowest_identifier_breaks_remaining_ties() {
-        let replicas = [
-            replica("r2", &["zone-a", "host-2"]),
-            replica("r1", &["zone-a", "host-1"]),
-        ];
-        assert_eq!(choose(&replicas, 1), Ok(vec!["r1".into()]));
-    }
-
-    #[test]
-    fn dead_replicas_are_not_chosen() {
-        let mut dead = replica("r1", &[]);
-        dead.heartbeat_at = Timestamp::from_unix_millis(1_000);
-        let replicas = [dead, replica("r2", &[])];
-        assert_eq!(
-            choose(&replicas, 2),
-            Err(PlacementError::NotEnoughReplicas { needed: 2, eligible: 1 })
-        );
-    }
-
-    #[test]
-    fn draining_replicas_are_not_chosen() {
-        let mut draining = replica("r1", &[]);
-        draining.is_draining = true;
-        let replicas = [draining, replica("r2", &[])];
-        assert_eq!(choose(&replicas, 1), Ok(vec!["r2".into()]));
-    }
-
-    #[test]
-    fn nearly_full_replicas_are_not_chosen() {
-        let mut nearly_full = replica("r1", &[]);
-        nearly_full.free_bytes = 150;
-        let replicas = [nearly_full, replica("r2", &[])];
-        assert_eq!(choose(&replicas, 1), Ok(vec!["r2".into()]));
-    }
-
-    #[test]
-    fn excluded_replicas_are_not_chosen() {
-        let replicas = [replica("r1", &[]), replica("r2", &[])];
-        let excluded = BTreeSet::from([ReplicaId::new("r1").expect("valid identifier")]);
-        let chosen = choose_replica_set(&replicas, 1, NOW, PlacementPolicy::default(), &excluded);
-        assert_eq!(chosen, Ok(vec![ReplicaId::new("r2").expect("valid identifier")]));
-    }
-
-    fn additional(replicas: &[ReplicaRecord], kept: &[&str]) -> Result<String, PlacementError> {
-        let kept_replicas: Vec<ReplicaId> = kept
-            .iter()
-            .map(|name| ReplicaId::new(*name).expect("valid identifier"))
-            .collect();
-        choose_additional_replica(replicas, &kept_replicas, NOW, PlacementPolicy::default())
-            .map(|chosen| chosen.to_string())
-    }
-
-    #[test]
-    fn replacement_goes_to_the_zone_that_lost_its_copy() {
-        let replicas = [
-            replica("a1", &["zone-a", "host-a1"]),
-            replica("a2", &["zone-a", "host-a2"]),
-            replica("b1", &["zone-b", "host-b1"]),
-            replica("b2", &["zone-b", "host-b2"]),
-            replica("c1", &["zone-c", "host-c1"]),
-        ];
-        assert_eq!(additional(&replicas, &["a1", "c1"]), Ok("b1".to_owned()));
-    }
-
-    #[test]
-    fn replacement_is_never_a_replica_that_keeps_a_copy() {
-        let replicas = [replica("r1", &[]), replica("r2", &[]), replica("r3", &[])];
-        assert_eq!(additional(&replicas, &["r1", "r2"]), Ok("r3".to_owned()));
-    }
-
-    #[test]
-    fn replacement_never_shares_a_host_with_a_kept_copy() {
-        let replicas = [
-            replica("disk-1", &["zone-a", "host-1"]),
-            replica("disk-2", &["zone-a", "host-1"]),
-            replica("disk-3", &["zone-a", "host-2"]),
-        ];
-        assert_eq!(
-            additional(&replicas, &["disk-1", "disk-3"]),
-            Err(PlacementError::NotEnoughFailureDomains {
-                needed: 3,
-                available: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn replacement_ignores_kept_replicas_that_left_the_registry() {
-        let replicas = [replica("r2", &[]), replica("r3", &[])];
-        assert_eq!(additional(&replicas, &["r1", "r2"]), Ok("r3".to_owned()));
-    }
-
-    #[test]
-    fn no_replacement_exists_when_every_other_replica_is_dead() {
-        let mut dead = replica("r3", &[]);
-        dead.heartbeat_at = Timestamp::from_unix_millis(1_000);
-        let replicas = [replica("r1", &[]), replica("r2", &[]), dead];
-        assert_eq!(
-            additional(&replicas, &["r1", "r2"]),
-            Err(PlacementError::NotEnoughReplicas { needed: 1, eligible: 0 })
-        );
-    }
-
-    #[test]
-    fn empty_registry_cannot_place_anything() {
-        assert_eq!(
-            choose(&[], 3),
-            Err(PlacementError::NotEnoughReplicas { needed: 3, eligible: 0 })
-        );
-    }
-}
+#[path = "placement_test.rs"]
+mod tests;
