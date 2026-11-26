@@ -61,7 +61,9 @@ runs a cluster of real processes also needs `BITA_REPLICA_BINARY` and
 
 Every user-visible change adds an entry with `hack/chloggen.sh new -f <name>`.
 `hack/create_release.sh X.Y.Z` collects the entries into `CHANGELOG.md`, sets
-the version, tags, pushes and publishes the release with those notes.
+the version, tags, pushes and publishes the release with those notes. The
+release commit is tagged twice: `vX.Y.Z`, and `src/go/vX.Y.Z` for the Go
+module.
 
 ## Licence
 

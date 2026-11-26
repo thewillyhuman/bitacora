@@ -151,8 +151,13 @@ sandbox="$(dirname "${repository}")"
 assert_equals "$(git -C "${repository}" log -1 --format=%s)" "release: v1.2.3"
 assert_contains "$(git -C "${repository}" log -1 --format=%b)" "Signed-off-by: Release Tester"
 assert_equals "$(git -C "${repository}" status --porcelain)" ""
-assert_equals "$(git -C "${sandbox}/remote.git" tag --list)" "v1.2.3"
+assert_equals "$(git -C "${sandbox}/remote.git" tag --list)" "src/go/v1.2.3
+v1.2.3"
 assert_equals "$(git -C "${sandbox}/remote.git" log -1 --format=%s main)" "release: v1.2.3"
+
+current_test="the tag of the go module names the release commit"
+assert_equals "$(git -C "${sandbox}/remote.git" rev-parse 'src/go/v1.2.3^{commit}')" \
+    "$(git -C "${sandbox}/remote.git" rev-parse 'v1.2.3^{commit}')"
 
 current_test="release publishes exactly the new changelog section"
 assert_contains "$(cat "${sandbox}/calls.log")" "gh release create v1.2.3 --title v1.2.3"
@@ -171,6 +176,7 @@ sandbox="$(dirname "${repository}")"
 head_before="$(git -C "${repository}" rev-parse HEAD)"
 output="$(release "${repository}" --dry-run 1.2.3)" || fail "the dry run failed"
 assert_contains "${output}" "Flush faster. (M2)"
+assert_contains "${output}" "would tag v1.2.3 and src/go/v1.2.3"
 assert_equals "$(git -C "${repository}" rev-parse HEAD)" "${head_before}"
 assert_equals "$(git -C "${repository}" status --porcelain)" ""
 assert_equals "$(git -C "${repository}" tag --list)" ""
@@ -209,6 +215,14 @@ if output="$(release "${repository}" 1.2.3)"; then
     fail "the release reused a tag"
 fi
 assert_contains "${output}" "tag v1.2.3 exists already"
+
+current_test="an existing tag of the go module is refused"
+repository="$(new_repository)"
+git -C "${repository}" tag src/go/v1.2.3
+if output="$(release "${repository}" 1.2.3)"; then
+    fail "the release reused the tag of the go module"
+fi
+assert_contains "${output}" "tag src/go/v1.2.3 exists already"
 
 current_test="a release without changelog entries is refused"
 repository="$(new_repository)"

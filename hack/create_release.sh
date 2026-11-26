@@ -4,14 +4,18 @@
 # pushes, and publishes a GitHub release whose notes are the new changelog
 # section.
 #
+# The release commit gets two tags: vX.Y.Z for the release, and
+# src/go/vX.Y.Z, which is where Go looks for version X.Y.Z of a module that
+# lives in the directory src/go.
+#
 # Usage: hack/create_release.sh [--dry-run] X.Y.Z
 #
 #   --dry-run   Do everything locally, print the release notes and what would
 #               be pushed and published, then put the working tree back.
 #
 # The script refuses to run unless the working tree is clean, the current
-# branch is the release branch and the tag does not exist yet, so a failed
-# run can simply be started again.
+# branch is the release branch and neither tag exists yet, so a failed run
+# can simply be started again.
 #
 # Environment:
 #   BITA_RELEASE_BRANCH  the branch releases are cut from (default: main)
@@ -57,6 +61,7 @@ done
     fail "'${version}' is not a version of the form X.Y.Z"
 readonly version
 readonly tag="v${version}"
+readonly go_module_tag="src/go/${tag}"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -67,9 +72,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
 [ "${current_branch}" = "${RELEASE_BRANCH}" ] ||
     fail "releases are cut from '${RELEASE_BRANCH}', but the current branch is '${current_branch}'"
-if git rev-parse --quiet --verify "refs/tags/${tag}" >/dev/null; then
-    fail "tag ${tag} exists already"
-fi
+for new_tag in "${tag}" "${go_module_tag}"; do
+    if git rev-parse --quiet --verify "refs/tags/${new_tag}" >/dev/null; then
+        fail "tag ${new_tag} exists already"
+    fi
+done
 pending_entries="$(find .chloggen -maxdepth 1 -name '*.yaml' ! -name 'config.yaml' ! -name 'TEMPLATE.yaml' | wc -l)"
 [ "${pending_entries}" -gt 0 ] ||
     fail "there are no changelog entries under .chloggen/, so there is nothing to release"
@@ -132,7 +139,7 @@ if "${is_dry_run}"; then
     cat "${release_notes}"
     echo "--- files that would be committed as 'release: ${tag}'"
     git status --short
-    echo "--- dry run: would tag ${tag}, push ${RELEASE_BRANCH} and the tag to ${RELEASE_REMOTE}, and publish the release"
+    echo "--- dry run: would tag ${tag} and ${go_module_tag}, push ${RELEASE_BRANCH} and the tags to ${RELEASE_REMOTE}, and publish the release"
     rm -f "${release_notes}"
     exit 0
 fi
@@ -143,7 +150,8 @@ git add -A
 git commit --quiet --signoff --message "release: ${tag}" \
     --message "Release notes are in CHANGELOG.md under the heading '${tag}'."
 git tag --annotate "${tag}" --message "bitacora ${tag}"
-git push --quiet "${RELEASE_REMOTE}" "${RELEASE_BRANCH}" "${tag}"
+git tag --annotate "${go_module_tag}" --message "bitacora Go client ${tag}"
+git push --quiet "${RELEASE_REMOTE}" "${RELEASE_BRANCH}" "${tag}" "${go_module_tag}"
 "${GH}" release create "${tag}" --title "${tag}" --notes-file "${release_notes}" --verify-tag
 rm -f "${release_notes}"
 echo "released ${tag}"

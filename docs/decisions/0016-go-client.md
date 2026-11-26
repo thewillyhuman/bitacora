@@ -29,8 +29,9 @@ clients to change, which is what the interop tests are for.
 `github.com/thewillyhuman/bitacora/src/go`, following the repository's
 layout by language (record 0013); applications import its `bitacora`
 package. A module in a subdirectory is released with tags of the form
-`src/go/vX.Y.Z`. `hack/create_release.sh` does not create them yet, so the
-module has no tagged version.
+`src/go/vX.Y.Z`, and `hack/create_release.sh` puts one on every release
+commit next to `vX.Y.Z`, so the module and the daemons share their
+versions.
 
 **Go 1.26.** It is the oldest release Go still supports. `go.mod` promises
 it and Bazel pins `1.26.11`, so what is built is what is promised.

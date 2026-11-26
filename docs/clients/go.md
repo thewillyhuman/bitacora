@@ -15,7 +15,7 @@ and what the documents had to be taught on the way, is in
 ## Install
 
 ```sh
-go get github.com/thewillyhuman/bitacora/src/go@main
+go get github.com/thewillyhuman/bitacora/src/go@latest
 ```
 
 The module is `github.com/thewillyhuman/bitacora/src/go` and the package to
@@ -23,8 +23,11 @@ import is `github.com/thewillyhuman/bitacora/src/go/bitacora`. It needs Go
 1.26 or later and nothing else: the gRPC stubs are checked in, and no C
 compiler is involved.
 
-The module has no tagged version yet, so `@main` records the commit it
-found in `go.mod`.
+A release of bitacora is also a version of the module:
+`hack/create_release.sh` tags the release commit as `src/go/vX.Y.Z`, which
+is where Go looks for a module in a subdirectory. Until the first release
+there is no such tag, and `@latest` is the newest commit of the main
+branch.
 
 ## Example
 
