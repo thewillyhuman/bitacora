@@ -17,9 +17,10 @@
 //!
 //! # How it works
 //!
-//! Finding the blocks takes four steps, each through a public function of another crate: the stream's
-//! identifier from the metadata store; the materializer's checkpoint record, which names a manifest; the
-//! manifest from the object store; and the catalog out of the manifest's details.
+//! Finding the blocks takes three steps, each through a public function of another crate: the stream's
+//! identifier from the metadata store; the checkpoint the materializer last committed, with its manifest,
+//! from the framework (`read_committed_checkpoint`, which copes with the materializer committing a newer
+//! one at that moment); and the catalog out of the manifest's details.
 //!
 //! A block is cut when it is full, not when a checkpoint happens, so the catalog usually ends before the
 //! checkpoint. The samples in between were in the store's head at the checkpoint, and the store saved
@@ -49,7 +50,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bitacora_artifact::{ArtifactError, ArtifactStore};
-use bitacora_materializer::{ArtifactNamespace, CatalogEntry, MaterializerError, decode_catalog, decode_manifest};
+use bitacora_materializer::{
+    ArtifactNamespace, CatalogEntry, CommittedCheckpointError, MaterializerError, decode_catalog,
+    read_committed_checkpoint,
+};
 use bitacora_meta::{MetaError, MetadataStore};
 use bitacora_types::{SequenceNumber, StreamId};
 use thiserror::Error;
@@ -59,9 +63,9 @@ use crate::query::{BlockIndexCache, QueryResult, into_series, query_blocks};
 use crate::sample::TimeRange;
 use crate::selector::Selector;
 
-/// How many times the reader looks for the committed catalog again because the materializer committed a
-/// new one while it was reading the old one.
-const MAX_REFRESH_ATTEMPTS: usize = 4;
+/// How many times a query reads the catalog again and starts over because a block it was about to read
+/// had been merged away.
+const MAX_QUERY_ATTEMPTS: usize = 4;
 
 /// Why the committed blocks could not be found or read.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -76,6 +80,17 @@ pub enum BlockReaderError {
     /// The materializer committed new checkpoints faster than the reader could read one.
     #[error("the committed checkpoint kept changing while it was being read")]
     CheckpointKeptChanging,
+}
+
+impl From<CommittedCheckpointError> for BlockReaderError {
+    /// Sorts what the framework could not read into what the reader reports.
+    fn from(error: CommittedCheckpointError) -> Self {
+        match error {
+            CommittedCheckpointError::Metadata(meta_error) => Self::Metadata(meta_error),
+            CommittedCheckpointError::Manifest(read_error) => Self::Block(read_error),
+            CommittedCheckpointError::ManifestKeptDisappearing { .. } => Self::CheckpointKeptChanging,
+        }
+    }
 }
 
 /// The blocks the materializer has committed, as of one checkpoint.
@@ -171,37 +186,24 @@ impl BlockReader {
     /// Returns [`BlockReaderError`] if the checkpoint or its manifest cannot be read. The reader then
     /// keeps answering from the blocks it knew.
     pub async fn refresh(&mut self) -> Result<SequenceNumber, BlockReaderError> {
-        for _attempt in 0..MAX_REFRESH_ATTEMPTS {
-            let committed = self
-                .metadata
-                .get_checkpoint(self.stream_id, METRICS_MATERIALIZER)
-                .await?;
-            let Some(manifest_key) = committed.manifest else {
-                // Nothing was ever checkpointed: there is no block.
-                self.committed = CommittedBlocks {
-                    checkpoint: committed.checkpoint,
-                    entries: Vec::new(),
-                };
-                return Ok(self.committed.checkpoint);
-            };
-            let stored_manifest = match self.artifacts.get_artifact(&manifest_key).await {
-                Ok(stored_manifest) => stored_manifest,
-                // The materializer committed a newer checkpoint and deleted this manifest. Look again.
-                Err(MaterializerError::ArtifactStore(ArtifactError::NotFound { .. })) => continue,
-                Err(read_error) => return Err(BlockReaderError::Block(read_error)),
-            };
-            let (checkpoint, manifest) = decode_manifest(&stored_manifest)?;
+        let committed =
+            read_committed_checkpoint(&self.metadata, &self.artifacts, self.stream_id, METRICS_MATERIALIZER).await?;
+        let mut entries = Vec::new();
+        // Without a manifest nothing was ever checkpointed: there is no block.
+        if let Some(manifest) = committed.manifest {
             let stored_catalog = decode_catalog(&manifest.details)?;
-            let mut entries = stored_catalog.entries;
+            entries = stored_catalog.entries;
             // What the store had applied and not cut into a block yet. It is saved in the layout of a
             // block and covers the records from the last block to the checkpoint.
             if let Some(saved_head) = stored_catalog.pending {
                 entries.push(saved_head);
             }
-            self.committed = CommittedBlocks { checkpoint, entries };
-            return Ok(checkpoint);
         }
-        Err(BlockReaderError::CheckpointKeptChanging)
+        self.committed = CommittedBlocks {
+            checkpoint: committed.checkpoint,
+            entries,
+        };
+        Ok(committed.checkpoint)
     }
 
     /// The checkpoint the reader answers as of.
@@ -237,7 +239,7 @@ impl BlockReader {
     /// Returns [`BlockReaderError::Block`] if a block cannot be read or is damaged, and what
     /// [`BlockReader::refresh`] returns if a refresh was needed and failed.
     pub async fn query(&mut self, selector: &Selector, time_range: TimeRange) -> Result<QueryResult, BlockReaderError> {
-        for _attempt in 0..MAX_REFRESH_ATTEMPTS {
+        for _attempt in 0..MAX_QUERY_ATTEMPTS {
             let mut merged = BTreeMap::new();
             let read = query_blocks(
                 &self.artifacts,
