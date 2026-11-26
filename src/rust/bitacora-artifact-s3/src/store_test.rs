@@ -6,7 +6,8 @@
 //! - Key prefixes: two stores with different prefixes on one service do not see each other, objects land
 //!   under the prefix, and listings come back without it.
 //! - Ranges: every way a range can lie outside an object reports the object's real size.
-//! - Listings by characters on top of a client that lists by path components.
+//! - Listings by characters on top of a client that lists by path components, and the rule that picks the
+//!   directory to ask the client for.
 //! - A service that fails or never answers is reported as unavailable, within the request timeout.
 //!
 //! # How the fixtures work
@@ -695,4 +696,32 @@ fn read_in_a_missing_bucket_is_unavailable_and_says_so() {
         panic!("expected an unavailable error, got {error:?}");
     };
     assert!(reason.contains("The specified bucket does not exist"), "{reason}");
+}
+
+#[test]
+fn keys_under_a_prefix_without_a_separator_lie_at_the_root_of_the_bucket() {
+    let directory = directory_holding("streams");
+
+    assert_eq!(directory.ok(), Some(None));
+}
+
+#[test]
+fn keys_under_a_prefix_lie_in_the_directory_before_its_last_separator() {
+    let directory = directory_holding("streams/7/segments/0000");
+
+    assert_eq!(directory.ok(), Some(Some(Path::from("streams/7/segments"))));
+}
+
+#[test]
+fn prefix_that_ends_in_a_separator_names_its_own_directory() {
+    let directory = directory_holding("streams/7/");
+
+    assert_eq!(directory.ok(), Some(Some(Path::from("streams/7"))));
+}
+
+#[test]
+fn directory_with_an_empty_component_cannot_be_addressed() {
+    let directory = directory_holding("streams//segments/0000");
+
+    assert!(directory.is_err(), "{directory:?}");
 }

@@ -270,18 +270,9 @@ impl S3ArtifactStore {
         let full_prefix = format!("{}{key_prefix}", self.key_namespace);
         // The client lists whole path components, so ask for the directory the prefix names and pick the
         // keys that start with the prefix out of it.
-        let directory = match full_prefix.rfind('/') {
-            Some(last_separator) => &full_prefix[..last_separator],
-            None => "",
-        };
-        let directory_location = if directory.is_empty() {
-            None
-        } else {
-            match Path::parse(directory) {
-                Ok(location) => Some(location),
-                // No valid key lies in a directory that is not a valid path.
-                Err(_unaddressable) => return Ok(Vec::new()),
-            }
+        let Ok(directory_location) = directory_holding(&full_prefix) else {
+            // No valid key lies in a directory that is not a valid path.
+            return Ok(Vec::new());
         };
 
         let mut listed = Vec::new();
@@ -303,6 +294,27 @@ impl S3ArtifactStore {
         listed.sort_by(|left, right| left.object_key.cmp(&right.object_key));
         Ok(listed)
     }
+}
+
+/// The directory that every key starting with `full_prefix` lies in: what comes before the prefix's
+/// last separator.
+///
+/// # Returns
+///
+/// `None` for a prefix without a separator, whose keys lie at the root of the bucket.
+///
+/// # Errors
+///
+/// Returns the client's refusal if the directory is not a path the client can address.
+fn directory_holding(full_prefix: &str) -> Result<Option<Path>, object_store::path::Error> {
+    let directory = match full_prefix.rfind('/') {
+        Some(last_separator) => &full_prefix[..last_separator],
+        None => "",
+    };
+    if directory.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Path::parse(directory)?))
 }
 
 /// Whether `error` says that the object is absent from a bucket that exists.

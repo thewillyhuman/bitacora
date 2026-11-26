@@ -146,23 +146,14 @@ fn open_with_client_builder(
     settings.validate()?;
     install_tls_provider();
 
-    let http_client = ClientOptions::new()
-        .with_allow_http(settings.allow_http)
-        .with_connect_timeout(settings.connect_timeout)
-        .with_timeout(settings.request_timeout);
-    let retries = RetryConfig {
-        max_retries: MAX_RETRIES,
-        retry_timeout: settings.request_timeout,
-        ..RetryConfig::default()
-    };
     let mut client_builder = client_builder
         .with_bucket_name(&settings.bucket)
         .with_region(&settings.region)
         .with_allow_http(settings.allow_http)
         .with_virtual_hosted_style_request(!settings.force_path_style)
         .with_disable_bulk_delete(true)
-        .with_client_options(http_client)
-        .with_retry(retries);
+        .with_client_options(http_client_options(settings))
+        .with_retry(retry_policy(settings));
     if let Some(endpoint) = &settings.endpoint {
         // The environment can name an endpoint in two ways, and the S3-specific one wins inside the
         // client. Set both, so that the setting wins over either.
@@ -178,6 +169,25 @@ fn open_with_client_builder(
             settings.request_timeout,
         )),
         Err(refusal) => Err(InvalidS3Settings::because(refusal.to_string())),
+    }
+}
+
+/// The options of the HTTP client under the S3 client: whether plain HTTP is allowed, and how long a
+/// connection and a whole request may take.
+fn http_client_options(settings: &S3Settings) -> ClientOptions {
+    ClientOptions::new()
+        .with_allow_http(settings.allow_http)
+        .with_connect_timeout(settings.connect_timeout)
+        .with_timeout(settings.request_timeout)
+}
+
+/// How the S3 client retries a failed request: up to [`MAX_RETRIES`] times, and never past the request
+/// timeout, so that the retries stay inside the one deadline a caller of the store sees.
+fn retry_policy(settings: &S3Settings) -> RetryConfig {
+    RetryConfig {
+        max_retries: MAX_RETRIES,
+        retry_timeout: settings.request_timeout,
+        ..RetryConfig::default()
     }
 }
 
