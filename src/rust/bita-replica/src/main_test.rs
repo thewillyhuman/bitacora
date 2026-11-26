@@ -104,3 +104,23 @@ fn problem_with_a_setting_names_the_file_too() {
 
     assert!(problem.contains(&config_path.display().to_string()), "{problem}");
 }
+
+#[test]
+fn identity_the_cluster_already_knows_ends_the_daemon_as_a_configuration_error() {
+    let daemon_error = DaemonError::IdentityAlreadyKnown {
+        replica_id: bitacora_types::ReplicaId::new("replica-a").expect("a valid identifier"),
+        known_from: "it is registered at replica-a.example.org:7000".to_owned(),
+    };
+
+    assert_eq!(exit_code_of(&daemon_error), EXIT_CODE_BAD_CONFIGURATION);
+}
+
+#[test]
+fn failure_that_a_restart_may_get_past_ends_the_daemon_as_a_failure() {
+    let daemon_error = DaemonError::CannotStart {
+        action: "check that the identity replica-a is new to the cluster".to_owned(),
+        reason: "metadata store is unavailable".to_owned(),
+    };
+
+    assert_eq!(exit_code_of(&daemon_error), EXIT_CODE_FAILURE);
+}

@@ -143,8 +143,15 @@ yet, because there is only one version: read the changelog of a release before y
 identity in its data directory; the `replica_id` of the configuration only names an empty one. A replica
 that lost its disk holds none of the copies its old identity held. If it answers under that identity, a
 writer that recovers a stream after a failure can take its empty answer for the word of a replica that
-used to hold committed records, and a committed record can be lost. The daemon does not refuse this
-today: it is a rule you keep. The Helm chart keeps it for you by putting the pod's UID in the identity.
+used to hold committed records, and a committed record can be lost.
+
+The daemon enforces this. On an empty data directory it asks the metadata store whether the cluster
+already knows the proposed `replica_id`, as a registered replica or as the holder of a copy or a standby
+in any stream, and if so it exits with code 2 and says how the identity is known. Give the directory a
+new `replica_id`. While the metadata store cannot be reached, a replica on an empty directory does not
+start at all (exit code 1; it starts once the question can be answered); a replica on a directory that
+has its identity starts regardless. The Helm chart never runs into this: it puts the pod's UID in the
+identity it proposes.
 
 ### Add capacity
 
@@ -224,6 +231,5 @@ So that you do not look for it:
 - Rebalancing of sealed segments between replicas.
 - Metrics from the client library: append latency, failover time, replica lag, materializer lag.
 - Traces.
-- A refusal to start a replica on an empty disk under a used identity (see above).
 - An operator for Kubernetes: the chart does not replace volumes or scale for you.
 - A published image or package: you build them.

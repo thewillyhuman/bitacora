@@ -134,8 +134,9 @@ write quorum.
   one machine would share a failure domain, which defeats what they are for.
 - **A new disk is a new replica.** A replica keeps its identity in its data directory. When that
   directory is lost, give the replacement a `replica_id` that was never used and remove the old one with
-  `bita replica remove`. A replica that starts on an empty disk under its old identity answers for
-  copies it no longer holds; `docs/operations/README.md` says what that can cost.
+  `bita replica remove`. A replica on an empty disk under its old identity would answer for copies it
+  no longer holds, so the daemon refuses to start that way: it exits with code 2, which the unit does
+  not restart, and says how the cluster knows the identity. `docs/operations/README.md` has the detail.
 
 ## How this directory is tested
 

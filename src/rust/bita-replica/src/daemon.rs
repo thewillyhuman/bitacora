@@ -70,7 +70,7 @@ use bitacora_proto::{ServeError, serve_replica};
 use bitacora_replica::{Replica, WriteFailureHandler};
 use bitacora_segment::{Disk, LocalDisk};
 use bitacora_types::replica_api::{ReplicaApi, ReplicaConnector};
-use bitacora_types::{Clock, SegmentAddress, SystemClock};
+use bitacora_types::{Clock, ReplicaId, SegmentAddress, SystemClock};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -78,6 +78,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 
 use crate::config::ReplicaDaemonSettings;
+use crate::identity::refuse_a_known_identity_on_an_empty_directory;
 use crate::metrics::ReplicaDaemonMetrics;
 use crate::registration::Registration;
 use crate::scrub::run_scrub_schedule;
@@ -106,6 +107,20 @@ pub(crate) enum DaemonError {
         /// What the disk reported.
         reason: String,
     },
+    /// The data directory is empty and the cluster already knows the identity the configuration
+    /// proposes for it. Starting again cannot help: the configuration must propose a new identity.
+    #[error(
+        "the data directory is empty, but the cluster already knows a replica {replica_id}: {known_from}. \
+         A directory that lost its contents holds none of the copies that replica held and must not answer \
+         in its name. Set a new replica_id for this directory; the copies of {replica_id} are rebuilt \
+         elsewhere once it is given up or removed with `bita replica remove {replica_id}`"
+    )]
+    IdentityAlreadyKnown {
+        /// The identity the configuration proposes.
+        replica_id: ReplicaId,
+        /// How the cluster knows it: where it is registered, or which stream names it.
+        known_from: String,
+    },
     /// The gRPC server stopped by itself, which it only does when its socket breaks.
     #[error("the gRPC server stopped unexpectedly: {reason}")]
     ServerStopped {
@@ -116,7 +131,16 @@ pub(crate) enum DaemonError {
 
 impl DaemonError {
     /// Builds the error for a start-up step that failed.
-    fn cannot_start(action: impl Into<String>, reason: &impl ToString) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `action` - What the daemon was trying to do, worded to follow "cannot".
+    /// * `reason` - What went wrong.
+    ///
+    /// # Returns
+    ///
+    /// [`DaemonError::CannotStart`] with both as text.
+    pub(crate) fn cannot_start(action: impl Into<String>, reason: &impl ToString) -> Self {
         Self::CannotStart {
             action: action.into(),
             reason: reason.to_string(),
@@ -272,7 +296,10 @@ async fn stop_was_asked(stop_asked: oneshot::Receiver<()>) {
 ///
 /// # Errors
 ///
-/// * [`DaemonError::CannotStart`] if the replica cannot be opened on the disk.
+/// * [`DaemonError::CannotStart`] if the replica cannot be opened on the disk, or if the data directory
+///   is empty and the metadata store cannot be asked whether the proposed identity is new.
+/// * [`DaemonError::IdentityAlreadyKnown`] if the data directory is empty and the cluster already knows
+///   the proposed identity.
 /// * [`DaemonError::StorageFailed`] if the disk refused a write or a flush while serving.
 /// * [`DaemonError::ServerStopped`] if the gRPC server ended by itself.
 pub(crate) async fn run(
@@ -289,6 +316,17 @@ pub(crate) async fn run(
         environment.key_value_store,
         &metrics_registry,
     )));
+    // Before anything is written to the directory or answered on the network.
+    if let Err(daemon_error) = refuse_a_known_identity_on_an_empty_directory(
+        environment.disk.as_ref(),
+        &settings.proposed_replica_id,
+        &metadata,
+    )
+    .await
+    {
+        stop_within_the_grace_period(endpoint, "observability endpoint").await;
+        return Err(daemon_error);
+    }
     let (write_failure_sender, mut write_failures) = mpsc::unbounded_channel::<WriteFailure>();
     let replica = open_replica(
         &settings,

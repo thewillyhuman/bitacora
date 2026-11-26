@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: replica
+note: "bita-replica refuses to start on an empty data directory under a replica_id the cluster already knows. A replaced disk that came back under its old name could answer for copies it no longer held."
+issues: [5]

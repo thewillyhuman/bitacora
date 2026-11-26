@@ -65,6 +65,14 @@ impl Stores {
             object_store: MemoryArtifactStore::new(),
         }
     }
+
+    /// Working stores whose data directory was used before and has the identity `replica-a`, as on any
+    /// start but the first. Such a directory starts without asking the metadata store who it is.
+    async fn with_a_used_data_directory() -> Self {
+        let stores = Self::new();
+        open_replica(&stores.disk, "replica-a").await.stop();
+        stores
+    }
 }
 
 /// A daemon that runs inside the test, with what a test needs to use and stop it.
@@ -223,6 +231,15 @@ async fn identity_on(disk: &MemoryDisk) -> ReplicaId {
     }
 }
 
+/// Starts a daemon on `stores` that is expected to end by itself, and returns what `run` returned.
+async fn run_until_it_stops(stores: Stores) -> Result<(), DaemonError> {
+    let daemon = RunningDaemon::start(stores).await;
+    timeout(GENEROUS_WAIT, daemon.running)
+        .await
+        .expect("the daemon ends by itself")
+        .expect("the daemon does not panic")
+}
+
 /// Accepts any registration.
 fn any_registration(_record: &ReplicaRecord) -> bool {
     true
@@ -276,7 +293,7 @@ async fn daemon_becomes_ready_once_it_is_registered() {
 
 #[tokio::test]
 async fn daemon_is_alive_but_not_ready_while_the_metadata_store_is_down() {
-    let stores = Stores::new();
+    let stores = Stores::with_a_used_data_directory().await;
     stores.key_value_store.set_unavailable(true);
     let daemon = RunningDaemon::start(stores).await;
     // Give the registration loop time for several attempts.
@@ -293,7 +310,7 @@ async fn daemon_is_alive_but_not_ready_while_the_metadata_store_is_down() {
 /// Writers that already know the replica keep using it during a metadata outage.
 #[tokio::test]
 async fn daemon_serves_requests_while_the_metadata_store_is_down() {
-    let stores = Stores::new();
+    let stores = Stores::with_a_used_data_directory().await;
     stores.key_value_store.set_unavailable(true);
     let daemon = RunningDaemon::start(stores).await;
 
@@ -305,7 +322,7 @@ async fn daemon_serves_requests_while_the_metadata_store_is_down() {
 
 #[tokio::test]
 async fn daemon_becomes_ready_when_the_metadata_store_returns() {
-    let stores = Stores::new();
+    let stores = Stores::with_a_used_data_directory().await;
     stores.key_value_store.set_unavailable(true);
     let daemon = RunningDaemon::start(stores).await;
     daemon.wait_for_readiness_status(503).await;
@@ -318,7 +335,7 @@ async fn daemon_becomes_ready_when_the_metadata_store_returns() {
 
 #[tokio::test]
 async fn failed_registrations_are_visible_in_the_metrics() {
-    let stores = Stores::new();
+    let stores = Stores::with_a_used_data_directory().await;
     stores.key_value_store.set_unavailable(true);
     let daemon = RunningDaemon::start(stores).await;
     sleep(REGISTRATION_INTERVAL * 4).await;
@@ -434,6 +451,60 @@ async fn drain_reaches_the_registry() {
     let record = daemon.wait_for_registration(draining_registration).await;
     assert!(record.is_draining);
     daemon.terminate().await.expect("a clean stop");
+}
+
+/// A disk that was replaced comes back empty, with a configuration that still proposes the old name.
+#[tokio::test]
+async fn daemon_refuses_an_empty_data_directory_under_a_registered_identity() {
+    let first_stores = Stores::new();
+    let key_value_store = first_stores.key_value_store.clone();
+    let first_daemon = RunningDaemon::start(first_stores).await;
+    first_daemon.wait_for_registration(any_registration).await;
+    first_daemon.terminate().await.expect("a clean stop");
+    let stores_with_a_new_disk = Stores {
+        disk: MemoryDisk::new(),
+        key_value_store,
+        object_store: MemoryArtifactStore::new(),
+    };
+
+    let outcome = run_until_it_stops(stores_with_a_new_disk).await;
+
+    assert!(
+        matches!(outcome, Err(DaemonError::IdentityAlreadyKnown { .. })),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn refused_daemon_writes_nothing_to_the_empty_data_directory() {
+    use bitacora_segment::Disk as _;
+
+    let first_stores = Stores::new();
+    let key_value_store = first_stores.key_value_store.clone();
+    let first_daemon = RunningDaemon::start(first_stores).await;
+    first_daemon.wait_for_registration(any_registration).await;
+    first_daemon.terminate().await.expect("a clean stop");
+    let new_disk = MemoryDisk::new();
+    let stores_with_a_new_disk = Stores {
+        disk: new_disk.clone(),
+        key_value_store,
+        object_store: MemoryArtifactStore::new(),
+    };
+
+    let _refused = run_until_it_stops(stores_with_a_new_disk).await;
+
+    assert_eq!(new_disk.list_files().await.expect("lists"), Vec::<String>::new());
+}
+
+/// Nobody can say whether the identity is new, so the daemon does not start; its supervisor tries again.
+#[tokio::test]
+async fn daemon_on_an_empty_data_directory_does_not_start_while_the_metadata_store_is_down() {
+    let stores = Stores::new();
+    stores.key_value_store.set_unavailable(true);
+
+    let outcome = run_until_it_stops(stores).await;
+
+    assert!(matches!(outcome, Err(DaemonError::CannotStart { .. })), "{outcome:?}");
 }
 
 /// The identity belongs to the data directory, whatever the configuration proposes.

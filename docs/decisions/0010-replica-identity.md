@@ -40,3 +40,10 @@ replica the caller meant cannot be reached.
   are registered at one address. Placement must not take them for two
   machines, which is what failure-domain labels down to the host are for;
   a deployment that leaves them out loses that protection.
+- The rule that a lost disk comes back under a new identity was first left
+  to whoever starts the process: the test cluster and the simulator rename
+  a node that loses its disk, and the Helm chart puts the pod's UID in the
+  name. A daemon on a machine has a configuration file that keeps
+  proposing the old name. `bita-replica` therefore refuses to open an empty
+  data directory under an identity that the registry or any stream record
+  names, and does not open one at all while it cannot ask.

@@ -38,7 +38,7 @@ for every process of a cluster.
 | --- | --- | --- |
 | 0 | Stopped on SIGTERM or SIGINT, printed help or version, or checked a valid configuration | Nothing |
 | 1 | Could not start, or had to stop (the disk refused a write, a port is taken) | Restart it |
-| 2 | The command line or the configuration file is wrong | Wait for a person |
+| 2 | The command line or the configuration file is wrong, or the data directory is empty and the cluster already knows the proposed `replica_id` | Wait for a person |
 
 The observability port serves `/metrics`, `/healthz` and `/readyz`. `docs/operations/metrics.md` lists
 the metrics.
@@ -47,9 +47,9 @@ the metrics.
 
 **Ready means registered.** `/readyz` answers 200 once the first registration reached the metadata
 store: from then on writers and the controller can find the replica. It answers 503 again as soon as
-the replica starts to shut down. If etcd is down when the replica starts, the replica serves what it
-has to clients that already know it, keeps trying to register, and is not ready until it succeeds. A
-replica that loses etcd later stays ready.
+the replica starts to shut down. If etcd is down when a replica starts on a data directory that has
+its identity, the replica serves what it has to clients that already know it, keeps trying to register,
+and is not ready until it succeeds. A replica that loses etcd later stays ready.
 
 **The registration survives a clean shutdown.** A replica that restarts for an upgrade comes back
 with the same identity and the same data. Removing its registration on the way out would tell the
@@ -63,6 +63,14 @@ the data directory, and the controller repairs what is short.
 **The identity belongs to the data directory.** `replica_id` in the configuration is only a proposal
 for an empty directory. A directory that was used before keeps the identity it has, and that is the
 one the daemon serves and registers under.
+
+**An empty directory never takes a known identity.** A directory that lost its contents holds none of
+the copies its replica acknowledged, and a configuration that was not changed proposes exactly that
+replica's name. Before it opens an empty directory, the daemon asks the metadata store whether the
+cluster knows the proposed identity, as a registered replica or as the holder of a copy or a standby of
+any stream. If it does, the daemon exits with code 2. If the metadata store cannot be asked, it exits
+with code 1 and its supervisor tries again: an empty directory needs the metadata store to start, a
+used one does not.
 
 **Shutdown is ordered and bounded.** Stop the loops, report not ready, stop the gRPC server (requests
 in flight get ten seconds), stop the replica, stop the endpoint.
@@ -85,6 +93,7 @@ process shows is covered by the test of a cluster of real processes.
 | `src/main.rs` | The entry point and the exit codes |
 | `src/config.rs` | The configuration file and its validation |
 | `src/daemon.rs` | Wiring, the wait for a reason to stop, and the shutdown |
+| `src/identity.rs` | The check that an empty data directory does not take a known identity |
 | `src/registration.rs` | The registration and its renewal loop |
 | `src/scrub.rs` | The scrub schedule |
 | `src/metrics.rs` | The daemon's own metrics |

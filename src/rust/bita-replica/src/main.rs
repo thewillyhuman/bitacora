@@ -54,6 +54,7 @@
 
 mod config;
 mod daemon;
+mod identity;
 mod metrics;
 mod registration;
 mod scrub;
@@ -74,6 +75,10 @@ const DAEMON_NAME: &str = "bita-replica";
 
 /// The exit code for a wrong command line or configuration file: restarting cannot help.
 const EXIT_CODE_BAD_CONFIGURATION: u8 = 2;
+
+/// The exit code for a failure that starting again may get past: a socket in use, a disk that refused a
+/// write, a metadata store that cannot be reached when it is needed.
+const EXIT_CODE_FAILURE: u8 = 1;
 
 /// The entry point: understands the command line and runs the daemon.
 fn main() -> ExitCode {
@@ -168,7 +173,21 @@ fn start(config_path: &Path) -> ExitCode {
         }
         Err(daemon_error) => {
             tracing::error!(%daemon_error, "replica stopped with an error");
-            ExitCode::FAILURE
+            ExitCode::from(exit_code_of(&daemon_error))
+        }
+    }
+}
+
+/// The exit code the daemon ends with after `daemon_error`.
+///
+/// A supervisor restarts the daemon after [`EXIT_CODE_FAILURE`] and must not after
+/// [`EXIT_CODE_BAD_CONFIGURATION`]: an identity the cluster already knows stays known however often the
+/// daemon starts, until the configuration proposes another.
+const fn exit_code_of(daemon_error: &DaemonError) -> u8 {
+    match daemon_error {
+        DaemonError::IdentityAlreadyKnown { .. } => EXIT_CODE_BAD_CONFIGURATION,
+        DaemonError::CannotStart { .. } | DaemonError::StorageFailed { .. } | DaemonError::ServerStopped { .. } => {
+            EXIT_CODE_FAILURE
         }
     }
 }
