@@ -15,7 +15,7 @@
 
 use bitacora_meta::CopyRecord;
 use bitacora_replica::ReplicaSettings;
-use bitacora_testkit::Cluster;
+use bitacora_testkit::{Cluster, FailureDomainLayout};
 use bitacora_types::SequenceNumber;
 
 use super::super::test_support::{
@@ -170,11 +170,9 @@ async fn lost_copy_without_a_spare_replica_is_good_again_when_its_replica_return
     assert_eq!(copy_states(&cluster).await, [CopyState::Good; 3]);
 }
 
-/// The failure domains of the six nodes of the zoned cluster: two nodes in each of three zones, each node its own
-/// host. Nodes 1 and 4 share zone 1.
-fn zone_and_host_of(node_number: usize) -> Vec<String> {
-    vec![format!("zone-{}", node_number % 3), format!("host-{node_number}")]
-}
+/// The layout of the six nodes of the zoned cluster: two nodes in each of three zones, each node its own host.
+/// Nodes 1 and 4 share zone 1.
+const THREE_ZONES: FailureDomainLayout = FailureDomainLayout::HostsInZones { zone_count: 3 };
 
 #[tokio::test(start_paused = true)]
 async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
@@ -182,7 +180,7 @@ async fn replacement_copy_stays_in_the_failure_domain_that_lost_one() {
         preallocated_segment_bytes: SMALL_SEGMENT_FILE_BYTES,
         ..ReplicaSettings::default()
     };
-    let cluster = Cluster::start_with(6, small_segment_files, zone_and_host_of).await;
+    let cluster = Cluster::start_with(6, small_segment_files, THREE_ZONES).await;
     create_stream(&cluster).await;
     run_pass(&cluster).await;
     let writer = open_writer(&cluster).await;
