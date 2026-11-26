@@ -2,44 +2,56 @@
 //!
 //! # Why this file exists
 //!
-//! `bitacora_meta::MetadataStore` is written once against the key-value
-//! interface and trusts every backend to behave the same. The in-memory
-//! backend is tested for a list of behaviours in
-//! `bitacora-meta/src/memory_store.rs`; this file checks the same list, by
-//! the same test names, on etcd. If the two lists pass, code that works in
-//! the simulator works on a real cluster.
+//! `bitacora_meta::MetadataStore` is written once against the key-value interface and trusts every backend to behave
+//! the same. The in-memory backend is tested for a list of behaviours in `bitacora-meta/src/memory_store_test.rs`; this
+//! file checks the same list, by the same test names, on etcd. If the two lists pass, code that works in the simulator
+//! works on a real cluster.
 //!
 //! # What it contains
 //!
 //! - Reads and writes: values, revisions, deletion.
-//! - Conditional transactions: absence and revision conditions, atomicity,
-//!   and two writers racing for one key.
-//! - Listings: prefix, order, and a listing larger than the default
-//!   response limit of gRPC.
-//! - Key prefixes: stores with different prefixes are isolated, stores with
-//!   the same prefix share their data.
+//! - Conditional transactions: absence and revision conditions, atomicity, and two writers racing for one key.
+//! - Listings: prefix, order, and a listing larger than the default response limit of gRPC.
+//! - Key prefixes: stores with different prefixes are isolated, stores with the same prefix share their data.
 //! - What etcd refuses that the in-memory store accepts.
 //!
 //! # How the fixtures work
 //!
-//! Every test asks for the shared etcd and a store under a fresh key
-//! prefix, so it starts empty and can use the same key names as the others.
-//! A test returns at once when no etcd program is available (see
-//! `etcd_process.rs`).
+//! Every test asks for the shared etcd and a store under a fresh key prefix, so it starts empty and can use the same
+//! key names as the others. A test returns at once when no etcd program is available (see `etcd_process.rs`). The
+//! writes that set a test up come from `writes.rs`; `create_orders_stream` is the one conditional write that two
+//! tasks of a test send at the same time.
 
-use bitacora_meta::{Condition, KeyValueStore, Mutation, Revision, TransactionOutcome};
+use bitacora_meta::{Condition, KeyValueStore, Mutation, Revision, StoreUnavailable, TransactionOutcome};
+use bitacora_meta_etcd::EtcdKeyValueStore;
 use bytes::Bytes;
 
 use crate::etcd_process::shared_etcd;
 use crate::writes::{delete_mutation, put, put_mutation, revision_of};
 
-/// The size of one value in the test of a large listing. Below the 1.5 MiB
-/// that etcd accepts in one request.
+/// The size of one value in the test of a large listing. Below the 1.5 MiB that etcd accepts in one request.
 const LARGE_VALUE_BYTES: usize = 1024 * 1024;
 
-/// How many large values that test writes. Together they are larger than
-/// the 4 MiB a gRPC client accepts in one response by default.
+/// How many large values that test writes. Together they are larger than the 4 MiB a gRPC client accepts in one
+/// response by default.
 const LARGE_VALUE_COUNT: usize = 5;
+
+/// Writes `value` under `streams/orders`, on the condition that the key does not exist yet.
+///
+/// # Errors
+///
+/// Fails with [`StoreUnavailable`] when etcd cannot be reached.
+async fn create_orders_stream(
+    store: &EtcdKeyValueStore,
+    value: &'static [u8],
+) -> Result<TransactionOutcome, StoreUnavailable> {
+    let is_absent = Condition::IsAbsent {
+        key: "streams/orders".to_owned(),
+    };
+    store
+        .transact(vec![is_absent], vec![put_mutation("streams/orders", value)])
+        .await
+}
 
 // ---- reads and writes ----
 
@@ -61,9 +73,9 @@ async fn written_value_is_read_back() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
-    let stored = store.get("streams/orders").await.expect("get");
+    let stored = store.get("streams/orders").await.expect("etcd is reachable");
 
     assert_eq!(stored.map(|stored| stored.value), Some(Bytes::from_static(b"v1")));
 }
@@ -74,9 +86,9 @@ async fn empty_value_is_read_back_as_present() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"").await.expect("put");
+    put(&store, "streams/orders", b"").await.expect("etcd is reachable");
 
-    let stored = store.get("streams/orders").await.expect("get");
+    let stored = store.get("streams/orders").await.expect("etcd is reachable");
 
     assert_eq!(stored.map(|stored| stored.value), Some(Bytes::new()));
 }
@@ -87,10 +99,10 @@ async fn every_write_changes_the_revision() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
     let first_revision = revision_of(&store, "streams/orders").await;
 
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     assert!(revision_of(&store, "streams/orders").await > first_revision);
 }
@@ -101,12 +113,12 @@ async fn deleted_key_reads_as_absent() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     store
         .transact(Vec::new(), vec![delete_mutation("streams/orders")])
         .await
-        .expect("delete");
+        .expect("etcd is reachable");
 
     assert_eq!(store.get("streams/orders").await, Ok(None));
 }
@@ -117,14 +129,14 @@ async fn recreated_key_never_repeats_a_revision() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
     let first_revision = revision_of(&store, "streams/orders").await;
     store
         .transact(Vec::new(), vec![delete_mutation("streams/orders")])
         .await
-        .expect("delete");
+        .expect("etcd is reachable");
 
-    put(&store, "streams/orders", b"v2").await.expect("put");
+    put(&store, "streams/orders", b"v2").await.expect("etcd is reachable");
 
     assert!(revision_of(&store, "streams/orders").await > first_revision);
 }
@@ -151,7 +163,7 @@ async fn transaction_applies_when_the_key_is_unchanged() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
     let read_revision = revision_of(&store, "streams/orders").await;
 
     let outcome = store
@@ -173,9 +185,11 @@ async fn transaction_fails_when_someone_wrote_in_between() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
     let read_revision = revision_of(&store, "streams/orders").await;
-    put(&store, "streams/orders", b"other").await.expect("put");
+    put(&store, "streams/orders", b"other")
+        .await
+        .expect("etcd is reachable");
 
     let outcome = store
         .transact(
@@ -196,7 +210,7 @@ async fn failed_transaction_changes_nothing() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     store
         .transact(
@@ -209,13 +223,10 @@ async fn failed_transaction_changes_nothing() {
             ],
         )
         .await
-        .expect("transact");
+        .expect("etcd is reachable");
 
-    assert_eq!(
-        store.list("streams/").await.expect("list").len(),
-        1,
-        "the failed transaction must not create streams/other"
-    );
+    let listed = store.list("streams/").await.expect("etcd is reachable");
+    assert_eq!(listed.len(), 1, "the failed transaction must not create streams/other");
 }
 
 #[tokio::test]
@@ -243,7 +254,7 @@ async fn absence_condition_fails_for_an_existing_key() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     let outcome = store
         .transact(
@@ -257,19 +268,18 @@ async fn absence_condition_fails_for_an_existing_key() {
     assert_eq!(outcome, Ok(TransactionOutcome::ConditionFailed));
 }
 
-/// A key that was deleted is absent again, although etcd still remembers
-/// revisions for it.
+/// A key that was deleted is absent again, although etcd still remembers revisions for it.
 #[tokio::test]
 async fn absence_condition_holds_for_a_deleted_key() {
     let Some(etcd) = shared_etcd().await else {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
     store
         .transact(Vec::new(), vec![delete_mutation("streams/orders")])
         .await
-        .expect("delete");
+        .expect("etcd is reachable");
 
     let outcome = store
         .transact(
@@ -303,8 +313,7 @@ async fn revision_condition_fails_for_a_missing_key() {
     assert_eq!(outcome, Ok(TransactionOutcome::ConditionFailed));
 }
 
-/// etcd reports revision zero for a key that does not exist, so a naive
-/// comparison against zero would hold here.
+/// etcd reports revision zero for a key that does not exist, so a naive comparison against zero would hold here.
 #[tokio::test]
 async fn revision_zero_condition_fails_for_a_missing_key() {
     let Some(etcd) = shared_etcd().await else {
@@ -325,15 +334,14 @@ async fn revision_zero_condition_fails_for_a_missing_key() {
     assert_eq!(outcome, Ok(TransactionOutcome::ConditionFailed));
 }
 
-/// A revision too large for etcd to have assigned must fail the condition,
-/// not the request.
+/// A revision too large for etcd to have assigned must fail the condition, not the request.
 #[tokio::test]
 async fn revision_etcd_cannot_assign_fails_the_condition() {
     let Some(etcd) = shared_etcd().await else {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     let outcome = store
         .transact(
@@ -354,7 +362,7 @@ async fn transaction_needs_every_condition_to_hold() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     let outcome = store
         .transact(
@@ -383,32 +391,31 @@ async fn transaction_writes_all_its_keys_at_one_revision() {
     store
         .transact(Vec::new(), vec![put_mutation("a", b"1"), put_mutation("b", b"2")])
         .await
-        .expect("transact");
+        .expect("etcd is reachable");
 
     assert_eq!(revision_of(&store, "a").await, revision_of(&store, "b").await);
 }
 
-/// Two writers that both saw the key absent: etcd must let exactly one of
-/// them create it. This is the race every epoch claim depends on.
+/// Two writers that both saw the key absent: etcd must let exactly one of them create it. This is the race every epoch
+/// claim depends on.
 #[tokio::test]
 async fn only_one_of_two_racing_creations_applies() {
     let Some(etcd) = shared_etcd().await else {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    let create = |value: &'static [u8]| {
-        store.transact(
-            vec![Condition::IsAbsent {
-                key: "streams/orders".to_owned(),
-            }],
-            vec![put_mutation("streams/orders", value)],
-        )
-    };
 
-    let (first, second) = tokio::join!(create(b"first"), create(b"second"));
+    let (first_outcome, second_outcome) = tokio::join!(
+        create_orders_stream(&store, b"first"),
+        create_orders_stream(&store, b"second"),
+    );
 
+    let outcomes = [
+        first_outcome.expect("etcd is reachable"),
+        second_outcome.expect("etcd is reachable"),
+    ];
     let mut applied_count = 0;
-    for outcome in [first.expect("transact"), second.expect("transact")] {
+    for outcome in outcomes {
         if outcome == TransactionOutcome::Applied {
             applied_count += 1;
         }
@@ -425,10 +432,10 @@ async fn list_returns_only_the_prefix_sorted_by_key() {
     };
     let store = etcd.store_in_fresh_namespace().await;
     for key in ["streams/b", "replicas/x", "streams/a", "streamsX"] {
-        put(&store, key, b"v").await.expect("put");
+        put(&store, key, b"v").await.expect("etcd is reachable");
     }
 
-    let listed = store.list("streams/").await.expect("list");
+    let listed = store.list("streams/").await.expect("etcd is reachable");
 
     let listed_keys: Vec<String> = listed.into_iter().map(|(key, _stored)| key).collect();
     assert_eq!(listed_keys, ["streams/a", "streams/b"]);
@@ -440,11 +447,11 @@ async fn list_returns_each_value_with_its_revision() {
         return;
     };
     let store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
-    let read = store.get("streams/orders").await.expect("get");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
+    let read = store.get("streams/orders").await.expect("etcd is reachable");
     let read = read.expect("the key exists");
 
-    let listed = store.list("streams/").await.expect("list");
+    let listed = store.list("streams/").await.expect("etcd is reachable");
 
     assert_eq!(listed, [("streams/orders".to_owned(), read)]);
 }
@@ -461,8 +468,8 @@ async fn list_of_a_prefix_without_keys_is_empty() {
     assert_eq!(listed, Ok(Vec::new()));
 }
 
-/// A listing is one response. The client's default limit for a response is
-/// 4 MiB, which a few hundred streams with long segment lists would pass.
+/// A listing is one response. The client's default limit for a response is 4 MiB, which a few hundred streams with long
+/// segment lists would pass.
 #[tokio::test]
 async fn listing_larger_than_the_default_response_limit_is_read() {
     let Some(etcd) = shared_etcd().await else {
@@ -474,10 +481,13 @@ async fn listing_larger_than_the_default_response_limit_is_read() {
             key: format!("streams/{value_number}"),
             value: Bytes::from(vec![b'x'; LARGE_VALUE_BYTES]),
         };
-        store.transact(Vec::new(), vec![mutation]).await.expect("put");
+        store
+            .transact(Vec::new(), vec![mutation])
+            .await
+            .expect("etcd is reachable");
     }
 
-    let listed = store.list("streams/").await.expect("list");
+    let listed = store.list("streams/").await.expect("etcd is reachable");
 
     assert_eq!(listed.len(), LARGE_VALUE_COUNT);
 }
@@ -491,7 +501,7 @@ async fn stores_with_different_prefixes_do_not_read_each_other() {
     };
     let store = etcd.store_in_fresh_namespace().await;
     let other_store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     let stored = other_store.get("streams/orders").await;
 
@@ -505,15 +515,14 @@ async fn stores_with_different_prefixes_do_not_list_each_other() {
     };
     let store = etcd.store_in_fresh_namespace().await;
     let other_store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     let listed = other_store.list("").await;
 
     assert_eq!(listed, Ok(Vec::new()));
 }
 
-/// The absence of a key is judged inside the store's own prefix: the same
-/// key under another prefix does not count.
+/// The absence of a key is judged inside the store's own prefix: the same key under another prefix does not count.
 #[tokio::test]
 async fn conditions_do_not_see_keys_of_another_prefix() {
     let Some(etcd) = shared_etcd().await else {
@@ -521,7 +530,7 @@ async fn conditions_do_not_see_keys_of_another_prefix() {
     };
     let store = etcd.store_in_fresh_namespace().await;
     let other_store = etcd.store_in_fresh_namespace().await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
     let outcome = other_store
         .transact(
@@ -535,8 +544,7 @@ async fn conditions_do_not_see_keys_of_another_prefix() {
     assert_eq!(outcome, Ok(TransactionOutcome::Applied));
 }
 
-/// Two processes configured alike are two stores with one prefix, and they
-/// must see one set of data.
+/// Two processes configured alike are two stores with one prefix, and they must see one set of data.
 #[tokio::test]
 async fn stores_with_the_same_prefix_share_their_data() {
     let Some(etcd) = shared_etcd().await else {
@@ -544,19 +552,18 @@ async fn stores_with_the_same_prefix_share_their_data() {
     };
     let store = etcd.store_in("/shared-by-two-stores/").await;
     let other_store = etcd.store_in("/shared-by-two-stores/").await;
-    put(&store, "streams/orders", b"v1").await.expect("put");
+    put(&store, "streams/orders", b"v1").await.expect("etcd is reachable");
 
-    let stored = other_store.get("streams/orders").await.expect("get");
+    let stored = other_store.get("streams/orders").await.expect("etcd is reachable");
 
     assert_eq!(stored.map(|stored| stored.value), Some(Bytes::from_static(b"v1")));
 }
 
 // ---- what etcd refuses ----
 
-/// The in-memory store applies such a transaction in order; etcd refuses
-/// it. Nothing in bitacora writes a key twice in one transaction, and this
-/// test pins what would happen if something did: a clear failure, not a
-/// silent difference between the two backends.
+/// The in-memory store applies such a transaction in order; etcd refuses it. Nothing in bitacora writes a key twice in
+/// one transaction, and this test pins what would happen if something did: a clear failure, not a silent difference
+/// between the two backends.
 #[tokio::test]
 async fn transaction_that_writes_one_key_twice_is_refused() {
     let Some(etcd) = shared_etcd().await else {
