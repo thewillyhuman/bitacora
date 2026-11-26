@@ -76,6 +76,9 @@ caller reads the record again and decides from what it finds.
 - A program that changes a record writes back the fields it knows. A field
   it does not know is lost on the way, which is why a field that must not
   be lost is introduced together with a higher `schema_version`.
+- A higher `schema_version` therefore takes two releases: the first one can
+  read it, and the next one writes it. Programs of the first release keep
+  working while those of the second are rolled out.
 
 ## Stream record
 

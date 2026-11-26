@@ -7,6 +7,7 @@
 //!   segment starts.
 //! - [`RetentionPolicy`], [`ReplicaRecord::is_alive`] and [`ReplicaRecord::used_percent`].
 //! - That a stream record survives its JSON encoding and that copy states are stored as words.
+//! - That a record written under a newer schema version is refused, whichever of the three versioned records it is.
 //!
 //! The exact JSON of every record is held to golden texts in `tests/records_golden_test.rs`.
 //!
@@ -15,7 +16,8 @@
 //! `segment` builds a segment from three numbers: its identifier, its first sequence number and, if it is sealed, its
 //! sealed end. `stream` wraps a list of such segments in a stream record whose other fields are the ones a new stream
 //! has. `replica` is a replica that last renewed its registration at ten seconds past the epoch and uses three quarters
-//! of its disk.
+//! of its disk. `checkpoint` is a materializer that has committed nothing yet. `stored_by_a_newer_program` is the JSON
+//! of a record with its schema version raised by one, which is all an older program can know about a newer record.
 
 use super::*;
 
@@ -77,6 +79,27 @@ fn replica() -> ReplicaRecord {
         is_draining: false,
         heartbeat_at: HEARTBEAT_AT,
     }
+}
+
+/// A materializer called "pages" that has committed no checkpoint.
+fn checkpoint() -> CheckpointRecord {
+    CheckpointRecord {
+        schema_version: RECORD_SCHEMA_VERSION,
+        materializer: "pages".to_owned(),
+        checkpoint: SequenceNumber::ZERO,
+        fencing_token: 0,
+        manifest: None,
+    }
+}
+
+/// The schema version right after the newest one this build knows.
+const NEWER_SCHEMA_VERSION: u32 = RECORD_SCHEMA_VERSION + 1;
+
+/// The JSON of `record` as a newer program would have stored it: the same fields under [`NEWER_SCHEMA_VERSION`].
+fn stored_by_a_newer_program<Record: Serialize>(record: &Record) -> Vec<u8> {
+    let mut stored = serde_json::to_value(record).expect("records serialize to JSON");
+    stored["schema_version"] = NEWER_SCHEMA_VERSION.into();
+    serde_json::to_vec(&stored).expect("JSON values serialize")
 }
 
 /// The identifier of the segment that `stream` says holds `sequence`, if any.
@@ -279,4 +302,44 @@ fn copy_states_are_stored_as_readable_words() {
     let serialized = serde_json::to_string(&CopyState::Unverified).expect("copy states serialize to JSON");
 
     assert_eq!(serialized, "\"unverified\"");
+}
+
+/// A newer record may hold fields this build would drop when it writes the record back, so it is not read at all.
+#[test]
+fn stream_record_of_a_newer_schema_version_is_refused() {
+    let stored = stored_by_a_newer_program(&stream(Vec::new()));
+
+    let decoded = serde_json::from_slice::<StreamRecord>(&stored);
+
+    assert!(decoded.is_err(), "{decoded:?}");
+}
+
+#[test]
+fn checkpoint_record_of_a_newer_schema_version_is_refused() {
+    let stored = stored_by_a_newer_program(&checkpoint());
+
+    let decoded = serde_json::from_slice::<CheckpointRecord>(&stored);
+
+    assert!(decoded.is_err(), "{decoded:?}");
+}
+
+#[test]
+fn replica_record_of_a_newer_schema_version_is_refused() {
+    let stored = stored_by_a_newer_program(&replica());
+
+    let decoded = serde_json::from_slice::<ReplicaRecord>(&stored);
+
+    assert!(decoded.is_err(), "{decoded:?}");
+}
+
+/// The refusal is what an operator sees during an upgrade done in the wrong order, so it says which version the record
+/// has and which one the program stops at.
+#[test]
+fn refusal_of_a_newer_record_names_its_version_and_the_newest_known_one() {
+    let stored = stored_by_a_newer_program(&replica());
+
+    let refusal = serde_json::from_slice::<ReplicaRecord>(&stored).expect_err("a newer record is refused");
+
+    let expected = format!("schema version {NEWER_SCHEMA_VERSION} is newer than {RECORD_SCHEMA_VERSION}");
+    assert!(refusal.to_string().contains(&expected), "{refusal}");
 }

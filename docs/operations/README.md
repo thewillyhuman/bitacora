@@ -124,6 +124,11 @@ Kubernetes `helm upgrade` restarts one replica at a time and waits for each to b
 This order is the design's. No test of this repository upgrades a cluster from one version to another
 yet, because there is only one version: read the changelog of a release before you apply it.
 
+Do not skip a release that the changelog marks as raising the schema version of the metadata records. A
+program refuses a record of a version it does not read (`cannot be decoded: schema version … is newer than
+…`), so every program must run the release that reads the new version before any runs the one that writes
+it (`docs/protocol/metadata.md`, "Writing and reading a record").
+
 ### A replica's machine or disk failed
 
 1. Decide whether it comes back with its data. If it does (a reboot, a network fault), wait: after five

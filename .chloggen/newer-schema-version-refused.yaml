@@ -1,0 +1,4 @@
+change_type: bug_fix
+component: meta
+note: "A program refuses a metadata record whose schema_version is newer than the newest it reads, as docs/protocol/metadata.md says. It used to read the record without the fields it did not know, and an update would have written it back without them."
+issues: [2]

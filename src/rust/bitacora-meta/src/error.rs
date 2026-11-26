@@ -122,7 +122,8 @@ pub enum MetaError {
         /// The materializer's current token.
         current_token: u64,
     },
-    /// A stored record cannot be decoded.
+    /// A stored record cannot be decoded: it is damaged, or a newer program wrote it under a schema version this one
+    /// does not read.
     #[error("record at {key:?} cannot be decoded: {reason}")]
     CorruptRecord {
         /// The key of the record.

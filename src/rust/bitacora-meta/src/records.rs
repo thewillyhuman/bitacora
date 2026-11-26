@@ -28,6 +28,10 @@
 //! migrated lazily, the next time they are written. A field added later is optional when read, so that a record written
 //! by an older program still decodes.
 //!
+//! A build refuses a record whose schema version is newer than [`RECORD_SCHEMA_VERSION`]. It would read such a record
+//! without the fields it does not know, and writing it back would drop them and put the older version on it. So a
+//! version is raised in two releases: the first can read the new version, the next one writes it.
+//!
 //! A stream's checkpoints are not part of its record. They have keys of their own, so that a materializer committing a
 //! checkpoint never contends with the writer rolling a segment.
 //!
@@ -40,6 +44,7 @@
 //! - A stream's segments are listed oldest first, and at most the last one is open.
 //! - Segment identifiers within a stream only grow: `next_segment_id` is above every identifier that was ever used.
 //! - A stream's epoch, its low-water mark and a materializer's checkpoint never decrease.
+//! - A decoded record never has a schema version above [`RECORD_SCHEMA_VERSION`].
 //! - Nothing here does I/O or reads a clock.
 //!
 //! # See also
@@ -55,10 +60,27 @@ use bitacora_types::replica_api::SegmentDescriptor;
 use bitacora_types::{
     Epoch, ReplicaId, ReplicationSettings, SegmentAddress, SegmentId, SequenceNumber, StreamId, Timestamp,
 };
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// The schema version this build writes into every record that carries one.
+/// The schema version this build writes into every record that carries one, and the newest one it reads.
 pub const RECORD_SCHEMA_VERSION: u32 = 1;
+
+/// Decodes the schema version of a record, and refuses one that is newer than [`RECORD_SCHEMA_VERSION`].
+///
+/// Every record that carries a schema version decodes the field through this function, so no reader in any program can
+/// take a newer record for one it understands. See the file header for why that matters.
+fn deserialize_known_schema_version<'de, RecordDeserializer: Deserializer<'de>>(
+    deserializer: RecordDeserializer,
+) -> Result<u32, RecordDeserializer::Error> {
+    let schema_version = u32::deserialize(deserializer)?;
+    if schema_version > RECORD_SCHEMA_VERSION {
+        return Err(RecordDeserializer::Error::custom(format!(
+            "schema version {schema_version} is newer than {RECORD_SCHEMA_VERSION}, the newest this program reads"
+        )));
+    }
+    Ok(schema_version)
+}
 
 /// The share of a disk, in percent, that is in use when all of it is.
 const FULL_PERCENT: u8 = 100;
@@ -539,7 +561,9 @@ impl SegmentRecord {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamRecord {
-    /// The schema version the record was written with.
+    /// The schema version the record was written with. Never newer than [`RECORD_SCHEMA_VERSION`] in a record that
+    /// was decoded: a newer one is refused.
+    #[serde(deserialize_with = "deserialize_known_schema_version")]
     pub schema_version: u32,
     /// The stream's permanent identifier. Never reused, also after the stream is deleted.
     pub stream_id: StreamId,
@@ -733,7 +757,9 @@ impl StreamRecord {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecord {
-    /// The schema version the record was written with.
+    /// The schema version the record was written with. Never newer than [`RECORD_SCHEMA_VERSION`] in a record that
+    /// was decoded: a newer one is refused.
+    #[serde(deserialize_with = "deserialize_known_schema_version")]
     pub schema_version: u32,
     /// The materializer's name, unique within its stream.
     pub materializer: String,
@@ -771,7 +797,9 @@ pub struct CheckpointRecord {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaRecord {
-    /// The schema version the record was written with.
+    /// The schema version the record was written with. Never newer than [`RECORD_SCHEMA_VERSION`] in a record that
+    /// was decoded: a newer one is refused.
+    #[serde(deserialize_with = "deserialize_known_schema_version")]
     pub schema_version: u32,
     /// The identity of the replica's data directory.
     pub replica_id: ReplicaId,

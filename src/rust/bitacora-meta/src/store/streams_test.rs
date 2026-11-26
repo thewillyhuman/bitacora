@@ -3,9 +3,10 @@
 //! # What is covered
 //!
 //! - Creation: what a new stream looks like, that identifiers are distinct, and which creations are refused.
-//! - Reads: a missing stream, a listing, and an unavailable store.
+//! - Reads: a missing stream, a listing, an unavailable store, and a record written under a newer schema version.
 //! - `update_stream`: what it returns, that a change that changes nothing writes nothing, that an aborted change leaves
-//!   the record alone, and that it gives up when it never wins.
+//!   the record alone, that it gives up when it never wins, and that it does not touch a record written under a newer
+//!   schema version.
 //! - Deletion: the record and its checkpoints go together, a note is left until it is forgotten, and the name is free
 //!   at once.
 //!
@@ -15,8 +16,10 @@
 //! hands out the in-memory backend, to read revisions and to simulate an outage;
 //! `store_that_loses_every_conditional_write` is a store on which no read-modify-write wins.
 
+use bytes::Bytes;
+
 use super::*;
-use crate::key_value::{KeyValueStore, Revision};
+use crate::key_value::{KeyValueStore, Mutation, Revision};
 use crate::keys::MAX_NAME_LENGTH_BYTES;
 use crate::memory_store::MemoryKeyValueStore;
 use crate::store::test_support::{
@@ -32,6 +35,28 @@ async fn stream_record_revision(key_value_store: &MemoryKeyValueStore) -> Revisi
         .expect("the store is available")
         .expect("the stream record exists");
     stored.revision
+}
+
+/// Stores the record of [`STREAM`] again as a newer program would: the same fields under the next schema version.
+async fn store_stream_record_as_a_newer_program(key_value_store: &MemoryKeyValueStore) {
+    let stored = key_value_store
+        .get("streams/orders")
+        .await
+        .expect("the store is available")
+        .expect("the stream record exists");
+    let mut record: serde_json::Value = serde_json::from_slice(&stored.value).expect("the record is JSON");
+    record["schema_version"] = (RECORD_SCHEMA_VERSION + 1).into();
+    let newer_record = serde_json::to_vec(&record).expect("JSON values serialize");
+    key_value_store
+        .transact(
+            Vec::new(),
+            vec![Mutation::Put {
+                key: "streams/orders".to_owned(),
+                value: Bytes::from(newer_record),
+            }],
+        )
+        .await
+        .expect("the store is available");
 }
 
 #[tokio::test]
@@ -378,4 +403,34 @@ async fn update_fails_while_the_store_is_unavailable() {
     let updated = fixture.store.update_stream(STREAM, |_record| Ok(())).await;
 
     assert!(matches!(updated, Err(MetaError::Unavailable(_))));
+}
+
+#[tokio::test]
+async fn stream_stored_by_a_newer_program_cannot_be_read() {
+    let fixture = empty_store_with_backend();
+    create_stream(&fixture.store, STREAM).await;
+    store_stream_record_as_a_newer_program(&fixture.key_value_store).await;
+
+    let read = fixture.store.get_stream(STREAM).await;
+
+    assert!(matches!(read, Err(MetaError::CorruptRecord { .. })), "{read:?}");
+}
+
+/// Writing the record back would drop the fields only the newer program knows, and put the older version on it.
+#[tokio::test]
+async fn update_does_not_touch_a_stream_stored_by_a_newer_program() {
+    let fixture = empty_store_with_backend();
+    create_stream(&fixture.store, STREAM).await;
+    store_stream_record_as_a_newer_program(&fixture.key_value_store).await;
+    let revision_before = stream_record_revision(&fixture.key_value_store).await;
+
+    let _refused = fixture
+        .store
+        .update_stream(STREAM, |record| {
+            record.truncate_before = Some(SequenceNumber::new(500));
+            Ok(())
+        })
+        .await;
+
+    assert_eq!(stream_record_revision(&fixture.key_value_store).await, revision_before);
 }

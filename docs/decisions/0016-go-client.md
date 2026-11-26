@@ -121,11 +121,12 @@ written into the page by the commit named. None changes the protocol.
 | What a candidate does when there is no standby segment to open | `replication.md` | same |
 | Where a local-directory object store keeps an object | `object-store.md` | `docs: say where a local object store keeps objects` |
 
-One place where the Rust code and a page disagree was found and left as it
-is, because this work does not touch the Rust crates: the conventions say
-that a program refuses a format version newer than it knows, and the Rust
-metadata store does not look at `schema_version` when it reads a record.
-The Go client refuses.
+One place where the Rust code and a page disagreed was found: the
+conventions say that a program refuses a format version newer than it
+knows, and the Rust metadata store did not look at `schema_version` when it
+read a record. The Go client refused from the start. The Rust records
+refuse too since the change that followed this work (`meta: refuse records
+of a newer schema`).
 
 ## Consequences
 
