@@ -27,11 +27,13 @@ go_test(
     srcs = ["gofmt_test.go"],
     data = [
         "gofmt_test.go",
+        "//src/go/bitacora:sources",
         "//src/go/internal/frame:sources",
         "//src/go/internal/metadata:sources",
         "//src/go/internal/replica:sources",
         "//src/go/internal/testcluster:sources",
         "//src/go/internal/tiered:sources",
         "//src/go/internal/wire:sources",
+        "//src/go/interop:sources",
     ],
 )

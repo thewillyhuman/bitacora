@@ -1,0 +1,54 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# The Go client: the package applications import.
+go_library(
+    name = "bitacora",
+    srcs = [
+        "client.go",
+        "doc.go",
+        "errors.go",
+        "objectstore.go",
+        "reader.go",
+    ],
+    importpath = "github.com/thewillyhuman/bitacora/src/go/bitacora",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/go/internal/frame",
+        "//src/go/internal/metadata",
+        "//src/go/internal/replica",
+        "//src/go/internal/tiered",
+        "@io_etcd_go_etcd_client_v3//:client",
+    ],
+)
+
+# The client against a metadata store in memory and fake replicas on
+# loopback ports: every rule and every fault, in a few seconds. The real
+# daemons are in //src/go/interop.
+go_test(
+    name = "bitacora_test",
+    size = "small",
+    srcs = [
+        "client_test.go",
+        "cluster_test.go",
+        "fakereplica_test.go",
+        "objectstore_test.go",
+        "reader_test.go",
+    ],
+    embed = [":bitacora"],
+    deps = [
+        "//src/go/internal/frame",
+        "//src/go/internal/metadata",
+        "//src/go/internal/replica",
+        "//src/go/internal/wire",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//metadata",
+        "@org_golang_google_grpc//status",
+    ],
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

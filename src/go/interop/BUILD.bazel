@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# The Go client against the Rust implementation: a cluster of the real
+# daemons (etcd, three bita-replica, one bita-controller), written and read
+# by the Rust tools on one side and the Go client on the other.
+#
+# Medium because it starts processes and talks to them over localhost. Every
+# test starts a cluster of its own and they run side by side, so the target
+# takes about as long as its slowest test: a few seconds. The timeout of a
+# medium test is kept, so that on a machine slow enough to exhaust a test's
+# own patience it is the test that fails, with the daemons' logs, and not
+# Bazel that kills it without a word.
+go_test(
+    name = "interop_test",
+    size = "medium",
+    srcs = glob(["*_test.go"]),
+    data = [
+        "//src/rust:etcd",
+        "//src/rust/bita",
+        "//src/rust/bita-bench",
+        "//src/rust/bita-controller",
+        "//src/rust/bita-replica",
+    ],
+    env = {
+        "BITA_BENCH_BINARY": "$(rootpath //src/rust/bita-bench)",
+        "BITA_CLI_BINARY": "$(rootpath //src/rust/bita)",
+        "BITA_CONTROLLER_BINARY": "$(rootpath //src/rust/bita-controller)",
+        "BITA_ETCD_BINARY": "$(rootpath //src/rust:etcd)",
+        "BITA_REPLICA_BINARY": "$(rootpath //src/rust/bita-replica)",
+    },
+    deps = [
+        "//src/go/bitacora",
+        "//src/go/internal/metadata",
+        "//src/go/internal/testcluster",
+        "@io_etcd_go_etcd_client_v3//:client",
+    ],
+)
+
+filegroup(
+    name = "sources",
+    testonly = True,
+    srcs = glob(["*.go"]),
+    visibility = ["//src/go:__pkg__"],
+)

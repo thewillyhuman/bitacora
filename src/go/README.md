@@ -13,6 +13,8 @@ One Go module, `github.com/thewillyhuman/bitacora/src/go`.
 
 | Directory | What it is |
 | --- | --- |
+| `bitacora/` | The client: the package applications import |
+| `interop/` | Tests against a cluster of the real Rust daemons and tools |
 | `internal/wire/` | The gRPC stubs, generated from `src/proto` and checked in |
 | `internal/frame/` | The batch frame: how records travel and are stored, under one CRC-32C |
 | `internal/tiered/` | The footer and block index of a segment in the object store |
@@ -21,7 +23,12 @@ One Go module, `github.com/thewillyhuman/bitacora/src/go`.
 | `internal/testcluster/` | Starts etcd and the Rust daemons for tests |
 
 Dependencies point downwards only: `metadata` and `frame` know nothing of
-gRPC, `replica` knows nothing of etcd.
+gRPC, `replica` knows nothing of etcd, and only `bitacora` knows both.
+
+The tests of `bitacora` run against a metadata store in memory and fake
+replicas on loopback ports (`fakereplica_test.go`), which follow the
+replica's rules and fail when a test tells them to. `interop` runs the same
+client against the real thing.
 
 ## Building and testing
 

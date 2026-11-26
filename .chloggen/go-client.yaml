@@ -1,0 +1,4 @@
+change_type: new_component
+component: client
+note: "Add a native Go client in src/go, with a stream reader that reads ranges, follows a stream as records commit and reads tiered segments from the object store."
+issues: [6]
