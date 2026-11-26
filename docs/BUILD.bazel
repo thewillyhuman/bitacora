@@ -1,5 +1,21 @@
 """The documentation. Files that tests read are exported here."""
 
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//hack/tools:defs.bzl", "shellcheck_test")
+
+# The index is written by hand, so a test compares it with the files.
+sh_test(
+    name = "index_test",
+    size = "small",
+    srcs = ["index_test.sh"],
+    data = glob(["**/*.md"]),
+)
+
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = ["index_test.sh"],
+)
+
 # These are checked against the code, so that they cannot fall behind it:
 # the metrics reference by the test of every crate that registers metrics
 # and by the tests of the alert rules and of the dashboard, the page about
