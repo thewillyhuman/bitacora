@@ -1,0 +1,4 @@
+change_type: breaking
+component: materializer
+note: "A catalog entry carries a summary of its artifact, written by the builder, so that a reader can leave an artifact alone without fetching it; the stored catalog is format version 2 and catalogs of version 1 are refused."
+issues: [6]

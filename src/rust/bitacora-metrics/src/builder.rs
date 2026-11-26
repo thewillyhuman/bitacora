@@ -56,6 +56,7 @@ use bitacora_materializer::{
     ArtifactBuilder, ArtifactDescriptor, ArtifactNamespace, CatalogEntry, CompactionPolicy, MaterializerError,
 };
 use bitacora_types::{LogRecord, SequenceRange};
+use bytes::Bytes;
 
 use crate::block::{EncodedBlock, damaged_artifact, decode_whole_block, encode_block};
 use crate::head::SharedHead;
@@ -206,6 +207,7 @@ async fn store_encoded_block(
     Ok(ArtifactDescriptor {
         artifact_key,
         size_bytes,
+        summary: Bytes::new(),
     })
 }
 

@@ -45,16 +45,19 @@ key       length u32 | bytes
 A reader refuses another magic, another format version, a wrong checksum,
 and bytes that do not end where their lengths say.
 
-## Artifact catalog, format version 1
+## Artifact catalog, format version 2
 
 ```text
-catalog  format version u32 = 1 | entry count u32 | entry*
+catalog  format version u32 = 2 | entry count u32 | entry*
 entry    first sequence u64 | last sequence u64 | size u64
-         | key length u32 | key
+         | key length u32 | key | summary length u32 | summary
 ```
 
 - An entry is one artifact: the range of records it covers, both ends
-  included, its size in bytes and its key.
+  included, its size in bytes, its key, and a summary.
+- The summary belongs to the materializer that wrote the artifact: what a
+  reader should know before it fetches anything. It may be empty. The page
+  of each materializer says what its summaries hold.
 - Entries are in log order. Each starts right after the previous one ends.
   Together they cover every record from the first one the materializer
   applied to the checkpoint.

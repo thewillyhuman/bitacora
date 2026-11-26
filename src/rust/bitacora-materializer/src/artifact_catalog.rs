@@ -44,6 +44,11 @@
 //! by remembering the last record it sealed, so that a reader who finds the catalog short of that record
 //! looks again.
 //!
+//! **What a reader knows before it fetches.** A catalog entry holds the range of records an artifact
+//! covers, its key, its size, and a summary: bytes the builder returns with the artifact and only the
+//! builder's readers understand ([`ArtifactDescriptor::summary`]). A query that can tell from the
+//! summary that an artifact holds nothing it wants never fetches a byte of it.
+//!
 //! Compaction is a merge of existing artifacts, not a rebuild from the log. It cannot be a rebuild: the
 //! log below the committed checkpoint may already be truncated, and the artifacts are then the only copy.
 //!
@@ -73,15 +78,21 @@ use crate::contract::{CheckpointManifest, Materializer, MaterializerError};
 use crate::namespace::ArtifactNamespace;
 
 /// The format of the details an artifact catalog puts in its checkpoint manifest.
-const DETAILS_FORMAT_VERSION: u32 = 1;
+const DETAILS_FORMAT_VERSION: u32 = 2;
 
-/// Where one immutable artifact is and how large it is.
+/// Where one immutable artifact is, how large it is, and what its builder says about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactDescriptor {
     /// The artifact's key, as returned by [`ArtifactNamespace::put_artifact`].
     pub artifact_key: String,
     /// The artifact's size. Compaction groups artifacts of similar size.
     pub size_bytes: u64,
+    /// What every reader of the catalog should know about the artifact without fetching it: for
+    /// example the span of time its data covers, so that a query for another time leaves it alone. The
+    /// builder writes it and the builder's readers understand it; the adapter stores it in the catalog
+    /// and never looks inside. Empty if the builder has nothing to say. Keep it small: every summary is
+    /// in every manifest.
+    pub summary: Bytes,
 }
 
 /// One artifact of the catalog and the records it covers.
@@ -176,7 +187,7 @@ impl CompactionPolicy {
 ///         let size_bytes = lines.len() as u64;
 ///         let artifact_key = artifacts.put_artifact("lines", lines).await?;
 ///         self.pending_lines.clear();
-///         Ok(ArtifactDescriptor { artifact_key, size_bytes })
+///         Ok(ArtifactDescriptor { artifact_key, size_bytes, summary: Bytes::new() })
 ///     }
 ///
 ///     async fn merge_artifacts(
@@ -190,7 +201,7 @@ impl CompactionPolicy {
 ///         }
 ///         let size_bytes = merged.len() as u64;
 ///         let artifact_key = artifacts.put_artifact("lines", merged.freeze()).await?;
-///         Ok(ArtifactDescriptor { artifact_key, size_bytes })
+///         Ok(ArtifactDescriptor { artifact_key, size_bytes, summary: Bytes::new() })
 ///     }
 /// }
 /// ```
@@ -471,6 +482,8 @@ fn encode_catalog(entries: &[CatalogEntry]) -> Bytes {
         details.put_u64_le(entry.artifact.size_bytes);
         details.put_u32_le(u32::try_from(entry.artifact.artifact_key.len()).expect("an artifact key is short"));
         details.put_slice(entry.artifact.artifact_key.as_bytes());
+        details.put_u32_le(u32::try_from(entry.artifact.summary.len()).expect("a summary is small"));
+        details.put_slice(&entry.artifact.summary);
     }
     details.freeze()
 }
@@ -524,6 +537,11 @@ pub fn decode_catalog(details: &Bytes) -> Result<Vec<CatalogEntry>, Materializer
         let Ok(artifact_key) = String::from_utf8(unread.split_to(key_bytes).to_vec()) else {
             return Err(invalid("an artifact key is not text"));
         };
+        let summary_bytes = unread.try_get_u32_le().map_err(cut_short)? as usize;
+        if unread.remaining() < summary_bytes {
+            return Err(invalid("it is cut short"));
+        }
+        let summary = unread.split_to(summary_bytes);
         let Ok(covered_range) = SequenceRange::new(first, last) else {
             return Err(invalid("an artifact covers no record"));
         };
@@ -532,6 +550,7 @@ pub fn decode_catalog(details: &Bytes) -> Result<Vec<CatalogEntry>, Materializer
             artifact: ArtifactDescriptor {
                 artifact_key,
                 size_bytes,
+                summary,
             },
         });
     }

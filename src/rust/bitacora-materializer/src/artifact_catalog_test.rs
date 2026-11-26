@@ -6,13 +6,14 @@
 //! - The invariant: the catalog is gapless and without overlap, also after a crash at any point and the
 //!   replay that follows, and the artifacts hold exactly the records their ranges say.
 //! - Compaction: runs of small neighbours are merged, tiers are respected, one merge per checkpoint.
-//! - Restoring, the view, and the catalog as a process that only queries reads it.
+//! - Restoring, the view, and the catalog as a process that only queries reads it, with what the
+//!   builder says about each artifact.
 //! - Failures: a seal that fails keeps the records; a catalog with a gap is refused.
 //!
 //! # How the fixtures work
 //!
-//! [`Sequencer`] is the builder under test. Its artifacts list the sequence number and payload of every
-//! record they were built from, so a test can read all artifacts in catalog order and see which records
+//! [`Sequencer`] is the builder under test. It summarizes an artifact as the number of records in it.
+//! Its artifacts list the sequence number and payload of every record they were built from, so a test can read all artifacts in catalog order and see which records
 //! are really there, not just which ranges are claimed. [`Fixture`] plays the runner by hand: it applies
 //! records, writes checkpoints, and restarts from a chosen manifest, which is how a crash is staged.
 
@@ -83,10 +84,11 @@ impl ArtifactBuilder for Sequencer {
         let size_bytes = contents.len() as u64;
         let artifact_key = artifacts.put_artifact("sealed", contents).await?;
         self.pending.clear();
-        self.pending_records.store(0, Ordering::Relaxed);
+        let record_count = self.pending_records.swap(0, Ordering::Relaxed);
         Ok(ArtifactDescriptor {
             artifact_key,
             size_bytes,
+            summary: record_count_summary(record_count),
         })
     }
 
@@ -96,15 +98,18 @@ impl ArtifactBuilder for Sequencer {
         artifacts: &ArtifactNamespace,
     ) -> Result<ArtifactDescriptor, MaterializerError> {
         let mut merged = BytesMut::new();
+        let mut record_count = 0;
         for input in inputs {
             let contents = artifacts.get_artifact(&input.artifact.artifact_key).await?;
             merged.put_slice(&contents);
+            record_count += summarized_record_count(&input.artifact);
         }
         let size_bytes = merged.len() as u64;
         let artifact_key = artifacts.put_artifact("merged", merged.freeze()).await?;
         Ok(ArtifactDescriptor {
             artifact_key,
             size_bytes,
+            summary: record_count_summary(record_count),
         })
     }
 
@@ -115,6 +120,17 @@ impl ArtifactBuilder for Sequencer {
             smallest_tier_bytes: 100,
         }
     }
+}
+
+/// The summary the builder under test gives an artifact: how many records it holds.
+fn record_count_summary(record_count: u64) -> Bytes {
+    Bytes::copy_from_slice(&record_count.to_le_bytes())
+}
+
+/// The number of records an artifact's summary states.
+fn summarized_record_count(artifact: &ArtifactDescriptor) -> u64 {
+    let stated: [u8; 8] = artifact.summary[..].try_into().expect("a summary of eight bytes");
+    u64::from_le_bytes(stated)
 }
 
 /// An artifact catalog with someone playing the runner.
@@ -592,8 +608,65 @@ fn entry(first: u64, last: u64) -> CatalogEntry {
         artifact: ArtifactDescriptor {
             artifact_key: format!("00000000000000000001/0000000000-{first}-{last}"),
             size_bytes: 10,
+            summary: Bytes::from(format!("records {first} to {last}")),
         },
     }
+}
+
+#[tokio::test]
+async fn catalog_entry_carries_what_the_builder_says_about_its_artifact() {
+    let mut fixture = Fixture::new().await;
+    fixture.apply(5, 0);
+
+    fixture.checkpoint().await;
+
+    assert_eq!(summarized_record_count(&fixture.view.entries()[0].artifact), 5);
+}
+
+#[tokio::test]
+async fn summary_of_an_artifact_is_in_the_stored_catalog() {
+    let mut fixture = Fixture::new().await;
+    fixture.apply(5, 0);
+
+    let manifest = fixture.checkpoint().await;
+
+    let stored_entries = decode_catalog(&manifest.details).expect("a valid catalog");
+    assert_eq!(summarized_record_count(&stored_entries[0].artifact), 5);
+}
+
+#[tokio::test]
+async fn merged_artifact_carries_the_summary_its_merge_gave_it() {
+    let mut fixture = Fixture::new().await;
+    fixture.seal_one_small_artifact().await;
+    fixture.seal_one_small_artifact().await;
+
+    fixture.seal_one_small_artifact().await;
+
+    assert_eq!(summarized_record_count(&fixture.view.entries()[0].artifact), 3);
+}
+
+#[tokio::test]
+async fn summaries_of_any_length_survive_the_stored_catalog() {
+    let mut without_summary = entry(1, 5);
+    without_summary.artifact.summary = Bytes::new();
+    let entries = [without_summary, entry(6, 9)];
+
+    let stored = encode_catalog(&entries);
+
+    assert_eq!(decode_catalog(&stored), Ok(entries.to_vec()));
+}
+
+#[tokio::test]
+async fn stored_catalog_of_an_earlier_format_is_refused() {
+    // Format version 1, which had no summaries, with no entry.
+    let earlier_format = Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0]);
+
+    let decoded = decode_catalog(&earlier_format);
+
+    let refused = MaterializerError::InvalidManifest {
+        reason: "the artifact catalog is not valid: it was written by another format".to_owned(),
+    };
+    assert_eq!(decoded, Err(refused));
 }
 
 #[tokio::test]

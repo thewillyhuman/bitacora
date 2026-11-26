@@ -79,6 +79,10 @@ checkpoint. Merging reads the files, never the log, because the log below the
 checkpoint may be gone. Files a merge replaced are dropped from the manifest
 and deleted by the sweep after the commit.
 
+A catalog entry also carries a summary of its file, written by the builder
+and opaque to the framework: what a reader should know before it fetches
+anything, such as the span of time the file covers.
+
 The records not sealed yet are in the builder only. `ArtifactCatalog::builder`
 gives the builder, so that a front end can take from it whatever it shares
 with readers: a workload that serves its newest data from memory keeps that
