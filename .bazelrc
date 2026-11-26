@@ -7,7 +7,8 @@ build --incompatible_strict_action_env
 
 # Speed. Pipelining lets dependent crates start as soon as metadata exists,
 # and the disk cache survives `bazel clean` and branch switches. Continuous
-# integration saves and restores the same directory.
+# integration keeps its caches in directories of its own, which
+# .github/workflows/ci.yaml saves and restores.
 build --@rules_rust//rust/settings:pipelined_compilation=True
 build --disk_cache=~/.cache/bitacora/bazel-disk
 # The disk cache is shared by every checkout and worktree of the repository

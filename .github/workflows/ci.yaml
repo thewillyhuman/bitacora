@@ -40,7 +40,21 @@ jobs:
           bazelisk-cache: true
           disk-cache: ci
           repository-cache: true
+      # setup-bazel points Bazel at ~/.cache/bazel-disk and saves that
+      # directory as the job leaves it: what it restored plus what this run
+      # added. Entries that no build asks for any more would pile up, and
+      # every later run would download and unpack them. Bazel refreshes the
+      # modification time of each entry it uses, also of one it does not
+      # download, so an entry that is not newer than this marker was not used
+      # by the build that follows. Those are removed once the build passed.
+      - name: Mark the start of the build
+        run: touch "${RUNNER_TEMP}/build-started"
       - run: bazel test --config=ci //...
+      - name: Keep in the cache only what this build used
+        run: |
+          du -sh ~/.cache/bazel-disk
+          find ~/.cache/bazel-disk -type f ! -newer "${RUNNER_TEMP}/build-started" -delete
+          du -sh ~/.cache/bazel-disk
       # How much room the run had left, also when it failed: the next time
       # the disk fills up, the log shows it coming.
       - name: Report disk usage
