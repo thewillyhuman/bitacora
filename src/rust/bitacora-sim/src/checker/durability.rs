@@ -12,7 +12,8 @@
 //!
 //! - [`require_commit_to_be_what_was_read`]: a committed record against what readers found at its sequence number
 //!   during the run.
-//! - [`check_audit`]: every committed record against the one read of the whole stream after healing.
+//! - [`check_audit`]: every committed record against the one read of the whole stream after healing. It gathers an
+//!   `AuditedHistory` from the events and then holds every committed append against it.
 //!
 //! # How it works
 //!
@@ -52,6 +53,64 @@ struct CommittedAppend {
     operation: u64,
     /// Where the writer reported the record committed.
     sequence: SequenceNumber,
+}
+
+/// What a history says about the audit's read and about the appends it is held against.
+struct AuditedHistory {
+    /// The payload the audit was handed at each sequence number.
+    audited: BTreeMap<SequenceNumber, Bytes>,
+    /// Where the audit started reading. Records below it were truncated before the audit.
+    audited_from: SequenceNumber,
+    /// The payload every append was called with.
+    payload_by_operation: BTreeMap<u64, Bytes>,
+    /// The appends that were reported as committed, in the order they finished.
+    committed_appends: Vec<CommittedAppend>,
+}
+
+impl AuditedHistory {
+    /// Gathers from `events` what the session `audit_session` read and what was appended.
+    fn gather(events: &[TimedEvent], audit_session: u64) -> Self {
+        let mut history = Self {
+            audited: BTreeMap::new(),
+            audited_from: SequenceNumber::FIRST,
+            payload_by_operation: BTreeMap::new(),
+            committed_appends: Vec::new(),
+        };
+        for timed in events {
+            match &timed.event {
+                Event::ReaderStarted { session, from_sequence } if *session == audit_session => {
+                    history.audited_from = *from_sequence;
+                }
+                Event::RecordRead {
+                    session,
+                    sequence,
+                    payload,
+                } if *session == audit_session => {
+                    history.audited.insert(*sequence, payload.clone());
+                }
+                Event::AppendInvoked { operation, payload } => {
+                    history.payload_by_operation.insert(*operation, payload.clone());
+                }
+                Event::AppendFinished {
+                    operation,
+                    outcome: AppendOutcome::Committed { sequence, .. },
+                } => history.committed_appends.push(CommittedAppend {
+                    operation: *operation,
+                    sequence: *sequence,
+                }),
+                _ => {}
+            }
+        }
+        history
+    }
+
+    /// Whether the audit should have been handed the record of `committed` and was not: the record lies at or above
+    /// the position the audit started at, and what the audit read there is not the payload of that append.
+    fn is_missing(&self, committed: &CommittedAppend) -> bool {
+        let was_truncated_before_the_audit = committed.sequence < self.audited_from;
+        let was_audited = self.audited.get(&committed.sequence) == self.payload_by_operation.get(&committed.operation);
+        !was_truncated_before_the_audit && !was_audited
+    }
 }
 
 /// Requires that what readers found at `sequence`, if they read it, is the record of the append that was reported
@@ -126,41 +185,10 @@ pub(super) fn require_commit_to_be_what_was_read(
 /// ```
 #[must_use]
 pub fn check_audit(events: &[TimedEvent], audit_session: u64) -> Vec<Violation> {
-    let mut audited: BTreeMap<SequenceNumber, Bytes> = BTreeMap::new();
-    let mut audited_from = SequenceNumber::FIRST;
-    let mut payload_by_operation: BTreeMap<u64, Bytes> = BTreeMap::new();
-    let mut committed_appends = Vec::new();
-    for timed in events {
-        match &timed.event {
-            Event::ReaderStarted { session, from_sequence } if *session == audit_session => {
-                audited_from = *from_sequence;
-            }
-            Event::RecordRead {
-                session,
-                sequence,
-                payload,
-            } if *session == audit_session => {
-                audited.insert(*sequence, payload.clone());
-            }
-            Event::AppendInvoked { operation, payload } => {
-                payload_by_operation.insert(*operation, payload.clone());
-            }
-            Event::AppendFinished {
-                operation,
-                outcome: AppendOutcome::Committed { sequence, .. },
-            } => committed_appends.push(CommittedAppend {
-                operation: *operation,
-                sequence: *sequence,
-            }),
-            _ => {}
-        }
-    }
-
+    let history = AuditedHistory::gather(events, audit_session);
     let mut violations = Vec::new();
-    for committed in committed_appends {
-        let was_truncated_before_the_audit = committed.sequence < audited_from;
-        let was_audited = audited.get(&committed.sequence) == payload_by_operation.get(&committed.operation);
-        if !was_truncated_before_the_audit && !was_audited {
+    for committed in &history.committed_appends {
+        if history.is_missing(committed) {
             violations.push(Violation::CommittedRecordMissing {
                 operation: committed.operation,
                 sequence: committed.sequence,

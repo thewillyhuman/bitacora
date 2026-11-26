@@ -49,11 +49,11 @@
 //! - A history is reported as not linearizable only if no order exists. There are no false alarms.
 //! - A history is passed only if an order was found. There is no "probably fine".
 //! - The verdict depends only on the events, so a seed that fails keeps failing.
-//! - `judge_key` is one function of some seventy lines. It is the loop the whole check spends its time in, and its
-//!   state (what is placed, the value, the steps taken, the states seen) is changed and undone together; split over
-//!   several functions, each would need all of it.
+//! - The state of the search (what is placed, the value, the steps taken, the states seen) lives in one `Search` and
+//!   is changed and undone only by its methods: `enter` does what `take_back_last_step` undoes.
 //! - The search works on small numbers, not on values: a value is numbered once per key, and a state of the search is a
-//!   bit set and a number. Nothing is allocated per step but the remembered state.
+//!   bit set and a number. Nothing is allocated per step but the remembered state. Splitting the loop into the methods
+//!   of `Search` did not change that; its speed was not measured beyond the tests of its cost.
 //!
 //! # See also
 //!
@@ -71,6 +71,9 @@ use crate::history::{Event, KvCall, KvOutcome, TimedEvent};
 /// How many states the search for one key may reach before it gives up. A clean run of the simulator stays three orders
 /// of magnitude below it.
 const MAX_STATES_PER_KEY: usize = 400_000;
+
+/// The number that stands for "the key does not exist" among the numbered values of a key.
+const ABSENT: u32 = 0;
 
 /// What a call did to the value of its key, or learned about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,35 +201,61 @@ fn calls_by_key(events: &[TimedEvent]) -> BTreeMap<Bytes, Vec<Call>> {
                 let Some(contribution) = contribution_of(&returned.call, Some(outcome)) else {
                     continue;
                 };
-                calls_by_key.entry(returned.call.key().clone()).or_default().push(Call {
-                    operation: *operation,
-                    invoked_at: returned.invoked_at,
-                    returned_at: contribution.binds_at_return.then_some(position),
-                    effect: contribution.effect,
-                });
+                let returned_at = contribution.binds_at_return.then_some(position);
+                add_to_its_key(
+                    &mut calls_by_key,
+                    *operation,
+                    &returned,
+                    returned_at,
+                    contribution.effect,
+                );
             }
             _other => {}
         }
     }
-    // What never returned belongs to clients that crashed.
-    for (operation, never_returned) in in_flight {
-        let Some(contribution) = contribution_of(&never_returned.call, None) else {
-            continue;
-        };
-        calls_by_key
-            .entry(never_returned.call.key().clone())
-            .or_default()
-            .push(Call {
-                operation,
-                invoked_at: never_returned.invoked_at,
-                returned_at: None,
-                effect: contribution.effect,
-            });
-    }
+    add_calls_that_never_returned(&mut calls_by_key, &in_flight);
     for calls in calls_by_key.values_mut() {
         calls.sort_by_key(|call| call.invoked_at);
     }
     calls_by_key
+}
+
+/// Adds the calls that were still in flight when the history ended, which belong to clients that crashed. A write
+/// among them may take effect at any later moment, or never; a read promises nothing and is left out.
+fn add_calls_that_never_returned(
+    calls_by_key: &mut BTreeMap<Bytes, Vec<Call>>,
+    in_flight: &BTreeMap<u64, InFlightCall>,
+) {
+    for (operation, never_returned) in in_flight {
+        let Some(contribution) = contribution_of(&never_returned.call, None) else {
+            continue;
+        };
+        add_to_its_key(calls_by_key, *operation, never_returned, None, contribution.effect);
+    }
+}
+
+/// Adds the call that `begun` started to the group of its key.
+///
+/// # Arguments
+///
+/// * `calls_by_key` - The groups built so far.
+/// * `operation` - The call's identifier in the history.
+/// * `begun` - What was called, and where in the history it began.
+/// * `returned_at` - Where it returned, if that bounds the moment it took effect.
+/// * `effect` - What the call did or saw.
+fn add_to_its_key(
+    calls_by_key: &mut BTreeMap<Bytes, Vec<Call>>,
+    operation: u64,
+    begun: &InFlightCall,
+    returned_at: Option<usize>,
+    effect: Effect,
+) {
+    calls_by_key.entry(begun.call.key().clone()).or_default().push(Call {
+        operation,
+        invoked_at: begun.invoked_at,
+        returned_at,
+        effect,
+    });
 }
 
 /// Works out what a call contributes to the search, given how it ended: its effect, and whether the moment it returned
@@ -288,7 +317,7 @@ fn without_puts_nobody_observed(calls: Vec<Call>) -> Vec<Call> {
 struct Register {
     /// The calls, in the order they began.
     calls: Vec<Call>,
-    /// For each call, the number of the value it wrote or read. Zero stands for "absent".
+    /// For each call, the number of the value it wrote or read. [`ABSENT`] stands for a key that does not exist.
     value_of_call: Vec<u32>,
     /// The order in which candidates are tried: calls that must take effect first, then optional ones. Trying the
     /// certain before the speculative is what finds the order of a correct history fast.
@@ -300,20 +329,7 @@ struct Register {
 impl Register {
     /// Numbers the values of the calls and fixes the order candidates are tried in.
     fn new(calls: &[Call]) -> Self {
-        let mut number_of_value: BTreeMap<Bytes, u32> = BTreeMap::new();
-        let mut value_of_call = Vec::with_capacity(calls.len());
-        for call in calls {
-            let (Effect::Write(value) | Effect::Read(value)) = &call.effect;
-            let number = match value {
-                None => 0,
-                Some(value) => {
-                    let next_number =
-                        u32::try_from(number_of_value.len() + 1).expect("a history has far fewer than 2^32 values");
-                    *number_of_value.entry(value.clone()).or_insert(next_number)
-                }
-            };
-            value_of_call.push(number);
-        }
+        let value_of_call = numbered_values(calls);
         let mut candidate_order = Vec::with_capacity(calls.len());
         for (position, call) in calls.iter().enumerate() {
             if call.returned_at.is_some() {
@@ -333,6 +349,26 @@ impl Register {
             required_count,
         }
     }
+}
+
+/// Gives every call the number of the value it wrote or read: zero for "absent", and the same number for the same
+/// value, counted from one in the order the values first appear.
+fn numbered_values(calls: &[Call]) -> Vec<u32> {
+    let mut number_of_value: BTreeMap<Bytes, u32> = BTreeMap::new();
+    let mut value_of_call = Vec::with_capacity(calls.len());
+    for call in calls {
+        let (Effect::Write(value) | Effect::Read(value)) = &call.effect;
+        let number = match value {
+            None => ABSENT,
+            Some(value) => {
+                let next_number =
+                    u32::try_from(number_of_value.len() + 1).expect("a history has far fewer than 2^32 values");
+                *number_of_value.entry(value.clone()).or_insert(next_number)
+            }
+        };
+        value_of_call.push(number);
+    }
+    value_of_call
 }
 
 /// Which calls an attempt has placed so far: one bit per call.
@@ -376,6 +412,143 @@ struct Step {
     next_candidate: usize,
 }
 
+/// The state of the search for one key: the order built so far, and what is needed to take its last step back.
+struct Search {
+    /// The calls of the key, with their values as numbers.
+    register: Register,
+    /// Which calls the current attempt has placed.
+    placed: Placed,
+    /// The value of the key after the calls placed so far.
+    value: u32,
+    /// How many of the placed calls must take effect.
+    required_placed: usize,
+    /// The steps of the current attempt, the start first. Empty once every attempt was abandoned.
+    steps: Vec<Step>,
+    /// Every state an attempt reached, so that none is explored twice.
+    seen_states: BTreeSet<(Placed, u32)>,
+    /// The most calls that must take effect that any attempt placed.
+    most_required_placed: usize,
+    /// The call that the attempt which got furthest could not get past.
+    stuck_at_operation: Option<u64>,
+}
+
+/// What trying the candidates of the current state led to.
+enum Advance {
+    /// A call was placed, and the search is in a state it had not seen.
+    EnteredNewState,
+    /// No candidate leads to a state the search has not seen.
+    DeadEnd,
+    /// The budget of states ran out.
+    OutOfBudget,
+}
+
+impl Search {
+    /// The search for an order of `calls`, before its first step.
+    fn new(calls: &[Call]) -> Self {
+        let register = Register::new(calls);
+        let placed = Placed::none_of(calls.len());
+        let stuck_at_operation = first_to_return(&register, &placed);
+        Self {
+            register,
+            placed,
+            value: ABSENT,
+            required_placed: 0,
+            steps: vec![Step {
+                placed_call: None,
+                value_before: ABSENT,
+                next_candidate: 0,
+            }],
+            seen_states: BTreeSet::new(),
+            most_required_placed: 0,
+            stuck_at_operation,
+        }
+    }
+
+    /// Whether every call that must take effect is placed, which makes the calls placed so far a valid order.
+    fn is_complete(&self) -> bool {
+        self.required_placed == self.register.required_count
+    }
+
+    /// Tries the candidates the current state has not tried yet, until one leads to a state the search has not seen.
+    fn place_next_candidate(&mut self, max_states: usize) -> Advance {
+        let earliest_return = earliest_return_of_unplaced(&self.register, &self.placed);
+        while let Some(position) = self.take_next_candidate() {
+            let Some(value_after) = self.value_after_placing(position, earliest_return) else {
+                continue;
+            };
+            self.placed.insert(position);
+            if !self.seen_states.insert((self.placed.clone(), value_after)) {
+                self.placed.remove(position);
+                continue;
+            }
+            if self.seen_states.len() > max_states {
+                return Advance::OutOfBudget;
+            }
+            self.enter(position, value_after);
+            return Advance::EnteredNewState;
+        }
+        Advance::DeadEnd
+    }
+
+    /// Takes the next entry of the candidate order that the current state has not tried, if one is left.
+    fn take_next_candidate(&mut self) -> Option<usize> {
+        let step = self.steps.last_mut()?;
+        let position = *self.register.candidate_order.get(step.next_candidate)?;
+        step.next_candidate += 1;
+        Some(position)
+    }
+
+    /// The value the key has once the call at `position` is placed next, or `None` if it cannot come next: it is
+    /// placed already, it began after `earliest_return`, or it is a read that returned another value than the
+    /// current one.
+    fn value_after_placing(&self, position: usize, earliest_return: usize) -> Option<u32> {
+        let call = &self.register.calls[position];
+        if self.placed.contains(position) || call.invoked_at >= earliest_return {
+            return None;
+        }
+        let value_of_call = self.register.value_of_call[position];
+        match call.effect {
+            Effect::Write(_) => Some(value_of_call),
+            Effect::Read(_) if value_of_call == self.value => Some(self.value),
+            Effect::Read(_) => None,
+        }
+    }
+
+    /// Makes the call at `position`, which is marked as placed already, the last step of the attempt, and remembers
+    /// the call this attempt is stuck at if it got further than any before it.
+    fn enter(&mut self, position: usize, value_after: u32) {
+        if self.register.calls[position].returned_at.is_some() {
+            self.required_placed += 1;
+        }
+        self.steps.push(Step {
+            placed_call: Some(position),
+            value_before: self.value,
+            next_candidate: 0,
+        });
+        self.value = value_after;
+        if self.required_placed > self.most_required_placed {
+            self.most_required_placed = self.required_placed;
+            self.stuck_at_operation = first_to_return(&self.register, &self.placed);
+        }
+    }
+
+    /// Takes the last step back, because every candidate from the state it led to leads nowhere. Undoes what
+    /// [`Search::enter`] did, except for what the attempt taught: the states seen and the call it was stuck at.
+    fn take_back_last_step(&mut self) {
+        let Some(abandoned) = self.steps.pop() else {
+            return;
+        };
+        let Some(position) = abandoned.placed_call else {
+            return;
+        };
+        self.placed.remove(position);
+        self.value = abandoned.value_before;
+        if self.register.calls[position].returned_at.is_some() {
+            self.required_placed -= 1;
+        }
+    }
+}
+
 /// Searches for an order of `calls`, reaching at most `max_states` states.
 ///
 /// # Arguments
@@ -383,76 +556,19 @@ struct Step {
 /// * `calls` - The calls of one key, in the order they began.
 /// * `max_states` - The budget. Tests pass a small one to see the search give up.
 fn judge_key(calls: &[Call], max_states: usize) -> Verdict {
-    let register = Register::new(calls);
-    let mut placed = Placed::none_of(calls.len());
-    let mut value = 0;
-    let mut required_placed = 0;
-    let mut seen_states: BTreeSet<(Placed, u32)> = BTreeSet::new();
-    let mut most_required_placed = 0;
-    let mut stuck_at_operation = first_to_return(&register, &placed);
-    let mut steps = vec![Step {
-        placed_call: None,
-        value_before: 0,
-        next_candidate: 0,
-    }];
-
-    while let Some(step) = steps.last_mut() {
-        if required_placed == register.required_count {
+    let mut search = Search::new(calls);
+    while !search.steps.is_empty() {
+        if search.is_complete() {
             return Verdict::Linearizable;
         }
-        let earliest_return = earliest_return_of_unplaced(&register, &placed);
-        let mut entered_a_new_state = false;
-        while step.next_candidate < register.candidate_order.len() {
-            let position = register.candidate_order[step.next_candidate];
-            step.next_candidate += 1;
-            let call = &register.calls[position];
-            if placed.contains(position) || call.invoked_at >= earliest_return {
-                continue;
-            }
-            let value_after = match call.effect {
-                Effect::Write(_) => register.value_of_call[position],
-                Effect::Read(_) if register.value_of_call[position] == value => value,
-                Effect::Read(_) => continue,
-            };
-            placed.insert(position);
-            if !seen_states.insert((placed.clone(), value_after)) {
-                placed.remove(position);
-                continue;
-            }
-            if seen_states.len() > max_states {
-                return Verdict::Undecided;
-            }
-            if call.returned_at.is_some() {
-                required_placed += 1;
-            }
-            steps.push(Step {
-                placed_call: Some(position),
-                value_before: value,
-                next_candidate: 0,
-            });
-            value = value_after;
-            entered_a_new_state = true;
-            break;
-        }
-        if entered_a_new_state {
-            if required_placed > most_required_placed {
-                most_required_placed = required_placed;
-                stuck_at_operation = first_to_return(&register, &placed);
-            }
-            continue;
-        }
-        // Every candidate from this state leads nowhere: take the last call back.
-        let abandoned = steps.pop().expect("the loop runs only while a step is left");
-        if let Some(position) = abandoned.placed_call {
-            placed.remove(position);
-            value = abandoned.value_before;
-            if register.calls[position].returned_at.is_some() {
-                required_placed -= 1;
-            }
+        match search.place_next_candidate(max_states) {
+            Advance::EnteredNewState => {}
+            Advance::DeadEnd => search.take_back_last_step(),
+            Advance::OutOfBudget => return Verdict::Undecided,
         }
     }
     Verdict::NotLinearizable {
-        stuck_at_operation: stuck_at_operation.unwrap_or_default(),
+        stuck_at_operation: search.stuck_at_operation.unwrap_or_default(),
     }
 }
 
