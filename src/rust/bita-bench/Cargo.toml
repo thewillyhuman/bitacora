@@ -22,13 +22,11 @@ thiserror.workspace = true
 # A load generator must not be limited to one core: the workers of a workload
 # run on all of them.
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-toml.workspace = true
 
 [dev-dependencies]
 bitacora-meta.workspace = true
 bitacora-testkit.workspace = true
 bitacora-types.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [lints]

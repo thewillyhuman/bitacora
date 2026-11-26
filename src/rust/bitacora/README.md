@@ -33,6 +33,7 @@ configuration that can never work is refused when connecting.
 | --- | --- |
 | `src/lib.rs` | The re-exported API |
 | `src/cluster.rs` | The configuration and the connecting |
+| `src/config_file.rs` | From a configuration file and a tool's options to a configuration |
 | `src/cluster_test.rs` | Their tests |
 
 ## Dependencies

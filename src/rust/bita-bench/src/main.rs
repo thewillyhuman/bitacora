@@ -12,9 +12,9 @@
 //! - `main`: parses the command line, finds the cluster, runs the workload and prints the report, with
 //!   one function per step: `print_usage_error`, `run`, `client_settings`, `requested_workload`,
 //!   `run_append`, `run_read`.
-//! - The modules of the tool: `arguments` (the command line), `cluster` (finding the cluster), `workload`
-//!   (driving and measuring), `histogram` and `pacing` (the measuring instruments), `report` (the
-//!   output).
+//! - The modules of the tool: `arguments` (the command line), `workload` (driving and measuring),
+//!   `histogram` and `pacing` (the measuring instruments), `report` (the output). The cluster is found by
+//!   `bitacora::resolve_cluster_config`, as in every tool that takes a configuration file and options.
 //!
 //! # How it works
 //!
@@ -48,16 +48,14 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use bitacora::{BitacoraClient, ClientSettings, ClusterConfig, TakeoverPolicy, WriterSettings};
+use bitacora::{BitacoraClient, ClientSettings, ClusterConfig, TakeoverPolicy, WriterSettings, resolve_cluster_config};
 use clap::Parser;
 
 use crate::arguments::{Arguments, WorkloadCommand, workload_limit};
-use crate::cluster::resolve_cluster_config;
 use crate::report::{AppendReport, OutputFormat, ReadReport};
 use crate::workload::{AppendWorkload, ReadWorkload, create_missing_streams, run_append_workloads, run_read_workload};
 
 mod arguments;
-mod cluster;
 mod histogram;
 mod pacing;
 mod report;

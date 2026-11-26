@@ -40,6 +40,7 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 mod cluster;
+mod config_file;
 
 pub use bitacora_client::{
     AppendError, BitacoraClient, ClientSettings, OpenError, ReadError, ReaderSettings, RecordStream, StreamAdmin,
@@ -50,3 +51,4 @@ pub use cluster::{
     ClusterConfig, ConnectError, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig, connect, connect_key_value_store,
     connect_metadata, open_object_store, replica_connector,
 };
+pub use config_file::{ClusterConfigError, resolve_cluster_config};

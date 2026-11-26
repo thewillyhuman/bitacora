@@ -1,4 +1,4 @@
-//! Tests of finding the cluster to benchmark.
+//! Tests of working out which cluster a tool is to use.
 //!
 //! # What is covered
 //!

@@ -1,23 +1,24 @@
-//! Finding the cluster to benchmark.
+//! Working out which cluster a tool is to use, from a configuration file and from options.
 //!
 //! # Why this file exists
 //!
-//! The benchmark drives a real cluster, so it has to be told which one. It takes the same configuration
-//! file as every other process of a deployment, or the etcd endpoints directly. This file reads the one
-//! and applies the other.
+//! A tool that drives a real cluster has to be told which one. Every tool takes the same configuration file as
+//! the daemons of a deployment, or the etcd endpoints directly, and each used to read the file and apply the
+//! options with code of its own. The file is also the only way to name the object store, which a tool needs as
+//! soon as segments are tiered. This file is that step, once, for the tools that take a file and options.
 //!
 //! # What it contains
 //!
-//! - [`resolve_cluster_config`]: from the cluster options to a cluster configuration.
+//! - [`resolve_cluster_config`]: from a named file and the cluster options to a [`ClusterConfig`].
 //! - [`ClusterConfigError`]: why no usable configuration was found.
 //!
 //! # How it works
 //!
-//! The configuration file, if one is named, is TOML holding a `bitacora::ClusterConfig`. Endpoints and a
-//! key prefix given as options replace the file's. Unlike `bita`, the tool reads no environment
-//! variables: the command line of a benchmark should say everything about the run.
+//! The configuration file, if one is named, is TOML holding a [`ClusterConfig`]. Endpoints and a key prefix given
+//! as options replace the file's; the object store can only come from the file. No environment variable is read
+//! here: a tool that takes values from the environment, as `bita` does, looks them up itself.
 //!
-//! A configuration without any etcd endpoint is refused: the tool never guesses a cluster to load.
+//! A configuration without any etcd endpoint is refused: a tool never guesses a cluster.
 //!
 //! # Invariants
 //!
@@ -25,17 +26,19 @@
 //!
 //! # See also
 //!
-//! - `bitacora/src/cluster.rs`: the configuration structure and the connecting.
-//! - `bita/src/cluster.rs`: the same question answered for the operator's tool.
+//! - `cluster.rs`: the configuration structure and the connecting.
+//! - `bita-bench` and `bita-soak`: the tools that call this. `bita` still answers the same question with code of
+//!   its own, because it also reads the environment.
 
 use std::path::{Path, PathBuf};
 
-use bitacora::{ClusterConfig, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig};
 use thiserror::Error;
+
+use crate::cluster::{ClusterConfig, DEFAULT_ETCD_KEY_PREFIX, ObjectStoreConfig};
 
 /// Why no usable cluster configuration was found.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub(crate) enum ClusterConfigError {
+pub enum ClusterConfigError {
     /// Neither a file nor an endpoint was given.
     #[error("no cluster given: use --config or --etcd-endpoint")]
     NoClusterGiven,
@@ -57,25 +60,43 @@ pub(crate) enum ClusterConfigError {
     },
 }
 
-/// Works out which cluster to benchmark.
+/// Works out which cluster a tool is to use.
+///
+/// Reads the named file, if there is one, and lets the options replace what it says. Nothing is connected.
 ///
 /// # Arguments
 ///
-/// * `config_path` - The configuration file named with `--config`, if any.
-/// * `etcd_endpoints` - The endpoints given with `--etcd-endpoint`. If there are any, they replace the
-///   file's.
-/// * `etcd_key_prefix` - The prefix given with `--etcd-key-prefix`, which replaces the file's.
+/// * `config_path` - The configuration file the tool was given, if any.
+/// * `etcd_endpoints` - The endpoints the tool was given as options. If there are any, they replace the file's.
+/// * `etcd_key_prefix` - The key prefix the tool was given as an option, which replaces the file's.
 ///
 /// # Returns
 ///
-/// The cluster configuration, with at least one etcd endpoint.
+/// The cluster configuration, with at least one etcd endpoint. Its object store is the file's, or none without a
+/// file.
 ///
 /// # Errors
 ///
 /// * [`ClusterConfigError::UnreadableFile`] if the named file cannot be read.
 /// * [`ClusterConfigError::InvalidFile`] if it is not TOML, misses a required value or has an unknown one.
 /// * [`ClusterConfigError::NoClusterGiven`] if no etcd endpoint is known in the end.
-pub(crate) fn resolve_cluster_config(
+///
+/// # Examples
+///
+/// ```
+/// use bitacora::{ClusterConfigError, ObjectStoreConfig, resolve_cluster_config};
+///
+/// let endpoints = ["http://10.0.0.1:2379".to_owned()];
+///
+/// let from_options = resolve_cluster_config(None, &endpoints, None)?;
+/// let from_nothing = resolve_cluster_config(None, &[], None);
+///
+/// assert_eq!(from_options.etcd_endpoints, endpoints);
+/// assert_eq!(from_options.object_store, ObjectStoreConfig::None);
+/// assert_eq!(from_nothing, Err(ClusterConfigError::NoClusterGiven));
+/// # Ok::<(), ClusterConfigError>(())
+/// ```
+pub fn resolve_cluster_config(
     config_path: Option<&Path>,
     etcd_endpoints: &[String],
     etcd_key_prefix: Option<&str>,
@@ -121,5 +142,5 @@ fn read_config_file(path: &Path) -> Result<ClusterConfig, ClusterConfigError> {
 }
 
 #[cfg(test)]
-#[path = "cluster_test.rs"]
+#[path = "config_file_test.rs"]
 mod tests;

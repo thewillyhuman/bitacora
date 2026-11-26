@@ -190,10 +190,8 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
  "tokio",
- "toml 1.2.3+spec-1.1.0",
 ]
 
 [[package]]
@@ -279,6 +277,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml 1.2.3+spec-1.1.0",
 ]
 
 [[package]]

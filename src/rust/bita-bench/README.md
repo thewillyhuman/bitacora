@@ -46,7 +46,6 @@ under a virtual clock: a "ten second" run takes no real time in the tests.
 | --- | --- |
 | `src/main.rs` | The entry point: parse, find the cluster, connect, run, print |
 | `src/arguments.rs` | The command line, as `clap` types |
-| `src/cluster.rs` | From the cluster options to a cluster configuration |
 | `src/workload.rs` | The append and read workloads and what they measure |
 | `src/histogram.rs` | The latency histogram |
 | `src/pacing.rs` | When each send of a paced workload is due |
