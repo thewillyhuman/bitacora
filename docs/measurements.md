@@ -3,8 +3,10 @@
 What bitacora did on real machines, and what it did not do. This page holds the runs that were made, with
 enough about each to repeat it; [benchmark.md](benchmark.md) describes the tool that made them.
 
-There is one environment so far, and it is not the one the design's targets assume. Read the numbers as
-"bitacora on network block storage", not as what bitacora can do.
+There are two environments so far. Everything up to "On local NVMe disks" ran on virtual machines with
+network block storage: read those numbers as "bitacora on network block storage", not as what bitacora can
+do. "On local NVMe disks" ran on four bare-metal machines with local disks, which is closer to what the
+design's targets assume, with a network that turned out to be the limit.
 
 ## The environment
 
@@ -142,8 +144,8 @@ Section 16 of the design proposes targets for three replicas on NVMe disks with 
 | Write unavailability on writer failover | 5 s | | Not measured: a forced takeover was over within the five seconds its pod took to start, run and stop |
 | Write pause on a replica-failure roll | 200 ms | 157 ms | Met in the one run made with a replica that was killed. Not met when a zone was cut off the network instead: the worst append then took 15 to 31 s, see "A soak" |
 
-None of this says whether the targets hold on the disks they were written for. That takes a run on such
-disks.
+None of this says whether the targets hold on the disks they were written for. "On local NVMe disks"
+below is the first run on such disks.
 
 ## Failures and an upgrade
 
@@ -264,6 +266,130 @@ The drills with a lost disk and with a replica that was away were made before th
 whether the rules for a replica that is not registered and for segments that miss copies fire in time was
 not seen.
 
+## On local NVMe disks
+
+### The environment
+
+- **Cluster.** Kubernetes 1.36 on four bare-metal workers in one site, each with 64 CPUs and 252 GiB of
+  memory. The workers carry no zone labels, so the chart ran with `replica.zoneAware=false`: a stream's
+  three copies are on three different machines, and nothing more is known about where they are.
+- **Disks.** Each worker has about 10 TiB of local NVMe storage, which the cluster hands out as logical
+  volumes (TopoLVM). Whether the disks have power-loss protection, as the design assumes, is not known.
+  Making a small write durable took 58 µs on average with one append in flight
+  (`bitacora_disk_flush_duration_seconds`), and never more than 3.2 ms for 99 in 100 in any run.
+- **Network.** One 10 GbE link per machine, and a pod network that is an overlay (VXLAN) with an MTU of
+  1500. iperf3 between two pods on different machines moved 4.5 Gbit/s on one connection and 6.35 Gbit/s
+  on four. With twelve connections, three machines sent 9.1 Gbit/s together into a fourth, and one
+  machine sent 9.1 Gbit/s to the three others. That is the most a machine sends or receives here.
+- **bitacora.** `0.1.0-rc.9` (commit `b61038a`), with three replicas on volumes of 500 GiB, two
+  controllers, and a three-member etcd on volumes of 10 GiB, one member on each of three machines.
+  Streams had three replicas and a write quorum of two, so with three replicas every stream is on all of
+  them.
+- **Load.** First one `bita-bench` pod on the fourth machine, which ran no replica and no etcd member, as
+  `development/kubernetes/run.sh bench` places it. Then up to twelve pods at once, created by hand with the
+  same image and arguments and pinned to machines, so that some shared a machine with a replica. CPU
+  figures are one sample of `kubectl top`, 45 seconds into the run.
+
+Every run lasted 60 seconds and was made once.
+
+### Appends from one client
+
+The workloads of "Appends", "What limits one stream" and "Many streams" above, on the new machines. Records
+of 1 KiB unless the row says otherwise, requests of up to 4 MiB.
+
+| Workload | Records/s | MiB/s | p50 | p99 | Worst | Network block storage, for comparison |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 append in flight | 1,822 | 1.8 | 0.58 ms | 0.70 ms | 2.8 ms | 120 records/s, p50 7.7 ms, p99 18.4 ms |
+| 16 appends in flight | 19,444 | 19.0 | 0.85 ms | 1.02 ms | 6.3 ms | 1,164 records/s, 13.6 ms, 24.1 ms |
+| 64 in flight | 56,656 | 55.3 | 1.15 ms | 1.41 ms | 7.4 ms | 4,333 records/s, 14.6 ms, 26.1 ms |
+| 256 in flight | 111,099 | 108.5 | 2.3 ms | 3.0 ms | 12.6 ms | 15,892 records/s, 15.6 ms, 27.1 ms |
+| 64 in flight, 16 records per append | 215,916 | 210.9 | 4.7 ms | 6.7 ms | 18.2 ms | |
+| 64 in flight, 64 records per append | 239,174 | 233.6 | 16.9 ms | 26.6 ms | 46.5 ms | |
+| 256 in flight, 16 records per append | 235,729 | 230.2 | 17.4 ms | 26.6 ms | 51.9 ms | 95.7 MiB/s, p50 41 ms |
+| 16 in flight, records of 64 KiB | 3,441 | 215.1 | 4.7 ms | 6.1 ms | 27.3 ms | |
+| 128 in flight, records of 64 KiB | 3,472 | 217.0 | 36.9 ms | 51.2 ms | 102 ms | 111.4 MiB/s, p50 70 ms, p99 164 ms |
+| 4 streams, each 64 in flight, 16 records per append | 258,457 | 252.4 | 14.6 ms | 31.2 ms | 51.8 ms | 118.4 MiB/s (256 in flight) |
+| 16 streams, the same | 185,085 | 180.7 | 98 ms | 135 ms | 178 ms | 240.3 MiB/s, p50 63 ms, p99 123 ms |
+| 64 streams, each 16 in flight, 16 records per append | 174,840 | 170.7 | 96 ms | 156 ms | 203 ms | 128.8 MiB/s, 129 ms, 209 ms |
+| 128 streams, each 4 in flight, 1 record per append | 40,647 | 39.7 | 12.8 ms | 17.4 ms | 43.8 ms | 1.9 MiB/s, 270 ms, 500 ms |
+
+A scan of the stream of the 256-in-flight run read 236,363 records a second, 230.8 MiB/s.
+
+With one append in flight an append took 0.58 ms. A replica answered the request in 95 µs, of which the
+flush took 58 µs; the rest is the network to two replicas and back and the client. That is the design's
+account of where the time goes, on the disks it assumes.
+
+### What limits one client
+
+One client stopped at about 250 MiB/s whatever it was asked to do: bigger appends, bigger records, more
+streams. The disks were not the limit. In the runs of one stream, each replica spent 9% to 25% of the
+time flushing, and as the load grew the replicas got fewer requests and larger ones: from 2,964 requests a
+second of 1 KiB at one append in flight to 56 a second of 3.8 MiB with records of 64 KiB. A replica answered
+such a request in 3.3 ms, while the writer sent one every 18 ms. The replicas used about half a core each,
+the tool one to four cores of the 64 it had.
+
+A writer sends every record to all three replicas, so a client at 250 MiB/s sends some 6.3 Gbit/s, over
+one connection to each replica. That is what four iperf3 connections between two pods carried, and less
+than the 9.1 Gbit/s that twelve carried out of one machine. Where exactly a client's connections stop was
+not looked into. More streams in one client did not help and were slower: sixteen streams moved 181 MiB/s
+where four moved 252 MiB/s, with appends that waited nearly seven times as long.
+
+### Several clients
+
+The cluster's limit is therefore found with clients on several machines. Each client wrote four streams of
+its own, each with 64 appends in flight of 16 records of 1 KiB ("small"), or each with 32 appends in flight
+of records of 64 KiB ("large"). The first client was on the machine without a replica, the next three on
+the three machines with one, and from eight on two or three per machine. The clients started within a
+second of each other. "Each replica wrote" is the replicas' own count, `bitacora_disk_written_bytes`, over
+the same minute.
+
+| Clients | Small: MiB/s | Each replica wrote | Highest p50, p99 of a client | Large: MiB/s | Highest p50, p99 of a client |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 267 | 269 MiB/s | 13.3 ms, 30.2 ms | 259 | 27.1 ms, 61.4 ms |
+| 2 | 614 | 618 MiB/s | 12.0 ms, 27.6 ms | 617 | 24.1 ms, 56.3 ms |
+| 3 | 962 | 970 MiB/s | 12.8 ms, 29.7 ms | 975 | 25.6 ms, 58.4 ms |
+| 4 | 1,246 | 1,233 MiB/s | 12.8 ms, 32.8 ms | 1,244 | 27.1 ms, 65.5 ms |
+| 8 | 1,384 | 1,392 MiB/s | 22.5 ms, 60.4 ms | | |
+| 12 | 1,412 | 1,398 MiB/s | 34.8 ms, 84.0 ms | | |
+
+Up to four clients the total grows with every client, each keeping its 260 to 350 MiB/s. Beyond, it stops
+at about 1.4 GiB/s and the clients share it: eight moved some 170 MiB/s each and waited twice as long,
+twelve 110 to 130 MiB/s each. That is the network. With three replicas every byte reaches every replica's
+machine, except what a client on that machine writes, so with clients spread evenly each such machine
+received three quarters of what eight clients wrote, 1,384 MiB/s, which is about 8.7 Gbit/s of records, plus the protocol around them: the
+9.1 Gbit/s a machine took in with iperf3. Each replica's disk took 1.4 GiB/s meanwhile without being the
+limit. With more replicas than three, a stream's copies would spread over more machines and the cluster
+would take more; that was not tried.
+
+### Many small streams
+
+128 streams with four appends in flight each are twenty times faster here than on network block storage,
+39.7 MiB/s against 1.9, and an append took 12.8 ms where it took 270 ms. They are still slow next to one
+stream: each of a replica's 128 open segments makes its own requests durable, and a replica made 17,091
+flushes a second, of 2 KiB on average, about five at any moment. During that run each replica used 13.6 to 15.4
+cores and the tool 18. No other run used more than 1.2 cores on a replica, so most of that CPU is spent on
+the number of requests, about 0.9 ms of CPU for each; where it goes was not looked into.
+
+### Against the targets of the design
+
+| Measure | Target | Here | |
+| --- | --- | --- | --- |
+| Append latency, p50 | 2 ms | 0.58 ms | Met, with one append in flight |
+| Append latency, p99 | 10 ms | 0.70 ms | Met, the same |
+| Sustained throughput per stream | 50 MiB/s | 230 MiB/s | Met; one client's network is the limit |
+| Tail reader delay, writer failover, failure roll | | | Not measured on these machines |
+
+### A full disk
+
+The disks were not cleaned between the runs above until a run failed. By the four large clients, every
+replica was 94% full, above the 85% from which a replica takes no new segment. Two of the four clients
+ran to their end; the other two printed nothing and were still running two minutes after their minute was
+up, and were deleted. A writer that must roll and finds no standby segment does not roll and says so in
+its log, and with every replica refusing new segments none could be placed, which is most likely what
+they waited for. Their logs were lost with the pods, so that is not confirmed. Deleting the 302 streams
+the runs had made brought every replica's disk back to 0% by the time it was looked at, shortly after, and the four large clients were
+run again on clean disks; the table above holds that second run.
+
 ## What these runs found
 
 Things that no test on one machine had shown. The third is not fixed, and neither is the stall of a
@@ -310,9 +436,22 @@ zone that falls silent. Where a test now holds a fix, it is named.
   answer, sealed, for another writer's takeover. A sender now waits when it is told so during the writer's
   own roll (`bitacora-client`, `tests/writer_test.rs`). The Go client was not affected.
 
+On local NVMe disks, three more, none of them fixed or yet understood:
+
+- **One client stops at about 250 MiB/s, and more streams make it slower**, as described under "What
+  limits one client". Its machine could send more than it did.
+- **Many small streams cost a replica a lot of CPU**: about 0.9 ms for each request, 15 cores for 17,000
+  requests a second, as described under "Many small streams".
+- **A writer on full disks waited without saying so**, as described under "A full disk". To its caller an
+  append neither committed nor failed for minutes. What tells an operator are the alerts on a replica's
+  disk at 80% and 90% full ([alerts.md](operations/alerts.md)); no Prometheus ran on these machines, so
+  they were not seen.
+
 ## What was not measured
 
-- Disks like those the design assumes, and therefore whether its targets hold.
+- Whether the NVMe disks above have power-loss protection, as the design assumes.
+- On those machines: failures and upgrades, tiering, a soak, readers other than one scan, more than three
+  replicas, and a network faster than 10 GbE.
 - A reader's delay behind the writer, and the time a writer failover takes.
 - The loss of a machine, and a partition of anything but a whole zone.
 - More than 128 streams or more than five replicas.
